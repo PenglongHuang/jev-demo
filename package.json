@@ -1,0 +1,14 @@
+{
+  "name": "jev-demo",
+  "version": "1.0.0",
+  "description": "Jev 体验台 · 本地调试与体验 TypeSafe Jev (System One) 决策模型的网页 / A local playground for the TypeSafe Jev (System One) decision model",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "private": false
+}

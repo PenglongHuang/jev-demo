@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Jev 体验台 · System One 决策模型</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Ctext x='16' y='22' font-size='17' fill='white' text-anchor='middle'%3E%E2%97%87%3C/text%3E%3C/svg%3E" />
+<link rel="stylesheet" href="styles.css?v=20260923b" />
+</head>
+<body>
+
+<a class="skip-link" href="#main">跳到主内容</a>
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">◇</span>
+      Jev 体验台
+      <span class="sub">System One 决策模型</span>
+    </div>
+    <div class="topbar-spacer"></div>
+    <div class="field-inline">
+      <label for="model">模型</label>
+      <select id="model">
+        <option value="jev-latest">jev-latest</option>
+        <option value="jev-1.13.0">jev-1.13.0</option>
+      </select>
+    </div>
+    <div class="field-inline">
+      <label for="apiKey">API Key</label>
+      <input type="password" id="apiKey" placeholder="apikey_…" autocomplete="off" spellcheck="false" />
+    </div>
+  </div>
+</header>
+
+<main class="wrap" id="main">
+
+  <div class="hero">
+    <h1>一个拒绝写作的模型</h1>
+    <p>Jev 不生成文本。给它一段<strong>状态</strong>和几道<strong>类型化问题</strong>，它只回答「选哪个 / 打几分 / 是或否」，
+       并给出<strong>经过校准的概率</strong> —— 让代码可以直接 <code>if (p &gt; 0.5)</code> 拿来做判断。</p>
+  </div>
+
+  <div class="warnbar" id="warnbar" role="status"></div>
+
+  <!-- ============ 顶层 Tab：场景预设 ============ -->
+  <section class="card preset-card" aria-label="场景预设">
+    <div class="card-head">
+      <h2>场景预设</h2>
+      <span class="spacer"></span>
+      <span class="sub">POST /v1/systemone</span>
+    </div>
+    <div class="ptabs" id="presetTabs" role="tablist" aria-label="场景分组"></div>
+    <div class="preset-pane" id="presetPane" role="tabpanel" tabindex="0">
+      <div class="chips" id="presets"></div>
+      <p class="preset-desc" id="presetDesc"></p>
+    </div>
+  </section>
+
+  <div class="grid">
+
+    <!-- ============ 左：编辑区 ============ -->
+    <section class="col">
+
+      <div class="card">
+        <div class="card-head">
+          <h2>状态 · state</h2>
+          <span class="card-meta" id="stateMeta"></span>
+          <span class="spacer"></span>
+          <button class="chip" id="fmtState" type="button" hidden
+                  title="解析并把 JSON 排成多行缩进（快照等长字符串保留真实换行）">✦ 格式化</button>
+          <div class="seg" id="stateModeSeg" role="group" aria-label="state 编辑模式">
+            <button type="button" class="seg-btn active" data-mode="form" aria-pressed="true">表单</button>
+            <button type="button" class="seg-btn" data-mode="raw" aria-pressed="false">源码</button>
+          </div>
+        </div>
+        <div class="card-body">
+          <div id="stateForm" class="state-form"></div>
+          <div id="stateRawWrap" hidden>
+            <textarea id="state" style="min-height:170px;font-family:var(--mono);font-size:12.5px"
+                      placeholder="粘贴一段文本，或一个 JSON 对象…" spellcheck="false"></textarea>
+            <p class="field-tip">可以是纯文本，也可以是 JSON 对象。多行内容（如快照）可直接写真实换行和缩进，发送时自动转换。</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>问题 · questions</h2>
+          <span class="spacer"></span>
+          <span class="sub">三种类型可混用 · 并行作答</span>
+        </div>
+        <div class="card-body">
+          <div class="q-list" id="qList"></div>
+          <div class="q-actions">
+            <button class="chip" id="addQ" type="button">＋ 添加问题</button>
+            <button class="chip" id="reparseQ" type="button"
+                    title="从当前 state 的快照中重新提取所有 ref（发送时也会自动执行）">↻ 重新解析 ref</button>
+            <button class="chip" id="saveWs" type="button"
+                    title="把当前 state 与问题保存到服务端（按访问 IP 隔离，刷新页面自动恢复）">💾 保存场景</button>
+          </div>
+
+          <div class="btn-row">
+            <button class="btn-ghost" id="reset" type="button">重置</button>
+            <button class="btn-primary" id="send" type="button">
+              <span id="sendLabel">发送给 Jev</span>
+              <kbd>Ctrl ↵</kbd>
+              <span class="spin" id="spin" style="display:none" aria-hidden="true"></span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ============ 右：输出区 ============ -->
+    <section class="card out-card" aria-label="输出区">
+      <div class="card-head">
+        <h2>输出区</h2>
+        <span class="spacer"></span>
+        <span class="status-pill" id="statusPill" role="status">就绪</span>
+      </div>
+      <div class="tabs" role="tablist" aria-label="输出视图">
+        <button class="tab active" role="tab" aria-selected="true" aria-controls="paneAnswers"
+                data-pane="answers" id="tab-answers" type="button">答案</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="paneRaw"
+                data-pane="raw" id="tab-raw" type="button" disabled>原始响应</button>
+        <button class="tab" role="tab" aria-selected="false" aria-controls="paneRequest"
+                data-pane="request" id="tab-request" type="button" disabled>请求体</button>
+      </div>
+      <div class="pane active" data-pane="answers" id="paneAnswers" role="tabpanel" aria-labelledby="tab-answers" tabindex="0">
+        <div class="out-empty">
+          <div class="big" aria-hidden="true">◇</div>
+          发送后这里会显示结构化答案：<br />选项 / 分值 / 概率分布 / 置信度
+        </div>
+      </div>
+      <div class="pane" data-pane="raw" id="paneRaw" role="tabpanel" aria-labelledby="tab-raw" tabindex="0"></div>
+      <div class="pane" data-pane="request" id="paneRequest" role="tabpanel" aria-labelledby="tab-request" tabindex="0"></div>
+    </section>
+
+  </div>
+
+  <details class="api">
+    <summary>Jev 接口规范与字段速查</summary>
+    <div class="inner">
+      <h4>请求</h4>
+      <p><code>POST https://api.typesafe.ai/v1/systemone</code>，鉴权 <code>Authorization: Bearer &lt;API_KEY&gt;</code>。
+      请求体只有三个顶层字段：<code>state</code>、<code>model</code>、<code>questions</code>。</p>
+
+      <table class="spec">
+        <tr><th>问题类型</th><th>请求字段</th><th>返回字段</th></tr>
+        <tr>
+          <td><b>Choice</b></td>
+          <td><code>type:"choice"</code><br /><code>instructions</code><br /><code>criteria</code>：选项名→描述，最多 255 项</td>
+          <td><code>choice</code> 命中项<br /><code>probabilities</code> 逐项概率<br /><code>confidence</code> 0~1</td>
+        </tr>
+        <tr>
+          <td><b>Score</b></td>
+          <td><code>type:"score"</code><br /><code>instructions</code><br /><code>criteria</code>：从低到高的等级描述数组，2–10 级</td>
+          <td><code>score</code> 加权分值<br /><code>probabilities</code> <code>legend</code><br /><code>confidence</code></td>
+        </tr>
+        <tr>
+          <td><b>Noul</b></td>
+          <td><code>type:"noul"</code><br /><code>instructions</code><br /><code>criteria</code>（可选，<b>JSON 对象</b>）：<code>{"true":"…","false":"…"}</code></td>
+          <td><code>noul</code> 0~1 的"是"概率<br /><span style="color:var(--text-3)">（无 confidence，二值分布一个数即可描述）</span></td>
+        </tr>
+      </table>
+
+      <h4>三个容易踩的坑</h4>
+      <ul>
+        <li><b>问题 id 不会发给模型。</b>字典键只用于回传答案，模型只看到 <code>instructions</code> 和 <code>criteria</code>，所以选项描述必须能彼此区分。</li>
+        <li><b>Score 的分值 = 等级下标加权均值。</b>三级量表的 <code>score</code> 在 0~2 之间；<code>score=1.0</code> 可能是全压在第 1 级，也可能是第 0、2 级各半 —— 必须和 <code>probabilities</code> 合读。</li>
+        <li><b>措辞要直接。</b>官方实测：问题问得越含蓄委婉，与参考标签的一致率越低；建议让高值对应"是"。</li>
+        <li><b>Noul 的 criteria 必须是 JSON 对象</b>，不是纯文本。传 <code>"true = …; false = …"</code> 会直接被拒（HTTP 422），要写成 <code>{"true":"…","false":"…"}</code>。</li>
+      </ul>
+
+      <h4>官方约束（2026-09 数据）</h4>
+      <ul>
+        <li>上下文 64K Token（状态 + 全部问题），其中状态 + 最长单个问题不超过 32K。</li>
+        <li>速率：每秒 25 万 Token / 每分钟 1200 请求，超限返回 429。</li>
+        <li>价格：输入每百万 Token $0.042，输出免费。当前版本 <code>jev-1.13.0</code>。</li>
+        <li>只接受文本；图片/音频/视频需先转成文本或结构化字段。官方标注<b>英语优先</b>（中日韩准确率较低），但本页中文预设实测结果稳定可用，中文场景可直接使用。</li>
+        <li>不可微调，同一套权重服务所有账户 —— 领域知识只能通过 <code>state</code> 和 <code>criteria</code> 注入。</li>
+        <li>不解释理由：输出只有选项与概率，需要推理链的合规场景不适用。</li>
+      </ul>
+
+      <h4>浏览器 Agent：快照 → 选下一步</h4>
+      <p>浏览器操作组的三个预设演示 Jev 在浏览器自动化里的用法。playwright-cli 的 <code>snapshot</code> 会输出一棵
+      带 <code>ref</code> 的可访问性树（如 <code>textbox "Username" [ref=e16]</code>），把这份快照连同任务目标
+      放进 <code>state</code>，Jev 就能直接吐出「调用哪个工具、作用于哪个 ref」：</p>
+      <ul>
+        <li><b>下一步动作</b>（Choice）：<b>完整的 playwright-cli 工具列表</b>，共 57 项 ——
+        涵盖导航（<code>goto</code>/<code>go-back</code>/<code>reload</code>）、交互（<code>click</code>/<code>fill</code>/<code>type</code>/<code>press</code>/<code>select</code>/<code>check</code>/<code>hover</code>/<code>drag</code>/<code>upload</code>）、
+        鼠标键盘（<code>mousemove</code>/<code>mousewheel</code>/<code>keydown</code>）、检查（<code>snapshot</code>/<code>screenshot</code>/<code>eval</code>/<code>console</code>/<code>network</code>）、
+        标签页、弹窗、Cookie/Storage、请求拦截、追踪录像、视口，以及 <code>任务已完成</code> / <code>放弃</code> 两个终止态。</li>
+        <li><b>参数</b>（Choice）：<b>从 state 的快照里自动解析出的全部 ref</b>，无需手写。
+        解析器逐行匹配 <code>[ref=xxx]</code>，取该行 ref 前的角色描述（并补上行尾冒号后的文字），
+        自动标注 <code>【可交互】</code> 或 <code>【容器/静态】</code>，末尾附「无需元素」兜底项。
+        改了 state 里的快照后，发送时会自动重新解析。</li>
+        <li><b>是否已完成</b>（Noul）：0~1 的目标达成概率，可直接和阈值比较。</li>
+      </ul>
+      <p>三个场景刻意提高了辨识难度：<b>邮箱收件箱</b>（177 个 ref）里同一发件人有三封相似邮件、
+      每行一个同名「归档」按钮，答案必须落到具体 ref（如 <code>e27</code>）而不是按钮文字；
+      <b>招聘简历筛选</b>（95 个 ref）有两个同名候选人、多个技能栈相近但差一个关键条件（TypeScript / 预算 / 岗位）的干扰项；
+      <b>订单后台</b>（132 个 ref，约 15K token）要从 15 笔长文本订单里找出唯一符合条件的「发货」按钮，
+      用于验证大 state 下的定位稳定性（choice 单题上限 255 项，再大就得拆题）。
+      要点是<b>不要把整页 HTML 塞进去</b>，只给可访问性快照 —— 这正是 Jev「输入可以混合、输出必须很窄」的设计。</p>
+
+      <h4>为什么它突然火了</h4>
+      <p>它把 Agent 里"大量调用其实只为做一个判断"的问题单独抽出来：路由、过滤、打分、门禁。
+      砍掉文本生成后，速度、价格、输出稳定性都变了。业界比喻：它不是 Agent 的大脑，而是<b>反射神经</b>。
+      典型落地是 <code>fast-jev-compaction</code> —— 用 Noul 判断上下文里哪些工具调用/结果还值得保留，而不是粗暴地做摘要（摘要省钱但会改写事实，弄丢文件路径和错误码）。</p>
+    </div>
+  </details>
+
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="presets.js?v=20260923b"></script>
+<script src="js/util.js?v=20260923b"></script>
+<script src="js/state-editor.js?v=20260923b"></script>
+<script src="js/questions.js?v=20260923b"></script>
+<script src="js/output.js?v=20260923b"></script>
+<script src="js/app.js?v=20260923b"></script>
+</body>
+</html>
