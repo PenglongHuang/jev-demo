@@ -685,7 +685,7 @@ table.spec td code { font-size: 11px; }
 
 /* ---------- 配置弹窗 ---------- */
 .modal-backdrop {
-  position: fixed; inset: 0; z-index: 100;
+  position: fixed; inset: 0; z-index: 999;
   background: rgba(20, 22, 28, .42);
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
