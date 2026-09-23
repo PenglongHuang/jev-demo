@@ -1,3 +1,244 @@
+/* ===================== API 配置：提供商 / Key / 模型 / 接口 ===================== */
+const Config = (() => {
+  const PROVIDERS = {
+    official: {
+      label: 'Jev 官网', shortLabel: '官网',
+      desc: 'typesafe.ai 官方接口，jev 原生权重',
+      endpoint: 'official',
+      endpointUrl: 'https://api.typesafe.ai/v1/systemone',
+      models: ['jev-latest', 'jev-1.13.0'],
+    },
+    openrouter: {
+      label: 'OpenRouter', shortLabel: 'OR',
+      desc: '通过 OpenRouter 路由',
+      endpoint: 'openrouter',
+      endpointUrl: 'https://openrouter.ai/api/v1/systemone',
+      models: ['jev-latest', 'jev-1.13.0'],
+    },
+    custom: {
+      label: '自定义', shortLabel: '自定义',
+      desc: '自行填写接口地址与模型',
+      endpoint: null, endpointUrl: null, models: null,
+    },
+  };
+
+  const STORAGE = {
+    provider: 'jev-provider',
+    keys: 'jev-keys',
+    models: 'jev-models',
+    customEndpoint: 'jev-custom-endpoint',
+  };
+
+  const current = { provider: 'official', key: '', endpoint: 'official', model: 'jev-latest' };
+  let draft = null;
+
+  function readJson(key, fallback) {
+    try { return JSON.parse(localStorage.getItem(key) || 'null') ?? fallback; }
+    catch (_) { return fallback; }
+  }
+  function writeJson(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
+
+  function loadProvider(providerId) {
+    const prov = PROVIDERS[providerId] || PROVIDERS.official;
+    const keys = readJson(STORAGE.keys, {});
+    const models = readJson(STORAGE.models, {});
+    current.provider = PROVIDERS[providerId] ? providerId : 'official';
+    current.key = (keys[current.provider] || '').trim();
+    current.model = models[current.provider] || (prov.models ? prov.models[0] : 'jev-latest');
+    current.endpoint = current.provider === 'custom'
+      ? (localStorage.getItem(STORAGE.customEndpoint) || '')
+      : prov.endpoint;
+    updateBadge();
+  }
+
+  function updateBadge() {
+    const badge = document.getElementById('configBadge');
+    if (badge) badge.textContent = PROVIDERS[current.provider]?.shortLabel || '官网';
+  }
+
+  function init() {
+    loadProvider(localStorage.getItem(STORAGE.provider) || 'official');
+
+    const backdrop = document.getElementById('configModal');
+    document.getElementById('openConfig').addEventListener('click', open);
+    document.getElementById('configClose').addEventListener('click', close);
+    document.getElementById('configCancel').addEventListener('click', close);
+    document.getElementById('configSave').addEventListener('click', save);
+    backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !backdrop.hidden) close();
+    });
+    document.getElementById('cfgProvider').addEventListener('change', (e) => {
+      const prevId = e.target.dataset.prev || '';
+      const newId = e.target.value;
+      /* 切 provider 前，把 custom 状态下用户填的值存回 draft，方便切回来时恢复 */
+      if (prevId === 'custom' && draft) {
+        draft.customEndpoint = document.getElementById('cfgEndpoint').value.trim();
+        draft.model = document.getElementById('cfgModelInput').value.trim();
+      }
+      e.target.dataset.prev = newId;
+      refreshFormForProvider(newId, false);
+    });
+    document.getElementById('configTest').addEventListener('click', testConnectivity);
+  }
+
+  function open() {
+    const keyInp = document.getElementById('cfgKey');
+    draft = {
+      provider: current.provider,
+      key: current.key,
+      model: current.model,
+      customEndpoint: current.provider === 'custom'
+        ? current.endpoint
+        : (localStorage.getItem(STORAGE.customEndpoint) || ''),
+    };
+    document.getElementById('cfgProvider').value = draft.provider;
+    keyInp.value = draft.key;
+    refreshFormForProvider(draft.provider, true);
+    document.getElementById('configModal').hidden = false;
+    setTimeout(() => keyInp.focus(), 50);
+  }
+
+  function close() {
+    document.getElementById('configModal').hidden = true;
+    draft = null;
+  }
+
+  /* fillValues=true: 从 draft 填充 endpoint/modelInput 初始值（仅 open 时）
+   * fillValues=false: 只切显示/隐藏 + 填充 modelSelect，不覆盖用户已输入的值 */
+  function refreshFormForProvider(providerId, fillValues) {
+    const prov = PROVIDERS[providerId];
+    const endpointInp = document.getElementById('cfgEndpoint');
+    const endpointTip = document.getElementById('cfgEndpointTip');
+    const providerDesc = document.getElementById('cfgProviderDesc');
+    const modelSelect = document.getElementById('cfgModelSelect');
+    const modelInput = document.getElementById('cfgModelInput');
+    const modelTip = document.getElementById('cfgModelTip');
+
+    providerDesc.textContent = prov.desc;
+
+    if (providerId === 'custom') {
+      endpointInp.hidden = false;
+      if (fillValues) endpointInp.value = (draft && draft.customEndpoint) || '';
+      endpointTip.textContent = '填写完整 URL，如 https://api.example.com/v1/systemone';
+      modelSelect.hidden = true;
+      modelInput.hidden = false;
+      if (fillValues) modelInput.value = (draft && draft.model) || 'jev-latest';
+      modelTip.textContent = '自定义提供商，手动输入模型名';
+    } else {
+      endpointInp.hidden = true;
+      endpointInp.value = prov.endpointUrl;
+      endpointTip.textContent = '预设接口：' + prov.endpointUrl;
+      modelSelect.hidden = false;
+      modelInput.hidden = true;
+      modelSelect.innerHTML = prov.models.map((m) => '<option value="' + m + '">' + m + '</option>').join('');
+      if (fillValues) {
+        if (draft && prov.models.includes(draft.model)) modelSelect.value = draft.model;
+      } else if (prov.models.includes(modelSelect.value)) {
+        /* 保持当前选中 */
+      } else {
+        modelSelect.value = prov.models[0];
+      }
+      modelTip.textContent = prov.label + ' 预设模型';
+    }
+  }
+
+  function collectDraft() {
+    const providerId = document.getElementById('cfgProvider').value;
+    const prov = PROVIDERS[providerId];
+    const key = document.getElementById('cfgKey').value.trim();
+    const model = providerId === 'custom'
+      ? document.getElementById('cfgModelInput').value.trim()
+      : document.getElementById('cfgModelSelect').value;
+    let endpoint;
+    if (providerId === 'custom') {
+      endpoint = document.getElementById('cfgEndpoint').value.trim();
+    } else {
+      endpoint = prov.endpoint;
+    }
+    return { providerId, prov, key, model, endpoint };
+  }
+
+  async function testConnectivity() {
+    const btn = document.getElementById('configTest');
+    const d = collectDraft();
+
+    if (!d.key) return toast('请先填 API Key');
+    if (!d.model) return toast('请先填模型名');
+    if (d.providerId === 'custom' && !/^https?:\/\//i.test(d.endpoint)) return toast('自定义接口地址必须以 http:// 或 https:// 开头');
+
+    btn.disabled = true; btn.textContent = '测试中…';
+    toast('正在连接 ' + d.prov.label + '…');
+
+    try {
+      const payload = {
+        state: 'ping',
+        model: d.model,
+        questions: {
+          __ping: { type: 'noul', instructions: '回答"是"即连通', criteria: { true: '连通', false: '不通' } }
+        }
+      };
+      const res = await fetch('/api/systemone', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Typesafe-Key': d.key,
+          'X-Endpoint': d.endpoint,
+        },
+        body: JSON.stringify(payload)
+      });
+      const text = await res.text();
+      let data = null;
+      try { data = JSON.parse(text); } catch (_) {}
+
+      if (res.ok && data && data.answers) {
+        const up = data._upstream || '';
+        const lat = data._latency_ms != null ? ('（' + data._latency_ms + 'ms）') : '';
+        toast('✓ 连通 ' + d.prov.label + lat);
+      } else {
+        const msg = (data && data.error && (data.error.message || data.error)) || ('HTTP ' + res.status);
+        const str = typeof msg === 'string' ? msg : JSON.stringify(msg);
+        toast('✗ 连接失败：' + str.slice(0, 80));
+      }
+    } catch (e) {
+      toast('✗ 网络错误：' + (e && e.message ? e.message : String(e)));
+    } finally {
+      btn.disabled = false; btn.textContent = '🔌 测试连通性';
+    }
+  }
+
+  function save() {
+    const providerId = document.getElementById('cfgProvider').value;
+    const prov = PROVIDERS[providerId];
+    const key = document.getElementById('cfgKey').value.trim();
+    const model = providerId === 'custom'
+      ? document.getElementById('cfgModelInput').value.trim()
+      : document.getElementById('cfgModelSelect').value;
+
+    if (!model) return toast('请填写模型名');
+
+    localStorage.setItem(STORAGE.provider, providerId);
+    const keys = readJson(STORAGE.keys, {});
+    keys[providerId] = key;
+    writeJson(STORAGE.keys, keys);
+    const models = readJson(STORAGE.models, {});
+    models[providerId] = model;
+    writeJson(STORAGE.models, models);
+
+    if (providerId === 'custom') {
+      const url = document.getElementById('cfgEndpoint').value.trim();
+      if (!/^https?:\/\//i.test(url)) return toast('自定义接口地址必须以 http:// 或 https:// 开头');
+      localStorage.setItem(STORAGE.customEndpoint, url);
+    }
+
+    loadProvider(providerId);
+    close();
+    toast('已切换到 ' + prov.label + (key ? '' : '（API Key 未填）'));
+  }
+
+  return { init: init, current: current, providers: PROVIDERS };
+})();
+
 /* ===================== 主应用：预设 Tab / 发送 / 事件绑定 ===================== */
 
 /* ---------- 顶层预设 Tab（场景分组） ---------- */
@@ -122,7 +363,6 @@ const PresetTabs = (() => {
 /* ---------- 主应用 ---------- */
 const App = (() => {
   const sendBtn = document.getElementById('send');
-  const keyInput = document.getElementById('apiKey');
   let userActed = false;   // 用户已手动选择场景后，启动时的自动恢复不再覆盖
 
   /* ---------- API 地址探测 ---------- */
@@ -221,7 +461,7 @@ const App = (() => {
     }
 
     const questions = Questions.buildQuestions();
-    return { state: stateOut, model: document.getElementById('model').value, questions: questions };
+    return { state: stateOut, model: Config.current.model, questions: questions };
   }
 
   /* ---------- 发送 ---------- */
@@ -237,8 +477,8 @@ const App = (() => {
       return toast(e.message);
     }
 
-    if (!keyInput.value.trim()) {
-      Output.renderError('请在页面右上角「API Key」输入框里填写你的 API Key（或让服务端通过环境变量 TYPESAFE_API_KEY 配置）。', '', '缺少 API Key，尚未发送');
+    if (!Config.current.key.trim()) {
+      Output.renderError('请点右上角「⚙ 配置」按钮填写 API Key（或让服务端通过环境变量 TYPESAFE_API_KEY 配置）。', '', '缺少 API Key，尚未发送');
       return;
     }
 
@@ -252,7 +492,8 @@ const App = (() => {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'X-Typesafe-Key': keyInput.value.trim()
+            'X-Typesafe-Key': Config.current.key.trim(),
+            'X-Endpoint': Config.current.endpoint,
           },
           body: JSON.stringify(payload)
         });
@@ -383,19 +624,8 @@ const App = (() => {
     };
   }
 
-  /* ---------- API Key：localStorage 持久化 ---------- */
-  function initKey() {
-    const KEY_STORAGE = 'jev-api-key';
-    keyInput.value = localStorage.getItem(KEY_STORAGE) || '';
-    keyInput.addEventListener('input', () => {
-      const v = keyInput.value.trim();
-      if (v) localStorage.setItem(KEY_STORAGE, v);
-      else localStorage.removeItem(KEY_STORAGE);
-    });
-  }
-
   function init() {
-    initKey();
+    Config.init();
     bindEvents();
     Questions.initDragAndDrop();
     PresetTabs.build();

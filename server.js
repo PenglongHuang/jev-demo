@@ -18,7 +18,11 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = process.env.PORT || 3000;
-const API_URL = 'https://api.typesafe.ai/v1/systemone';
+const API_URL_PRESETS = {
+  official: 'https://api.typesafe.ai/v1/systemone',
+  openrouter: 'https://openrouter.ai/api/v1/systemone',
+};
+const DEFAULT_PRESET = 'official';
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || '*';
 
 /* 场景保存：按访问 IP 隔租户，简单 JSON 文件存储（data/ws_<hash>.json） */
@@ -44,7 +48,7 @@ const MIME = {
 function applyCors(res) {
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Typesafe-Key');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Typesafe-Key, X-Endpoint');
   res.setHeader('Access-Control-Max-Age', '86400');
 }
 
@@ -155,6 +159,70 @@ function handleWorkspace(req, res) {
   sendJson(res, 405, { ok: false, error: { message: 'Method Not Allowed' } });
 }
 
+/* ---------------- Auto 浏览器模式 ----------------
+ * 驱动模块懒加载：playwright 未安装时不影响其余功能。
+ * 租户隔离与场景保存一致：按 IP 哈希得到 CLI session 名。
+ */
+let driver = null;
+let driverLoadTried = false;
+function getDriver() {
+  if (!driverLoadTried) {
+    driverLoadTried = true;
+    try { driver = require('./browser-driver'); } catch (_) { driver = null; }
+    if (driver) driver.dataDir = DATA_DIR;
+  }
+  return driver;
+}
+
+function browserSession(req) {
+  const hash = crypto.createHash('sha1').update(clientIp(req)).digest('hex').slice(0, 12);
+  return 'jev' + hash;
+}
+
+function readJsonBody(req, res, cb) {
+  applyCors(res);
+  let body = '';
+  req.on('data', (chunk) => {
+    body += chunk;
+    if (body.length > 256 * 1024) req.destroy();
+  });
+  req.on('end', () => {
+    let payload = {};
+    try { payload = JSON.parse(body || '{}'); } catch (_) { return sendJson(res, 400, { ok: false, error: { message: '请求体不是合法 JSON' } }); }
+    cb(payload);
+  });
+}
+
+function handleBrowser(req, res, action) {
+  const d = getDriver();
+  if (!d) {
+    applyCors(res);
+    return sendJson(res, 200, { ok: false, code: 'NO_DRIVER', error: { message: 'browser-driver 模块不可用' } });
+  }
+  const session = browserSession(req);
+
+  if (action === 'status') {
+    applyCors(res);
+    return sendJson(res, 200, Object.assign({ ok: true, session: session }, d.status()));
+  }
+  if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: { message: 'Method Not Allowed' } });
+
+  readJsonBody(req, res, async (payload) => {
+    let out;
+    try {
+      if (action === 'open') out = await d.open(session, String(payload.url || ''), { browser: payload.browser });
+      else if (action === 'snapshot') out = await d.snapshot(session);
+      else if (action === 'act') out = await d.act(session, String(payload.command || ''), payload.ref ? String(payload.ref) : null, payload.text != null ? String(payload.text) : null);
+      else if (action === 'screenshot') out = await d.screenshot(session);
+      else if (action === 'close') out = await d.close(session);
+      else return sendJson(res, 404, { ok: false, error: { message: 'Unknown browser action' } });
+    } catch (e) {
+      out = { ok: false, error: String(e && e.message || e) };
+    }
+    sendJson(res, out && out.ok ? 200 : 200, out);
+  });
+}
+
 /* ---------------- 转发到 Jev ---------------- */
 function proxySystemOne(req, res) {
   applyCors(res);
@@ -195,11 +263,23 @@ function proxySystemOne(req, res) {
       );
     }
 
+    // 上游地址：请求头 X-Endpoint 决定预设或自定义 URL
+    let endpointHeader = String(req.headers['x-endpoint'] || DEFAULT_PRESET).trim();
+    let upstreamUrl;
+    if (API_URL_PRESETS[endpointHeader]) {
+      upstreamUrl = API_URL_PRESETS[endpointHeader];
+    } else if (/^https?:\/\//i.test(endpointHeader)) {
+      upstreamUrl = endpointHeader;
+    } else {
+      upstreamUrl = API_URL_PRESETS[DEFAULT_PRESET];
+    }
+
     const upstreamBody = JSON.stringify(payload);
     const started = Date.now();
 
-    const upstreamReq = https.request(
-      API_URL,
+    const upstreamMod = upstreamUrl.toLowerCase().startsWith('http://') ? http : https;
+    const upstreamReq = upstreamMod.request(
+      upstreamUrl,
       {
         method: 'POST',
         headers: {
@@ -223,6 +303,7 @@ function proxySystemOne(req, res) {
 
           if (upstreamRes.statusCode >= 200 && upstreamRes.statusCode < 300 && parsed) {
             parsed._latency_ms = latency;
+            parsed._upstream = upstreamUrl;
             res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
             return res.end(JSON.stringify(parsed));
           }
@@ -233,6 +314,7 @@ function proxySystemOne(req, res) {
               error: {
                 status: upstreamRes.statusCode,
                 message: (parsed && parsed.error) || data || '上游返回异常',
+                upstream: upstreamUrl,
               },
               _latency_ms: latency,
             })
@@ -244,7 +326,7 @@ function proxySystemOne(req, res) {
     upstreamReq.on('timeout', () => {
       upstreamReq.destroy();
       res.writeHead(504, { 'Content-Type': 'application/json; charset=utf-8' });
-      res.end(JSON.stringify({ error: { message: '请求 Jev 超时（120s）' } }));
+      res.end(JSON.stringify({ error: { message: '请求上游超时（120s）', upstream: upstreamUrl } }));
     });
 
     upstreamReq.on('error', (err) => {
@@ -252,7 +334,8 @@ function proxySystemOne(req, res) {
       res.end(
         JSON.stringify({
           error: {
-            message: '无法连接 Jev 官方接口：' + err.message + '（请检查本机网络/代理是否能访问 api.typesafe.ai）',
+            message: '无法连接上游：' + err.message,
+            upstream: upstreamUrl,
           },
         })
       );
@@ -274,16 +357,20 @@ const server = http.createServer((req, res) => {
   }
 
   if (pathname === '/api/workspace') return handleWorkspace(req, res);
+  if (pathname.startsWith('/api/browser/')) return handleBrowser(req, res, pathname.slice('/api/browser/'.length));
   if (req.method === 'POST' && pathname === '/api/systemone') return proxySystemOne(req, res);
   if (req.method === 'GET' && pathname === '/api/health') {
     applyCors(res);
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
-    return res.end(JSON.stringify({ ok: true, model: 'jev-latest', hasKey: Boolean(API_KEY) }));
+    const d = getDriver();
+    const st = d ? d.status() : { available: false };
+    return res.end(JSON.stringify({ ok: true, model: 'jev-latest', hasKey: Boolean(API_KEY), browser: Boolean(st.available) }));
   }
   serveStatic(req, res);
 });
 
 server.listen(PORT, () => {
+  fs.mkdirSync(DATA_DIR, { recursive: true }); // 浏览器驱动把 .playwright-cli 产物写在这里
   console.log('');
   console.log('  Jev 体验网页已启动');
   console.log('  →  http://localhost:' + PORT);

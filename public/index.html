@@ -19,17 +19,9 @@
       <span class="sub">System One 决策模型</span>
     </div>
     <div class="topbar-spacer"></div>
-    <div class="field-inline">
-      <label for="model">模型</label>
-      <select id="model">
-        <option value="jev-latest">jev-latest</option>
-        <option value="jev-1.13.0">jev-1.13.0</option>
-      </select>
-    </div>
-    <div class="field-inline">
-      <label for="apiKey">API Key</label>
-      <input type="password" id="apiKey" placeholder="apikey_…" autocomplete="off" spellcheck="false" />
-    </div>
+    <button class="btn-ghost btn-config" id="openConfig" type="button" title="API 配置：提供商、Key、模型、接口地址">
+      <span class="config-badge" id="configBadge">官网</span>⚙ 配置
+    </button>
   </div>
 </header>
 
@@ -43,8 +35,88 @@
 
   <div class="warnbar" id="warnbar" role="status"></div>
 
+  <!-- ============ 顶层模式切换 ============ -->
+  <section class="card mode-card" aria-label="模式切换">
+    <div class="mode-row">
+      <div class="seg" id="modeSeg" role="tablist" aria-label="运行模式">
+        <button type="button" class="seg-btn active" data-mode="demo" role="tab" aria-selected="true">Demo 模式</button>
+        <button type="button" class="seg-btn" data-mode="auto" role="tab" aria-selected="false">Auto 浏览器</button>
+      </div>
+      <span class="spacer"></span>
+      <span class="status-pill" id="browserPill" role="status">引擎检测中…</span>
+    </div>
+  </section>
+
+  <!-- ============ Auto 浏览器面板 ============ -->
+  <section class="card auto-card" id="autoPanel" hidden aria-label="Auto 浏览器模式">
+    <div class="card-head">
+      <h2>Auto 浏览器 · 工程闭环 + Jev 决策</h2>
+      <span class="sub">playwright-cli 快照 → state/问题构造 → Jev 选动作与 ref → 执行 → 循环</span>
+    </div>
+
+    <div class="warnbar" id="autoInstallHint" hidden>
+      <div class="title">⚠ 浏览器引擎不可用</div>
+      Auto 浏览器模式需要 playwright 驱动本机 Chrome/Edge：在项目目录执行
+      <code>npm i playwright</code>（只装库，无需下载浏览器），然后重启 <code>node server.js</code>。
+      Demo 模式不受影响。
+    </div>
+
+    <div class="auto-config">
+      <div class="field">
+        <label for="autoGoal">任务目标</label>
+        <input type="text" id="autoGoal" placeholder="例如：在收件箱里归档招商银行 9 月电子对账单邮件" spellcheck="false" />
+      </div>
+      <div class="field">
+        <label for="autoUrl">起始 URL</label>
+        <div class="url-row">
+          <input type="text" id="autoUrl" placeholder="http://localhost:3000/demo/mailbox.html" spellcheck="false" />
+          <button class="chip" id="autoDemoPage" type="button" title="用项目内置的可交互演示页，离线可完整演示">📦 内置演示页</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>输入变量（fill / press / goto 等动作的文本来源；Jev 用选择题从中挑选）</label>
+        <div id="autoVars" class="vars-box"></div>
+        <button class="chip" id="autoAddVar" type="button">＋ 添加变量</button>
+      </div>
+      <div class="field field-row">
+        <div class="inline-field">
+          <label for="autoMaxSteps">步数上限</label>
+          <input type="number" id="autoMaxSteps" value="15" min="1" max="50" />
+        </div>
+        <div class="inline-field">
+          <label>节奏</label>
+          <div class="seg">
+            <label class="seg-btn radio-btn"><input type="radio" name="autoCadence" value="single" checked />单步确认</label>
+            <label class="seg-btn radio-btn"><input type="radio" name="autoCadence" value="auto" />连续自动</label>
+          </div>
+        </div>
+        <label class="check-inline"><input type="checkbox" id="autoScreenshot" checked />每步截图</label>
+      </div>
+      <div class="btn-row">
+        <button class="btn-ghost" id="autoCloseBrowser" type="button">关闭浏览器</button>
+        <button class="btn-ghost" id="autoStop" type="button" hidden>■ 中止</button>
+        <button class="btn-primary" id="autoStart" type="button">▶ 打开浏览器并开始</button>
+      </div>
+    </div>
+
+    <div class="auto-flow-wrap">
+      <div class="card-head">
+        <h2>运行流水</h2>
+        <span class="spacer"></span>
+        <span class="sub" id="autoSummary"></span>
+      </div>
+      <div id="autoFlow" class="auto-flow">
+        <div class="out-empty">
+          <div class="big" aria-hidden="true">▶</div>
+          填好任务后点「打开浏览器并开始」。<br />
+          每一步都会展示：① 构造的 state ② 构造的问题 ③ Jev 决策概率 ④ 执行结果与截图
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ============ 顶层 Tab：场景预设 ============ -->
-  <section class="card preset-card" aria-label="场景预设">
+  <section class="card preset-card" id="presetCard" aria-label="场景预设">
     <div class="card-head">
       <h2>场景预设</h2>
       <span class="spacer"></span>
@@ -57,7 +129,7 @@
     </div>
   </section>
 
-  <div class="grid">
+  <div class="grid" id="mainGrid">
 
     <!-- ============ 左：编辑区 ============ -->
     <section class="col">
@@ -213,15 +285,59 @@
     </div>
   </details>
 
+  <!-- ============ 配置弹窗 ============ -->
+  <div class="modal-backdrop" id="configModal" hidden role="dialog" aria-modal="true" aria-labelledby="configTitle">
+    <div class="modal">
+      <div class="modal-head">
+        <h3 id="configTitle">API 配置</h3>
+        <button class="modal-close" id="configClose" type="button" aria-label="关闭">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label for="cfgProvider">提供商</label>
+          <select id="cfgProvider">
+            <option value="official">Jev 官网</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="custom">自定义</option>
+          </select>
+          <p class="field-tip" id="cfgProviderDesc"></p>
+        </div>
+        <div class="field">
+          <label for="cfgKey">API Key</label>
+          <input type="password" id="cfgKey" placeholder="apikey_… 或 sk-…" autocomplete="off" spellcheck="false" />
+          <p class="field-tip">按提供商分别存储，切换时不会丢失。仅保存在浏览器 localStorage。</p>
+        </div>
+        <div class="field">
+          <label for="cfgEndpoint">接口地址</label>
+          <input type="text" id="cfgEndpoint" placeholder="https://…/v1/systemone" spellcheck="false" />
+          <p class="field-tip" id="cfgEndpointTip"></p>
+        </div>
+        <div class="field">
+          <label for="cfgModelSelect">模型</label>
+          <select id="cfgModelSelect"></select>
+          <input type="text" id="cfgModelInput" hidden placeholder="自定义模型名，如 jev-latest" spellcheck="false" />
+          <p class="field-tip" id="cfgModelTip"></p>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn-ghost" id="configTest" type="button">🔌 测试连通性</button>
+        <button class="btn-ghost" id="configCancel" type="button">取消</button>
+        <button class="btn-primary" id="configSave" type="button">保存并应用</button>
+      </div>
+    </div>
+  </div>
+
 </main>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="presets.js?v=20260923b"></script>
 <script src="js/util.js?v=20260923b"></script>
+<script src="js/auto-core.js?v=20260923b"></script>
 <script src="js/state-editor.js?v=20260923b"></script>
 <script src="js/questions.js?v=20260923b"></script>
 <script src="js/output.js?v=20260923b"></script>
 <script src="js/app.js?v=20260923b"></script>
+<script src="js/auto.js?v=20260923b"></script>
 </body>
 </html>
