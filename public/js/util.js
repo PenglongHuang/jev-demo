@@ -158,3 +158,8 @@ function relaxedStringify(value, level) {
   }
   return JSON.stringify(value);
 }
+
+/* node:test 环境导出（浏览器 <script> 加载时此分支不生效，auto-core.js 复用同一实现） */
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { parseSnapshotRefs, buildRefCriteria, extractSnapshotText };
+}
