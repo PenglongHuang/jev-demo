@@ -204,7 +204,6 @@ const Auto = (() => {
   function decisionHtml(step) {
     const a = (step.response && step.response.answers) || {};
     const d = step.decision || {};
-    const q = step.payload ? step.payload.questions : {};
     const line = (k, v, p, extra) =>
       '<div class="ans-line"><span class="ans-k">' + k + '</span><span class="ans-v">' + escapeHtml(v) + (extra ? ' <span class="ans-p">' + escapeHtml(extra) + '</span>' : '') + '</span>' +
       (p != null ? '<span class="ans-p">' + p + '</span>' : '') + '</div>';
@@ -309,7 +308,8 @@ const Auto = (() => {
     let execZone = nodes.body.querySelector('.step-exec-slot');
     if (!execZone) {
       execZone = el('div', 'step-exec-slot');
-      nodes.body.insertBefore(execZone, nodes.body.querySelector('.step-collapse') || nodes.body.lastChild);
+      /* 顺序：决策区 → 执行区 → 上下文折叠区 */
+      nodes.body.insertBefore(execZone, nodes.answers.nextSibling);
     }
     execZone.innerHTML = llmHtml(step) + execHtml(step);
     if (step.screenshot && !execZone.querySelector('.step-shot')) {
@@ -364,6 +364,27 @@ const Auto = (() => {
       card.querySelector('.step-body').appendChild(bar);
       bar.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
+  }
+
+  /* ---------- 生成模型调用（OpenAI 兼容响应，无 ok 字段，按 HTTP + error 判定） ---------- */
+  async function callLlm(body, llmCfg) {
+    const res = await fetch('/api/llm', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Llm-Base': llmCfg.base,
+        'X-Llm-Key': llmCfg.key,
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch (_) { /* 下方统一报错 */ }
+    if (!res.ok || !data || data.error) {
+      const m = (data && data.error && (data.error.message || data.error)) || text.slice(0, 200) || ('HTTP ' + res.status);
+      throw new Error(typeof m === 'string' ? m : JSON.stringify(m));
+    }
+    return data;
   }
 
   /* ---------- Jev 调用（失败重试一次） ---------- */
@@ -438,11 +459,11 @@ const Auto = (() => {
       });
       L.messages = m.messages;
       const llmCfg = Config.llm.get();
-      const r = await apiJson('/api/llm', {
-        model: llmCfg.model, messages: m.messages, temperature: m.temperature, max_tokens: m.max_tokens,
-      }, { 'X-Llm-Base': llmCfg.base, 'X-Llm-Key': llmCfg.key });
-      if (!r.ok || r.error) {
-        L.error = '生成模型调用失败：' + ((r.error && (r.error.message || r.error)) || '未知错误');
+      let r;
+      try {
+        r = await callLlm({ model: llmCfg.model, messages: m.messages, temperature: m.temperature, max_tokens: m.max_tokens }, llmCfg);
+      } catch (e) {
+        L.error = '生成模型调用失败：' + ((e && e.message) || String(e));
         step.exec = { ok: false, error: L.error, elapsedMs: 0, cmd: null };
         return {};
       }
@@ -562,13 +583,13 @@ const Auto = (() => {
       setProgress(n);
 
       /* ① 快照 */
-      const snap = await apiJson('/api/browser/snapshot');
+      const snap = await apiJson('/api/browser/snapshot', {});
       if (!snap.ok || typeof snap.snapshot !== 'string') {
         finishRun({ done: false, reason: '获取页面快照失败：' + ((snap && snap.error) || '无快照内容'), level: 'error' });
         return;
       }
       /* ② 当前页信息（工程自动执行） */
-      const info = await apiJson('/api/browser/page-info');
+      const info = await apiJson('/api/browser/page-info', {});
       const pageInfo = info.ok ? { url: info.url, title: info.title } : { url: runCfg.url, title: '' };
 
       /* ③④ 组装 state + 问题（前端是唯一构造者）并调用 Jev */

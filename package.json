@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test \"tests/*.spec.js\""
+    "test": "node --test \"tests/*.spec.js\"",
+    "test:e2e": "node tests/e2e/run.js"
   },
   "engines": {
     "node": ">=18"
