@@ -71,6 +71,41 @@ test('POST /api/llm：校验、透传、错误映射', async (t) => {
   assert.strictEqual(r.status, 400);
   assert.match((await r.json()).error.message, /https|localhost/);
 
+  /* 1b. URL 解析级绕过一律拒绝（前缀正则时代的老洞） */
+  for (const bad of [
+    'http://localhost@evil.com/v1',
+    'http://127.0.0.1:8080@evil.com',
+    'http://127.0.0.1.evil.com/x',
+    'http://127.0.0.1@192.168.1.1:8080/admin',
+    'https://user:pass@api.example.com/v1',
+    'ftp://example.com/v1',
+  ]) {
+    r = await fetch(url('/api/llm'), { method: 'POST', headers: headers(bad, 'sk-x'), body: JSON.stringify(body) });
+    assert.strictEqual(r.status, 400, '应拒绝 ' + bad);
+  }
+
+  /* 1c. 自定义 Jev 上游：无页面 Key 时不放行自定义地址（防服务端 env Key 外送到任意 URL） */
+  {
+    /* 起一个带 env Key 的实例才能命中该分支 */
+    const port2 = 30000 + Math.floor(Math.random() * 20000);
+    const child2 = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
+      env: Object.assign({}, process.env, { PORT: String(port2), TYPESAFE_API_KEY: 'sk-operator-secret' }),
+      stdio: 'ignore', windowsHide: true,
+    });
+    t.after(() => child2.kill());
+    for (let i = 0; i < 50; i++) {
+      try { const h = await fetch('http://127.0.0.1:' + port2 + '/api/health'); if (h.ok) break; } catch (_) { /* retry */ }
+      await new Promise((rs) => setTimeout(rs, 100));
+    }
+    const r2 = await fetch('http://127.0.0.1:' + port2 + '/api/systemone', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Endpoint': 'https://collector.example.com/v1/systemone' },
+      body: JSON.stringify({ state: 'x', questions: { a: { type: 'noul', name: 'a', instructions: 'i' } } }),
+    });
+    assert.strictEqual(r2.status, 403);
+    assert.match((await r2.json()).error.message, /自定义接口/);
+  }
+
   /* 2. 缺 key / 缺 model / 缺 messages → 400 */
   r = await fetch(url('/api/llm'), { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Llm-Base': 'http://localhost:' + mock.port + '/v1' }, body: JSON.stringify(body) });
   assert.strictEqual(r.status, 400);

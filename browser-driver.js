@@ -271,12 +271,26 @@ async function pageInfo(session) {
   return { ok: true, url: m ? m[2] : '', title: m ? m[1] : '' };
 }
 
+/* upload 文件路径必须落在 data/ 目录内（防「读任意本地文件 → 经页面文件框
+ * 外发」的泄露原语）。允许相对 data/ 的路径与绝对路径两种写法；URI 形式
+ * （file:// 等）会被当成相对文件名绕过前缀判断，直接拒绝。 */
+function uploadPathAllowed(baseDir, text) {
+  const t = String(text).trim();
+  if (!t || /^[a-z][a-z0-9+.-]*:\/\//i.test(t)) return false;
+  const root = path.resolve(baseDir);
+  const resolved = path.resolve(root, t);
+  return resolved === root || resolved.startsWith(root + path.sep);
+}
+
 async function act(session, command, ref, text) {
   let argv;
   try {
     argv = buildArgv(String(command || ''), ref, text);
   } catch (e) {
     return { ok: false, error: String(e && e.message || e) };
+  }
+  if (String(command) === 'upload' && text != null && !uploadPathAllowed(dataDir, text)) {
+    return { ok: false, error: 'upload 只允许 data/ 目录内的文件（安全限制），收到：' + String(text).slice(0, 120) };
   }
   const out = await exec(session, argv);
   return out.ok ? { ok: true, result: out.result } : out;
@@ -309,5 +323,5 @@ module.exports = {
   close,
   set dataDir(v) { dataDir = v; },
   get dataDir() { return dataDir; },
-  _test: { quoteArg, validateAct, buildArgv, OPS, REF_RE, parseEnvelope, unwrapResult },
+  _test: { quoteArg, validateAct, buildArgv, OPS, REF_RE, parseEnvelope, unwrapResult, uploadPathAllowed },
 };

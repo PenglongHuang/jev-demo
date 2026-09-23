@@ -119,6 +119,16 @@ test('parseDecision：未知动作抛错（记失败步骤由上层处理）', (
   }), /动作/);
 });
 
+test('parseDecision：缺失/非法「未完成」分值一律抛错（绝不默认 0 = 已完成）', () => {
+  const ok = { 动作: { choice: 'click' }, 参数: { choice: 'e10' }, 文本: { choice: '无' } };
+  assert.throws(() => AutoCore.parseDecision(ok), /未完成/);                       // 整题缺失
+  assert.throws(() => AutoCore.parseDecision(Object.assign({}, ok, { 未完成: {} })), /未完成/);            // score 缺失
+  assert.throws(() => AutoCore.parseDecision(Object.assign({}, ok, { 未完成: { score: null } })), /未完成/); // null
+  assert.throws(() => AutoCore.parseDecision(Object.assign({}, ok, { 未完成: { score: '2' } })), /未完成/);  // 字符串
+  assert.throws(() => AutoCore.parseDecision(Object.assign({}, ok, { 未完成: { score: 5 } })), /未完成/);   // 超出 0~4
+  assert.throws(() => AutoCore.parseDecision(Object.assign({}, ok, { 未完成: { score: -1 } })), /未完成/);
+});
+
 /* ---------- planExecution ---------- */
 
 const VARS = [{ name: '关键词', value: '招商银行' }, { name: '回车', value: 'Enter' }];
@@ -142,6 +152,14 @@ test('planExecution：工程动作与终止动作', () => {
   assert.deepStrictEqual(AutoCore.planExecution({ action: '无操作', param: '无需元素', text: '无' }, VARS), { kind: 'noop' });
   assert.deepStrictEqual(AutoCore.planExecution({ action: '生成输入', param: 'e3', text: '无' }, VARS), { kind: 'llm', ref: 'e3' });
   assert.deepStrictEqual(AutoCore.planExecution({ action: '任务已完成', param: '无需元素', text: '无' }, VARS), { kind: 'terminal', action: '任务已完成' });
+});
+
+test('planExecution：可选文本动作（tab-close/tab-new/dialog-accept）选「无」是合法无参形态', () => {
+  assert.deepStrictEqual(AutoCore.planExecution({ action: 'dialog-accept', param: '无需元素', text: '无' }, VARS), { kind: 'act', op: 'dialog-accept', ref: null, text: null });
+  assert.deepStrictEqual(AutoCore.planExecution({ action: 'tab-close', param: '无需元素', text: '无' }, VARS), { kind: 'act', op: 'tab-close', ref: null, text: null });
+  assert.deepStrictEqual(AutoCore.planExecution({ action: 'tab-new', param: '无需元素', text: '无' }, VARS), { kind: 'act', op: 'tab-new', ref: null, text: null });
+  /* 带文本同样合法 */
+  assert.deepStrictEqual(AutoCore.planExecution({ action: 'dialog-accept', param: '无需元素', text: '好的' }, VARS), { kind: 'act', op: 'dialog-accept', ref: null, text: '好的' });
 });
 
 test('planExecution：矛盾决策抛错（需 ref 却选无需元素 / 需文本却选无）', () => {

@@ -62,6 +62,9 @@
   var SCORE_LEVELS = 5;
 
   var TEXT_ACTIONS = { fill: 1, type: 1, select: 1, press: 1, keydown: 1, keyup: 1, goto: 1, upload: 1, 'tab-select': 1, 'tab-close': 1, 'dialog-accept': 1, mousemove: 1, mousewheel: 1, 'tab-new': 1 };
+  /* 文本可省的动作（与 browser-driver 白名单的 optional 语义一致）：
+   * tab-close 缺省关当前页 / tab-new 可不开 URL / dialog-accept 可不带 prompt 输入 */
+  var TEXT_OPTIONAL_ACTIONS = { 'tab-close': 1, 'tab-new': 1, 'dialog-accept': 1 };
   var REF_ACTIONS = { click: 1, dblclick: 1, fill: 1, type: 1, select: 1, check: 1, uncheck: 1, hover: 1, drop: 1, '生成输入': 1 };
 
   function needText(action) { return Boolean(TEXT_ACTIONS[action]); }
@@ -135,11 +138,17 @@
     if (!action || (!AUTO_TOOLS[action] && !TERMINAL_TOOLS[action])) {
       throw new Error('Jev 返回了未知动作：' + JSON.stringify(String(action)));
     }
+    /* 「未完成」缺失或非法时按解析失败处理（记失败步骤交给 Jev 自纠），
+     * 绝不能默认 0 —— 那等于把缺字段当成「任务已完成」，两轮后假成功终止 */
+    var rawScore = a['未完成'] && a['未完成'].score;
+    if (typeof rawScore !== 'number' || !isFinite(rawScore) || rawScore < 0 || rawScore > SCORE_LEVELS - 1) {
+      throw new Error('Jev 未返回有效的「未完成」分值（score 应为 0~' + (SCORE_LEVELS - 1) + ' 的数）');
+    }
     return {
       action: action,
       param: (a['参数'] && a['参数'].choice) || REF_NONE,
       text: (a['文本'] && a['文本'].choice) || TEXT_NONE,
-      unfinished: Number(a['未完成'] && a['未完成'].score || 0) / (SCORE_LEVELS - 1)
+      unfinished: rawScore / (SCORE_LEVELS - 1)
     };
   }
 
@@ -171,7 +180,11 @@
     var text = null;
     if (needText(action)) {
       text = resolveText(decision.text, variables);
-      if (text == null) throw new Error('动作 ' + action + ' 需要文本，但 Jev 在「文本」题选择了「无」');
+      /* 必填文本动作选了「无」是矛盾决策；可选文本动作（tab-close/tab-new/
+       * dialog-accept）无文本是合法的无参形态，与 driver 白名单 optional 一致 */
+      if (text == null && !TEXT_OPTIONAL_ACTIONS[action]) {
+        throw new Error('动作 ' + action + ' 需要文本，但 Jev 在「文本」题选择了「无」');
+      }
     }
     return { kind: 'act', op: action, ref: ref, text: text };
   }

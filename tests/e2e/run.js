@@ -40,9 +40,14 @@ function rawExec(args) {
     const line = ['playwright-cli', '-s=' + UI].concat(args.map(quoteArg)).join(' ');
     const child = spawn(line, { shell: process.platform === 'win32', cwd: driver.dataDir, windowsHide: true });
     let out = '';
+    const timer = setTimeout(() => {
+      try { child.kill(); } catch (_) { /* noop */ }
+      resolve(out + '\n[E2E rawExec 超时 60s 被杀]');
+    }, 60000);
     child.stdout.on('data', (c) => { out += c; });
     child.stderr.on('data', (c) => { out += c; });
-    child.on('close', () => resolve(out));
+    child.on('error', (e) => { clearTimeout(timer); resolve(out + '\n[E2E rawExec 启动失败] ' + e.message); });
+    child.on('close', () => { clearTimeout(timer); resolve(out); });
   });
 }
 

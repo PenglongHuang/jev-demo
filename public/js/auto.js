@@ -523,14 +523,26 @@ const Auto = (() => {
     if (!/^https?:\/\//i.test(url)) return toast('起始 URL 必须以 http:// 或 https:// 开头');
     if (!Config.current.key.trim()) return toast('请先在右上角「⚙ 配置」填写 Jev 的 API Key');
 
-    const engineOk = await probeEngine();
+    /* 同步占坑（设计 §11：同会话仅一个循环）：必须在任何 await 之前，
+     * 否则 probeEngine 的网络间隙内双击会并发两个 runLoop */
+    running = true;
+    els.start.disabled = true;
+
+    let engineOk = false;
+    try {
+      engineOk = await probeEngine();
+    } finally {
+      if (!engineOk) {
+        running = false;
+        els.start.disabled = false;
+      }
+    }
     if (!engineOk) return toast('浏览器引擎不可用，请先按提示安装 playwright-cli');
 
-    running = true; abortFlag = false; finished = false;
+    abortFlag = false; finished = false;
     steps = []; history = []; consecutiveFails = 0; unfinishedHistory = [];
     runCfg = { goal, url, maxSteps, variables: collectVars(), screenshotOn: els.screenshot.checked };
 
-    els.start.disabled = true;
     els.stop.hidden = false;
     els.statusBar.hidden = false;
     els.runPill.className = 'status-pill busy';
@@ -638,19 +650,7 @@ const Auto = (() => {
       }
       updateStepCard(step, nodes);
 
-      /* 终止动作：截图留证后收尾 */
-      if (step.decision && AutoCore.TERMINAL_TOOLS[step.decision.action]) {
-        step.terminal = step.decision.action;
-        step.label = step.decision.action;
-        if (runCfg.screenshotOn) { await takeShot(step, 'step-' + n + '-final'); }
-        updateStepCard(step, nodes);
-        markChip(n, step.terminal === '任务已完成' ? 'ok' : 'error');
-        history.push(AutoCore.formatHistoryStep(n, step.label, step.terminal === '任务已完成', null));
-        finishRun({ done: step.terminal === '任务已完成', reason: 'Jev 判定：' + step.terminal });
-        return;
-      }
-
-      /* ⑦ 单步确认 */
+      /* ⑦ 单步确认（设计 §10/§11：单步确认是安全阀，终止判定同样要过门） */
       if (cadence() === 'single') {
         const choice = await awaitConfirm(nodes.card);
         if (choice === 'abort') { abortFlag = true; markChip(n, 'pending'); step.exec = { skipped: true }; updateStepCard(step, nodes); finishRun({ done: false, reason: '用户中止' }); return; }
@@ -663,6 +663,18 @@ const Auto = (() => {
           updateStepCard(step, nodes);
           continue;
         }
+      }
+
+      /* 终止动作：截图留证后收尾（放在确认门之后，单步模式下用户可选择跳过） */
+      if (step.decision && AutoCore.TERMINAL_TOOLS[step.decision.action]) {
+        step.terminal = step.decision.action;
+        step.label = step.decision.action;
+        if (runCfg.screenshotOn) { await takeShot(step, 'step-' + n + '-final'); }
+        updateStepCard(step, nodes);
+        markChip(n, step.terminal === '任务已完成' ? 'ok' : 'error');
+        history.push(AutoCore.formatHistoryStep(n, step.label, step.terminal === '任务已完成', null));
+        finishRun({ done: step.terminal === '任务已完成', reason: 'Jev 判定：' + step.terminal });
+        return;
       }
 
       /* ⑧ 执行 */
@@ -769,7 +781,7 @@ const Auto = (() => {
       if (!els.goal.value.trim()) {
         els.goal.value = '在收件箱里找到招商银行信用卡中心发来的 9 月电子对账单邮件，点击那一行的「归档」按钮';
       }
-      if (!els.vars.children.length) addVarRow('回车', 'Enter');
+      if (!collectVars().length) addVarRow('回车', 'Enter');
       toast('已填入内置演示页（离线可完整演示）');
     };
   }

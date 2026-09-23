@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const path = require('path');
 
 const driver = require(path.join(__dirname, '..', 'browser-driver.js'));
-const { quoteArg, validateAct, buildArgv, OPS, REF_RE, parseEnvelope, unwrapResult } = driver._test;
+const { quoteArg, validateAct, buildArgv, OPS, REF_RE, parseEnvelope, unwrapResult, uploadPathAllowed } = driver._test;
 
 /* ---------- quoteArg：cmd.exe 引号规则 ---------- */
 
@@ -140,4 +140,17 @@ test('parseEnvelope：result 包裹 / isError / snapshot 直出对象 / 空对�
   assert.ok(!parseEnvelope({ code: 1, stdout: '', stderr: 'boom' }).ok);
   assert.strictEqual(unwrapResult(undefined), '');
   assert.strictEqual(unwrapResult(null), '');
+});
+
+/* ---------- upload 路径沙箱（防任意本地文件外泄） ---------- */
+
+test('uploadPathAllowed：仅 data/ 目录内放行', () => {
+  const dir = path.join(__dirname, '..', 'data');
+  assert.strictEqual(uploadPathAllowed(dir, 'uploads/a.png'), true);
+  assert.strictEqual(uploadPathAllowed(dir, path.join(dir, 'a.png')), true);
+  assert.strictEqual(uploadPathAllowed(dir, './a.png'), true);
+  assert.strictEqual(uploadPathAllowed(dir, 'C:\\Users\\v\\.ssh\\id_rsa'), false, '绝对路径逃逸应拒绝');
+  assert.strictEqual(uploadPathAllowed(dir, '..\\..\\secret.txt'), false, '相对路径穿越应拒绝');
+  assert.strictEqual(uploadPathAllowed(dir, '/etc/passwd'), false);
+  assert.strictEqual(uploadPathAllowed(dir, 'file:///C:/Windows/win.ini'), false);
 });

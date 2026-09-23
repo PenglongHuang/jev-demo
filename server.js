@@ -18,6 +18,12 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = process.env.PORT || 3000;
+/* 默认只绑本机回环：本服务无鉴权（浏览器驱动 / 代理都在信任边界内），
+ * 暴露到局域网会被用来劫持 playwright 会话或中继请求。需要反代时设 HOST=0.0.0.0。 */
+const HOST = process.env.HOST || '127.0.0.1';
+/* 仅在显式声明信任反代时才读 X-Forwarded-For（默认直连地址做租户哈希，
+ * 防 XFF 伪造冒充他人会话/场景） */
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 const API_URL_PRESETS = {
   official: 'https://api.typesafe.ai/v1/systemone',
   openrouter: 'https://openrouter.ai/api/v1/systemone',
@@ -55,7 +61,9 @@ function applyCors(res) {
 /* ---------------- 静态文件 ---------------- */
 function serveStatic(req, res) {
   applyCors(res);
-  let urlPath = decodeURIComponent(req.url.split('?')[0]);
+  let urlPath;
+  try { urlPath = decodeURIComponent(req.url.split('?')[0]); }
+  catch (_) { res.writeHead(400); return res.end('Bad Request'); }
   if (urlPath === '/') urlPath = '/index.html';
 
   // 防止路径穿越
@@ -85,8 +93,10 @@ function serveStatic(req, res) {
  * IP 做 SHA-1 哈希后作为文件名，不落明文。存储就是一个 JSON 文件，够用且好备份。
  */
 function clientIp(req) {
-  const xff = req.headers['x-forwarded-for'];
-  if (typeof xff === 'string' && xff.length) return xff.split(',')[0].trim();
+  if (TRUST_PROXY) {
+    const xff = req.headers['x-forwarded-for'];
+    if (typeof xff === 'string' && xff.length) return xff.split(',')[0].trim();
+  }
   return req.socket.remoteAddress || 'unknown';
 }
 
@@ -214,7 +224,7 @@ function handleBrowser(req, res, action) {
       else if (action === 'snapshot') out = await d.snapshot(session);
       else if (action === 'page-info') out = await d.pageInfo(session);
       else if (action === 'act') out = await d.act(session, String(payload.command || ''), payload.ref ? String(payload.ref) : null, payload.text != null ? String(payload.text) : null);
-      else if (action === 'screenshot') out = await d.screenshot(session);
+      else if (action === 'screenshot') out = await d.screenshot(session, session);
       else if (action === 'close') out = await d.close(session);
       else return sendJson(res, 404, { ok: false, error: { message: 'Unknown browser action' } });
     } catch (e) {
@@ -222,6 +232,21 @@ function handleBrowser(req, res, action) {
     }
     sendJson(res, out && out.ok ? 200 : 200, out);
   });
+}
+
+/* ---------------- 上游 URL 安全校验 ----------------
+ * 自定义上游（X-Endpoint / x-llm-base）只允许：
+ *   https:// 任意主机（用户自己配置的提供商）
+ *   http://  仅限 localhost / 127.0.0.1 / [::1]（本机调试，含 E2E mock）
+ * 且禁止 URL 内嵌 userinfo（http://localhost@evil.com/ 这类绕过）。 */
+function isAllowedCustomUpstream(raw) {
+  let u;
+  try { u = new URL(raw); } catch (_) { return null; }
+  if (u.username || u.password) return null;
+  const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (u.protocol === 'https:') return u;
+  if (u.protocol === 'http:' && (host === 'localhost' || host === '127.0.0.1' || host === '::1')) return u;
+  return null;
 }
 
 /* ---------------- 转发到 Jev ---------------- */
@@ -254,7 +279,8 @@ function proxySystemOne(req, res) {
     if (!payload.model) payload.model = 'jev-latest';
 
     // Key：请求头（页面填写）优先，其次环境变量；都没有则明确报错
-    const key = String(req.headers['x-typesafe-key'] || '').trim() || API_KEY;
+    const keyFromHeader = String(req.headers['x-typesafe-key'] || '').trim();
+    const key = keyFromHeader || API_KEY;
     if (!key) {
       res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
       return res.end(
@@ -264,15 +290,27 @@ function proxySystemOne(req, res) {
       );
     }
 
-    // 上游地址：请求头 X-Endpoint 决定预设或自定义 URL
+    // 上游地址：预设名直接放行；自定义 URL 必须由页面自带 Key 请求（防止把
+    // 服务端环境变量里的 Key 外送到任意地址），且只允许 https 或本机 http
     let endpointHeader = String(req.headers['x-endpoint'] || DEFAULT_PRESET).trim();
     let upstreamUrl;
     if (API_URL_PRESETS[endpointHeader]) {
       upstreamUrl = API_URL_PRESETS[endpointHeader];
-    } else if (/^https?:\/\//i.test(endpointHeader)) {
-      upstreamUrl = endpointHeader;
     } else {
-      upstreamUrl = API_URL_PRESETS[DEFAULT_PRESET];
+      const custom = isAllowedCustomUpstream(endpointHeader);
+      if (!custom) {
+        res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({
+          error: { message: '自定义接口地址被拒绝：仅允许 https:// 或 http://localhost（本机调试）' }
+        }));
+      }
+      if (!keyFromHeader) {
+        res.writeHead(403, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({
+          error: { message: '使用自定义接口时必须在页面配置里填写 API Key（服务端环境变量 Key 不转发到自定义地址）' }
+        }));
+      }
+      upstreamUrl = custom.href;
     }
 
     const upstreamBody = JSON.stringify(payload);
@@ -361,8 +399,11 @@ function proxyLlm(req, res) {
     if (!key) {
       return sendJson(res, 400, { error: { message: '缺少生成模型 API Key（请求头 x-llm-key）' } });
     }
-    if (!/^https:\/\//i.test(base) && !/^http:\/\/localhost(:\d+)?\/?/i.test(base) && !/^http:\/\/127\.0\.0\.1(:\d+)?\/?/i.test(base)) {
-      return sendJson(res, 400, { error: { message: 'Base URL 必须以 https:// 开头，或为 http://localhost 本机调试地址' } });
+    /* 用 URL 解析校验而非前缀正则：防 http://localhost@evil.com、
+     * http://127.0.0.1.evil.com、URL userinfo 等绕过 */
+    const baseParsed = isAllowedCustomUpstream(base);
+    if (!baseParsed) {
+      return sendJson(res, 400, { error: { message: 'Base URL 必须是 https://，或 http://localhost（本机调试，不允许内嵌用户名密码）' } });
     }
     const model = String(payload.model || '').trim();
     if (!model) return sendJson(res, 400, { error: { message: '缺少 model 字段' } });
@@ -379,9 +420,10 @@ function proxyLlm(req, res) {
     });
 
     // base 已带 /chat/completions 则不重复拼接
-    const upstreamUrl = /\/chat\/completions\/?$/i.test(base)
-      ? base
-      : base.replace(/\/+$/, '') + '/chat/completions';
+    const baseHref = baseParsed.href;
+    const upstreamUrl = /\/chat\/completions\/?$/i.test(baseHref)
+      ? baseHref
+      : baseHref.replace(/\/+$/, '') + '/chat/completions';
 
     const upstreamMod = upstreamUrl.toLowerCase().startsWith('http://') ? http : https;
     const started = Date.now();
@@ -468,7 +510,7 @@ const server = http.createServer((req, res) => {
   serveStatic(req, res);
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, HOST, () => {
   fs.mkdirSync(DATA_DIR, { recursive: true }); // 浏览器驱动把截图等产物写在这里
   const major = Number((process.versions.node || '0').split('.')[0]);
   if (major < 18) {
