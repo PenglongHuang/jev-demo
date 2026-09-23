@@ -27,9 +27,10 @@ const Config = (() => {
     keys: 'jev-keys',
     models: 'jev-models',
     customEndpoint: 'jev-custom-endpoint',
+    llm: 'jev-llm',
   };
 
-  const current = { provider: 'official', key: '', endpoint: 'official', model: 'jev-latest' };
+  const current = { provider: 'official', key: '', endpoint: 'official', model: 'jev-latest', llm: { base: '', key: '', model: '' } };
   let draft = null;
 
   function readJson(key, fallback) {
@@ -48,6 +49,10 @@ const Config = (() => {
     current.endpoint = current.provider === 'custom'
       ? (localStorage.getItem(STORAGE.customEndpoint) || '')
       : prov.endpoint;
+    const llm = readJson(STORAGE.llm, null);
+    current.llm = (llm && typeof llm === 'object')
+      ? { base: String(llm.base || ''), key: String(llm.key || ''), model: String(llm.model || '') }
+      : { base: '', key: '', model: '' };
     updateBadge();
   }
 
@@ -94,6 +99,9 @@ const Config = (() => {
     };
     document.getElementById('cfgProvider').value = draft.provider;
     keyInp.value = draft.key;
+    document.getElementById('cfgLlmBase').value = current.llm.base;
+    document.getElementById('cfgLlmKey').value = current.llm.key;
+    document.getElementById('cfgLlmModel').value = current.llm.model;
     refreshFormForProvider(draft.provider, true);
     document.getElementById('configModal').hidden = false;
     setTimeout(() => keyInp.focus(), 50);
@@ -231,12 +239,33 @@ const Config = (() => {
       localStorage.setItem(STORAGE.customEndpoint, url);
     }
 
+    /* 生成模型槽位（可选功能：Auto 浏览器「生成输入」）：填了任一字段就要求整组完整 */
+    const llmBase = document.getElementById('cfgLlmBase').value.trim();
+    const llmKey = document.getElementById('cfgLlmKey').value.trim();
+    const llmModel = document.getElementById('cfgLlmModel').value.trim();
+    if (llmBase || llmKey || llmModel) {
+      if (!llmBase || !llmKey || !llmModel) return toast('生成模型：Base URL、API Key、模型名 需整组填写');
+      if (!/^(https:\/\/|http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\/?)/i.test(llmBase)) {
+        return toast('生成模型 Base URL 必须以 https:// 开头（本机调试可用 http://localhost）');
+      }
+    }
+    localStorage.setItem(STORAGE.llm, JSON.stringify({ base: llmBase, key: llmKey, model: llmModel }));
+
     loadProvider(providerId);
     close();
     toast('已切换到 ' + prov.label + (key ? '' : '（API Key 未填）'));
   }
 
-  return { init: init, current: current, providers: PROVIDERS };
+  return {
+    init: init,
+    current: current,
+    providers: PROVIDERS,
+    /* 生成模型槽位（Auto 浏览器「生成输入」动作用，独立于 Jev 提供商） */
+    llm: {
+      get: function () { return current.llm; },
+      configured: function () { return Boolean(current.llm.base && current.llm.key && current.llm.model); },
+    },
+  };
 })();
 
 /* ===================== 主应用：预设 Tab / 发送 / 事件绑定 ===================== */

@@ -158,6 +158,21 @@ function run(session, args, opts) {
   });
 }
 
+/* --json 的输出形状不统一：多数命令是 {result: "..."}，失败是 {isError, error}，
+ * 而 snapshot 直接输出 {snapshot: "..."} 对象（实测 v0.1.17）。
+ * 这里把对象形结果解包成文本：优先 snapshot / result / text 字段。 */
+function unwrapResult(r) {
+  if (typeof r === 'string') return r;
+  if (r && typeof r === 'object') {
+    if (typeof r.snapshot === 'string') return r.snapshot;
+    if (typeof r.result === 'string') return r.result;
+    if (typeof r.text === 'string') return r.text;
+    if (!Object.keys(r).length) return '';
+    return JSON.stringify(r, null, 2);
+  }
+  return r == null ? '' : String(r);
+}
+
 /* --json 包裹解析：成功 {result} / 失败 {isError,error}。
  * 实测 playwright-cli 失败时退出码仍是 0 且输出 "### Error"，退出码不可靠，
  * 必须以 JSON 包裹为准；非 JSON 输出按「code!=0 或有 stderr 则失败」兜底。 */
@@ -172,9 +187,7 @@ function parseEnvelope(out) {
   try {
     const j = JSON.parse(text);
     if (j && j.isError) return { ok: false, error: String(j.error || 'playwright-cli 执行出错').slice(0, 500) };
-    if (j && Object.prototype.hasOwnProperty.call(j, 'result')) {
-      return { ok: true, result: typeof j.result === 'string' ? j.result : JSON.stringify(j.result) };
-    }
+    if (j && typeof j === 'object') return { ok: true, result: unwrapResult(j) };   // 覆盖 {result} 与 {snapshot} 两种形状
     return { ok: true, result: text };
   } catch (_) {
     if (out.code !== 0 || String(out.stderr || '').trim()) {
@@ -296,5 +309,5 @@ module.exports = {
   close,
   set dataDir(v) { dataDir = v; },
   get dataDir() { return dataDir; },
-  _test: { quoteArg, validateAct, buildArgv, OPS, REF_RE },
+  _test: { quoteArg, validateAct, buildArgv, OPS, REF_RE, parseEnvelope, unwrapResult },
 };

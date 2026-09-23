@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const path = require('path');
 
 const driver = require(path.join(__dirname, '..', 'browser-driver.js'));
-const { quoteArg, validateAct, buildArgv, OPS, REF_RE } = driver._test;
+const { quoteArg, validateAct, buildArgv, OPS, REF_RE, parseEnvelope, unwrapResult } = driver._test;
 
 /* ---------- quoteArg：cmd.exe 引号规则 ---------- */
 
@@ -118,4 +118,26 @@ test('buildArgv 按各命令的参数顺序组装', () => {
   assert.deepStrictEqual(buildArgv('dialog-accept', null, '好的'), ['dialog-accept', '好的']);
   assert.deepStrictEqual(buildArgv('dialog-dismiss', null, null), ['dialog-dismiss']);
   assert.deepStrictEqual(buildArgv('go-back', null, null), ['go-back']);
+});
+
+/* ---------- --json 包裹解析（snapshot 直接输出 {snapshot} 对象，须解包） ---------- */
+
+test('parseEnvelope：result 包裹 / isError / snapshot 直出对象 / 空对象 / 空输出', () => {
+  assert.deepStrictEqual(
+    parseEnvelope({ code: 0, stdout: JSON.stringify({ result: '- 0: (current) [T](u)' }), stderr: '' }),
+    { ok: true, result: '- 0: (current) [T](u)' });
+  assert.deepStrictEqual(
+    parseEnvelope({ code: 0, stdout: JSON.stringify({ isError: true, error: 'Error: Ref e999 not found' }), stderr: '' }),
+    { ok: false, error: 'Error: Ref e999 not found' });
+  /* snapshot --json 实测直接输出 {snapshot: "..."}（带缩进的多行 JSON） */
+  assert.deepStrictEqual(
+    parseEnvelope({ code: 0, stdout: '{\n  "snapshot": "- generic [ref=e1]:"\n}', stderr: '' }),
+    { ok: true, result: '- generic [ref=e1]:' });
+  assert.deepStrictEqual(
+    parseEnvelope({ code: 0, stdout: '{}', stderr: '' }),
+    { ok: true, result: '' });
+  assert.deepStrictEqual(parseEnvelope({ code: 0, stdout: '', stderr: '' }), { ok: true, result: '' });
+  assert.ok(!parseEnvelope({ code: 1, stdout: '', stderr: 'boom' }).ok);
+  assert.strictEqual(unwrapResult(undefined), '');
+  assert.strictEqual(unwrapResult(null), '');
 });

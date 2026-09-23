@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>灵犀邮箱 · 收件箱</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --border: #e7e8ec; --border-strong: #d7d9e0;
+    --text: #1a1c20; --text-2: #565c66; --text-3: #6e7480;
+    --accent: #4f46e5; --accent-soft: #eef2ff; --green: #0d9268; --green-soft: #e7f6f0;
+    --red: #dc2626; --red-soft: #fdecec; --radius: 12px;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .topbar {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; align-items: center; gap: 14px;
+    background: rgba(255,255,255,.9); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border); padding: 10px 22px;
+  }
+  .brand { font-weight: 700; font-size: 15.5px; color: var(--accent); white-space: nowrap; }
+  .topbar input[type="search"] {
+    flex: 1; max-width: 460px; padding: 8px 12px; font-size: 13.5px; font-family: inherit;
+    border: 1px solid var(--border-strong); border-radius: 9px; outline: none; background: #fbfbfc;
+  }
+  .topbar input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .btn {
+    padding: 7px 14px; font-size: 13px; font-weight: 600; font-family: inherit; cursor: pointer;
+    border-radius: 9px; border: 1px solid var(--border-strong); background: #fff; color: var(--text-2);
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .layout { display: grid; grid-template-columns: 190px 1fr; gap: 18px; max-width: 1180px; margin: 20px auto; padding: 0 22px; }
+  .folders { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; height: fit-content; }
+  .folders ul { list-style: none; margin: 0; padding: 0; }
+  .folders button {
+    display: flex; justify-content: space-between; width: 100%; padding: 8px 11px; font-size: 13.5px;
+    background: none; border: none; border-radius: 8px; cursor: pointer; font-family: inherit; color: var(--text-2);
+  }
+  .folders button:hover { background: #f2f3f6; color: var(--text); }
+  .folders button.active { background: var(--accent-soft); color: var(--accent); font-weight: 650; }
+  .folders .count { font-size: 11.5px; color: var(--text-3); font-family: var(--mono); }
+  .folder-note { font-size: 11.5px; color: var(--text-3); padding: 8px 11px 2px; }
+  .list-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .list-head {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 13px 18px; border-bottom: 1px solid var(--border);
+  }
+  .list-head h1 { font-size: 16px; margin: 0; }
+  .list-head .meta { font-size: 12px; color: var(--text-3); font-family: var(--mono); }
+  .mail-list { list-style: none; margin: 0; padding: 0; }
+  .mail { display: grid; grid-template-columns: 22px 22px 150px 1fr 64px; gap: 10px; align-items: start; padding: 12px 18px; border-bottom: 1px solid var(--border); }
+  .mail:last-child { border-bottom: none; }
+  .mail:hover { background: #fafbfd; }
+  .mail.unread .from, .mail.unread .subj { font-weight: 700; }
+  .mail input[type="checkbox"] { accent-color: var(--accent); margin-top: 3px; }
+  .star { background: none; border: none; cursor: pointer; font-size: 15px; color: #cbd0da; padding: 0; }
+  .star.on { color: #f0a132; }
+  .from { color: var(--text); font-size: 13px; background: none; border: none; padding: 0; cursor: pointer; font-family: inherit; text-align: left; }
+  .from:hover { color: var(--accent); }
+  .mid { min-width: 0; }
+  .subj { background: none; border: none; padding: 0; cursor: pointer; font-family: inherit; font-size: 13.5px; color: var(--text); text-align: left; }
+  .subj:hover { color: var(--accent); }
+  .att { font-size: 11px; color: var(--text-3); }
+  .snippet { margin: 2px 0 0; font-size: 12.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ops { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .ops button {
+    font-size: 12px; padding: 3.5px 10px; border-radius: 100px; cursor: pointer; font-family: inherit;
+    border: 1px solid var(--border-strong); background: #fff; color: var(--text-2);
+  }
+  .ops button:hover { border-color: var(--accent); color: var(--accent); }
+  .ops button.danger:hover { border-color: var(--red); color: var(--red); }
+  .time { font-size: 11.5px; color: var(--text-3); font-family: var(--mono); text-align: right; padding-top: 2px; }
+  .empty { padding: 56px 20px; text-align: center; color: var(--text-3); font-size: 13px; }
+  .toast {
+    position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%) translateY(14px);
+    background: #17181c; color: #fff; padding: 10px 18px; border-radius: 10px; font-size: 13px;
+    opacity: 0; pointer-events: none; transition: .22s; z-index: 99;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%); }
+  dialog {
+    border: none; border-radius: 14px; padding: 0; width: min(520px, 92vw);
+    box-shadow: 0 18px 50px rgba(16,18,24,.18);
+  }
+  dialog::backdrop { background: rgba(20,22,28,.42); }
+  .dlg-head { display: flex; align-items: center; justify-content: space-between; padding: 15px 20px; border-bottom: 1px solid var(--border); font-weight: 700; }
+  .dlg-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+  .dlg-body label { font-size: 12.5px; font-weight: 600; color: var(--text-2); display: block; margin-bottom: 4px; }
+  .dlg-body input, .dlg-body textarea {
+    width: 100%; padding: 8px 11px; font-size: 13.5px; font-family: inherit;
+    border: 1px solid var(--border-strong); border-radius: 9px;
+  }
+  .dlg-body textarea { min-height: 110px; resize: vertical; }
+  .dlg-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 13px 20px; border-top: 1px solid var(--border); }
+  @media (max-width: 760px) {
+    .layout { grid-template-columns: 1fr; }
+    .mail { grid-template-columns: 22px 22px 1fr 64px; }
+    .mid { grid-column: 1 / -1; }
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <span class="brand">◇ 灵犀邮箱</span>
+  <input id="searchBox" type="search" aria-label="搜索邮件" placeholder="搜索邮件（按发件人或主题过滤）" />
+  <button class="btn primary" id="composeBtn" type="button">写信</button>
+  <button class="btn" id="resetBtn" type="button">重置演示</button>
+</header>
+
+<div class="layout">
+  <nav class="folders" aria-label="文件夹">
+    <ul id="folderList"></ul>
+    <p class="folder-note">已归档 <b id="archivedCount">0</b> 封<br />已删除 <b id="deletedCount">0</b> 封</p>
+  </nav>
+
+  <main class="list-panel">
+    <div class="list-head">
+      <h1 id="folderTitle">收件箱</h1>
+      <span class="meta" id="listMeta"></span>
+    </div>
+    <ul class="mail-list" id="mailList"></ul>
+    <div class="empty" id="emptyState" hidden>这里没有邮件</div>
+  </main>
+</div>
+
+<dialog id="composeDlg" aria-labelledby="composeTitle">
+  <form method="dialog" style="margin:0">
+    <div class="dlg-head"><span id="composeTitle">写信</span><button class="btn" type="submit" value="cancel" formnovalidate>关闭</button></div>
+    <div class="dlg-body">
+      <div><label for="toInput">收件人</label><input id="toInput" aria-label="收件人邮箱" placeholder="name@example.com" /></div>
+      <div><label for="subjInput">主题</label><input id="subjInput" aria-label="邮件主题" placeholder="邮件主题" /></div>
+      <div><label for="bodyInput">正文</label><textarea id="bodyInput" aria-label="邮件正文" placeholder="写点什么…"></textarea></div>
+    </div>
+    <div class="dlg-foot">
+      <button class="btn" type="submit" value="cancel" formnovalidate>取消</button>
+      <button class="btn primary" type="submit" value="send" id="sendBtn">发送</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+/* ============ 内置演示邮箱：与 presets.js 离线快照同一批数据（同干扰项） ============ */
+'use strict';
+
+const MAILS = [
+  { from: '招商银行信用卡中心', subject: '您的 9 月电子对账单已生成', att: true, star: true, time: '09-23 08:12',
+    snippet: '尊敬的客户：您名下尾号 6688 的信用卡 2026 年 9 月账单已出账，本期账单金额 ¥3,412.50，最低还款额 ¥341.30，到期还款日 10 月 12 日。可登录掌上生活 App 查看完整明细，或通过附件下载 PDF 对账单留存。' },
+  { from: '李婉宁', subject: 'Re: 周五评审会材料确认', time: '09-23 07:45',
+    snippet: '大家好，评审材料我已经更新到共享盘，主要改动是风控模块的时序图和灰度计划的资源评估。周五上午十点开始，请各位提前过一遍，有问题的部分在文档评论区留言，会上统一讨论。' },
+  { from: '招商银行储蓄卡', subject: '账户余额变动提醒（支出 ¥1,280.00）', time: '09-22 21:30',
+    snippet: '您的账户 6225****8876 于 09-22 21:29 完成一笔快捷支付交易，金额人民币 1,280.00 元，对方商户为顺丰速运。可用余额 ¥46,215.80。如非本人操作，请立即致电客服热线挂失冻结。' },
+  { from: '周航', subject: '项目周报 W38：风控模块联调完成', time: '09-22 18:02',
+    snippet: '本周重点：风控规则引擎联调完成，接口平均耗时 42ms，比预期好；遗留问题是对账批处理的慢查询还需要优化，预计下周二之前完成。附件是周报原文和燃尽图，请查阅。' },
+  { from: '灵犀云市场', subject: '限时优惠：云服务器 3 折起，错过再等一年', time: '09-22 16:40',
+    snippet: '年度大促最后 3 天！2 核 4G 云服务器首年仅需 ¥198，企业新用户再享满减礼包。活动名额有限，点击进入活动页立即抢购，退还规则以活动页说明为准。' },
+  { from: '招商银行信用卡中心', subject: '还款成功通知（卡号 6225****6688）', time: '09-22 14:18',
+    snippet: '您的信用卡于 09-22 14:17 入账一笔还款，金额人民币 2,000.00 元，当前剩余应还金额 ¥1,412.50。感谢您的按时还款，继续保持良好的用卡记录有助于额度提升。' },
+  { from: '王倩', subject: '合同盖章流程卡住了，帮忙看下', star: true, time: '09-22 11:26',
+    snippet: '市场部的渠道合作合同在 OA 里走到会签第三步被驳回了，理由是附件版本不对，但我看上传的明明是 V3 终版。麻烦帮我看看流程引擎的审批记录，急用，这周必须走完。' },
+  { from: '兴业银行', subject: '您的电子账单已出具', att: true, time: '09-22 09:05',
+    snippet: '尊敬的客户，您的信用卡 2026 年 9 月电子账单已出具，本期应还金额 ¥8,903.16，到期还款日 10 月 8 日。点击附件查看账单明细，也可通过手机银行查询并一键还款。' },
+  { from: '招商银行信用卡中心', subject: '您的 8 月电子对账单已生成', att: true, time: '09-21 08:30',
+    snippet: '尊敬的客户：您名下尾号 6688 的信用卡 2026 年 8 月账单已出账，本期账单金额 ¥2,976.00，最低还款额 ¥297.60，到期还款日 09 月 12 日。本邮件为历史账单归档通知，无需回复。' },
+  { from: '陈嘉时', subject: '设计稿 V3 已上传，麻烦验收', time: '09-20 19:11',
+    snippet: '改了三版的控制台首页设计稿终于定稿了，源文件在 Figma 项目「中台改版」里，标注也补全了。重点看数据看板的空态和加载态，移动端适配稿周五给。确认无误我就切图交付。' },
+  { from: '灵犀云市场', subject: '双 11 预售清单：数据库与 CDN 组合价', time: '09-20 15:33',
+    snippet: '预售通道已开启：RDS 高可用版年付 5.5 折，CDN 流量包买 10TB 送 3TB。现在付定金可锁定价格，尾款 11 月 1 日支付即可。已有 2,341 家企业参与本次预售。' },
+  { from: 'GitHub', subject: '[lingxi/mail] Weekly security alert digest', time: '09-20 08:00',
+    snippet: 'Weekly digest for repository lingxi/mail: 2 dependency updates available, 1 security advisory affecting lodash@4.17.19, and 3 new CVEs matched your alert settings. View the security tab for remediation guidance.' },
+  { from: '刘振宇', subject: '关于差旅报销新规的通知', time: '09-19 17:20',
+    snippet: '自 10 月 1 日起差旅报销执行新规：高铁一等座需事前审批，住宿标准按城市分档（一线 600/晚，其他 450/晚），发票需在行程结束后 30 天内提交，逾期系统自动关闭单据。' },
+  { from: '招商银行储蓄卡', subject: '账户余额变动提醒（收入 ¥12,500.00）', time: '09-19 10:44',
+    snippet: '您的账户 6225****8876 于 09-19 10:43 入账一笔代发交易，金额人民币 12,500.00 元，付款方为灵犀科技（工资）。可用余额 ¥57,495.80。本邮件为通知类邮件，请勿直接回复。' },
+  { from: '赵曼', subject: '服务器证书下周到期，需要续费确认', time: '09-18 16:08',
+    snippet: 'api.lingxi-mail.com 的 TLS 证书 9 月 28 日到期，通配符证书续费需要走采购流程，大概 3 个工作日。如果这周内不提交，到期后 App 端会有拦截告警，麻烦今天确认预算。' },
+  { from: '京东金融', subject: '白条账单日出账提醒', time: '09-18 09:12',
+    snippet: '您 9 月的白条账单已出账：本期金额 ¥657.40，最低还款 ¥65.74，还款日 10 月 05 日。绑定银行卡自动还款可享立减优惠，活动详情见 App。' },
+  { from: '孙浩', subject: '新同事入职账号申请（运营岗 ×2）', time: '09-17 14:55',
+    snippet: '下周一两位运营新同事入职，需要开通：邮箱、OA、数据看板（只读）和客服工单系统的坐席权限。入职资料已同步 HR 系统，麻烦按流程开通，有问题电话找我。' },
+  { from: '邮豆生活', subject: '咖啡豆年度囤货节：满 199 减 60', time: '09-17 08:21',
+    snippet: '一年一度的囤货节来了！埃塞俄比亚耶加雪菲、哥伦比亚蕙兰产地直采，全店满 199 减 60，老客户额外赠挂耳滤包 20 片。活动截至 9 月 30 日。' }
+];
+
+const FOLDERS = [
+  { id: 'inbox',    name: '收件箱',     count: 86 },
+  { id: 'starred',  name: '星标邮件',   count: 5 },
+  { id: 'sent',     name: '已发送',     count: 0 },
+  { id: 'drafts',   name: '草稿箱',     count: 2 },
+  { id: 'trash',    name: '废纸篓',     count: 0 },
+  { id: 'junk',     name: '垃圾邮件',   count: 12 },
+];
+
+const state = { folder: 'inbox', mails: [], archived: 0, deleted: 0, query: '' };
+
+const $ = (id) => document.getElementById(id);
+let toastTimer;
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+function reset() {
+  state.mails = MAILS.map((m, i) => Object.assign({ unread: i < 3, id: i + 1 }, m));
+  state.archived = 0; state.deleted = 0; state.folder = 'inbox'; state.query = '';
+  $('searchBox').value = '';
+  render();
+}
+
+function visibleMails() {
+  if (state.folder === 'starred') {
+    return state.mails.filter((m) => m.star);
+  }
+  if (state.folder !== 'inbox') return [];
+  const q = state.query.trim();
+  if (!q) return state.mails;
+  return state.mails.filter((m) => (m.from + ' ' + m.subject + ' ' + m.snippet).toLowerCase().includes(q.toLowerCase()));
+}
+
+function render() {
+  /* 文件夹导航 */
+  const fl = $('folderList');
+  fl.innerHTML = '';
+  FOLDERS.forEach((f) => {
+    const li = document.createElement('li');
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = state.folder === f.id ? 'active' : '';
+    const label = f.id === 'inbox' ? f.name + ' (' + state.mails.length + ')' : f.name + (f.count ? ' (' + f.count + ')' : '');
+    const name = document.createElement('span');
+    name.textContent = label;
+    b.appendChild(name);
+    if (f.count) {
+      const c = document.createElement('span');
+      c.className = 'count';
+      c.textContent = '';
+      b.appendChild(c);
+    }
+    b.setAttribute('aria-label', label);
+    b.onclick = () => { state.folder = f.id; render(); };
+    li.appendChild(b);
+    fl.appendChild(li);
+  });
+  $('archivedCount').textContent = String(state.archived);
+  $('deletedCount').textContent = String(state.deleted);
+
+  /* 列表 */
+  const list = visibleMails();
+  $('folderTitle').textContent = (FOLDERS.find((f) => f.id === state.folder) || {}).name || '';
+  $('listMeta').textContent = state.folder === 'inbox'
+    ? '共 ' + list.length + ' 封，未读 ' + state.mails.filter((m) => m.unread).length + ' 封'
+    : '共 ' + list.length + ' 封';
+  const ul = $('mailList');
+  ul.innerHTML = '';
+  $('emptyState').hidden = list.length > 0;
+  if (!list.length) {
+    $('emptyState').textContent = state.folder === 'inbox' && state.query
+      ? '没有匹配「' + state.query + '」的邮件'
+      : '这里没有邮件';
+  }
+
+  list.forEach((m) => {
+    const li = document.createElement('li');
+    li.className = 'mail' + (m.unread ? ' unread' : '');
+    li.setAttribute('aria-label', '邮件 ' + m.id + '：' + m.from + ' · ' + m.subject);
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.setAttribute('aria-label', '选择这封邮件');
+    li.appendChild(cb);
+
+    const star = document.createElement('button');
+    star.type = 'button';
+    star.className = 'star' + (m.star ? ' on' : '');
+    star.textContent = m.star ? '★' : '☆';
+    star.setAttribute('aria-label', m.star ? '已标星' : '未标星');
+    star.title = m.star ? '取消星标' : '加星标';
+    star.onclick = () => { m.star = !m.star; render(); toast(m.star ? '已标星：' + m.subject : '已取消星标'); };
+    li.appendChild(star);
+
+    const from = document.createElement('button');
+    from.type = 'button';
+    from.className = 'from';
+    from.textContent = m.from;
+    from.setAttribute('aria-label', m.from);
+    from.title = '搜索该发件人';
+    from.onclick = () => { state.folder = 'inbox'; state.query = m.from; $('searchBox').value = m.from; render(); };
+    li.appendChild(from);
+
+    const mid = document.createElement('div');
+    mid.className = 'mid';
+    const subj = document.createElement('button');
+    subj.type = 'button';
+    subj.className = 'subj';
+    subj.textContent = m.subject + (m.att ? '（附件）' : '');
+    subj.setAttribute('aria-label', m.subject + (m.att ? '（附件）' : ''));
+    subj.onclick = () => { m.unread = false; render(); toast('已读：' + m.subject); };
+    mid.appendChild(subj);
+    const sn = document.createElement('p');
+    sn.className = 'snippet';
+    sn.textContent = m.snippet;
+    mid.appendChild(sn);
+    const ops = document.createElement('div');
+    ops.className = 'ops';
+    const mk = (label, cls, fn) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = cls || '';
+      b.textContent = label;
+      b.setAttribute('aria-label', label);
+      b.onclick = fn;
+      return b;
+    };
+    ops.appendChild(mk('归档', '', () => {
+      state.mails = state.mails.filter((x) => x.id !== m.id);
+      state.archived += 1;
+      render();
+      toast('已归档：' + m.subject);
+    }));
+    ops.appendChild(mk('删除', 'danger', () => {
+      /* 原生 confirm：演示 dialog-accept / dialog-dismiss 动作 */
+      if (window.confirm('确定要删除这封邮件吗？\n' + m.subject)) {
+        state.mails = state.mails.filter((x) => x.id !== m.id);
+        state.deleted += 1;
+        render();
+        toast('已删除：' + m.subject);
+      }
+    }));
+    ops.appendChild(mk('标为未读', '', () => { m.unread = true; render(); toast('已标为未读：' + m.subject); }));
+    mid.appendChild(ops);
+    li.appendChild(mid);
+
+    const time = document.createElement('div');
+    time.className = 'time';
+    time.textContent = m.time;
+    li.appendChild(time);
+
+    ul.appendChild(li);
+  });
+}
+
+/* 顶栏交互 */
+$('searchBox').addEventListener('input', (e) => {
+  state.folder = 'inbox';
+  state.query = e.target.value;
+  render();
+});
+$('resetBtn').onclick = () => { reset(); toast('演示已重置为初始 18 封邮件'); };
+$('composeBtn').onclick = () => {
+  $('toInput').value = '';
+  $('subjInput').value = '';
+  $('bodyInput').value = '';
+  $('composeDlg').showModal();
+};
+$('composeDlg').addEventListener('close', () => {
+  if ($('composeDlg').returnValue === 'send') {
+    const to = $('toInput').value.trim();
+    const subj = $('subjInput').value.trim();
+    if (!to || !subj) { toast('演示：收件人与主题不能为空（未发送）'); return; }
+    toast('演示：已发送「' + subj + '」→ ' + to + '（不会真实发出）');
+  }
+});
+
+reset();
+</script>
+</body>
+</html>

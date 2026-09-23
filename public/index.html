@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Jev 体验台 · System One 决策模型</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Ctext x='16' y='22' font-size='17' fill='white' text-anchor='middle'%3E%E2%97%87%3C/text%3E%3C/svg%3E" />
-<link rel="stylesheet" href="styles.css?v=20260923b" />
+<link rel="stylesheet" href="styles.css?v=20260924a" />
 </head>
 <body>
 
@@ -56,8 +56,8 @@
 
     <div class="warnbar" id="autoInstallHint" hidden>
       <div class="title">⚠ 浏览器引擎不可用</div>
-      Auto 浏览器模式需要 playwright 驱动本机 Chrome/Edge：在项目目录执行
-      <code>npm i playwright</code>（只装库，无需下载浏览器），然后重启 <code>node server.js</code>。
+      Auto 浏览器模式需要 <b>全局安装 playwright-cli</b> 和本机 Chrome / Edge：在终端执行
+      <code>npm i -g @playwright/cli</code>（只装 CLI，复用你本机已装的浏览器），装好后刷新本页。
       Demo 模式不受影响。
     </div>
 
@@ -104,12 +104,21 @@
         <h2>运行流水</h2>
         <span class="spacer"></span>
         <span class="sub" id="autoSummary"></span>
+        <button class="chip" id="autoExport" type="button" hidden
+                title="下载本次运行的完整 JSON 记录（每一步的请求体、响应、执行与截图）">⬇ 导出运行记录</button>
       </div>
-      <div id="autoFlow" class="auto-flow">
+      <div class="auto-status" id="autoStatus" hidden>
+        <span class="status-pill busy" id="autoRunPill">运行中</span>
+        <span class="auto-progress" id="autoProgress">第 0 / 15 步</span>
+        <span class="auto-elapsed" id="autoElapsed">0s</span>
+      </div>
+      <div class="auto-timeline" id="autoTimeline" hidden role="list" aria-label="运行轨迹时间线"></div>
+      <div id="autoFlow" class="auto-flow" aria-live="polite">
         <div class="out-empty">
           <div class="big" aria-hidden="true">▶</div>
           填好任务后点「打开浏览器并开始」。<br />
-          每一步都会展示：① 构造的 state ② 构造的问题 ③ Jev 决策概率 ④ 执行结果与截图
+          每一步完整可见：① 构造的 state ② 构造的 4 道问题 ③ Jev 决策概率 ④ 执行结果与截图；<br />
+          顶部时间线是全程轨迹，点击任意节点跳到对应步骤卡。
         </div>
       </div>
     </div>
@@ -318,6 +327,22 @@
           <input type="text" id="cfgModelInput" hidden placeholder="自定义模型名，如 jev-latest" spellcheck="false" />
           <p class="field-tip" id="cfgModelTip"></p>
         </div>
+        <div class="llm-slot">
+          <div class="llm-slot-title">生成模型 <span class="llm-slot-sub">Auto 浏览器「生成输入」动作用 · OpenAI 兼容</span></div>
+          <div class="field">
+            <label for="cfgLlmBase">Base URL</label>
+            <input type="text" id="cfgLlmBase" placeholder="https://api.openai.com/v1" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="cfgLlmKey">API Key</label>
+            <input type="password" id="cfgLlmKey" placeholder="sk-…" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="cfgLlmModel">模型名</label>
+            <input type="text" id="cfgLlmModel" placeholder="gpt-4o-mini / qwen-turbo / deepseek-chat…" spellcheck="false" />
+            <p class="field-tip">只存浏览器 localStorage，请求时经本地服务透传到 <code>&lt;base&gt;/chat/completions</code>。不填则「生成输入」动作会失败并提示；与上方 Jev 提供商相互独立。</p>
+          </div>
+        </div>
       </div>
       <div class="modal-foot">
         <button class="btn-ghost" id="configTest" type="button">🔌 测试连通性</button>
@@ -331,13 +356,13 @@
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-<script src="presets.js?v=20260923b"></script>
-<script src="js/util.js?v=20260923b"></script>
-<script src="js/auto-core.js?v=20260923b"></script>
-<script src="js/state-editor.js?v=20260923b"></script>
-<script src="js/questions.js?v=20260923b"></script>
-<script src="js/output.js?v=20260923b"></script>
-<script src="js/app.js?v=20260923b"></script>
-<script src="js/auto.js?v=20260923b"></script>
+<script src="presets.js?v=20260924a"></script>
+<script src="js/util.js?v=20260924a"></script>
+<script src="js/auto-core.js?v=20260924a"></script>
+<script src="js/state-editor.js?v=20260924a"></script>
+<script src="js/questions.js?v=20260924a"></script>
+<script src="js/output.js?v=20260924a"></script>
+<script src="js/app.js?v=20260924a"></script>
+<script src="js/auto.js?v=20260924a"></script>
 </body>
 </html>
