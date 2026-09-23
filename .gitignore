@@ -19,3 +19,7 @@ npm-debug.log*
 
 # 场景保存（按 IP 隔离的租户 JSON）
 data/
+
+# 内部文档不进仓库（README 引用的截图除外）
+docs/*
+!docs/images/
