@@ -48,7 +48,7 @@ const MIME = {
 function applyCors(res) {
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Typesafe-Key, X-Endpoint');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Typesafe-Key, X-Endpoint, X-Llm-Base, X-Llm-Key');
   res.setHeader('Access-Control-Max-Age', '86400');
 }
 
@@ -212,6 +212,7 @@ function handleBrowser(req, res, action) {
     try {
       if (action === 'open') out = await d.open(session, String(payload.url || ''), { browser: payload.browser });
       else if (action === 'snapshot') out = await d.snapshot(session);
+      else if (action === 'page-info') out = await d.pageInfo(session);
       else if (action === 'act') out = await d.act(session, String(payload.command || ''), payload.ref ? String(payload.ref) : null, payload.text != null ? String(payload.text) : null);
       else if (action === 'screenshot') out = await d.screenshot(session);
       else if (action === 'close') out = await d.close(session);
@@ -346,6 +347,92 @@ function proxySystemOne(req, res) {
   });
 }
 
+/* ---------------- 转发到生成模型（OpenAI 兼容 /chat/completions） ----------------
+ * Auto 浏览器模式「生成输入」动作用的纯透传：
+ *  - 地址与 Key 全部来自页面请求头（x-llm-base / x-llm-key），服务端不保存
+ *  - base 仅允许 https:// 或 http://localhost（内网地址一律拒绝）
+ *  - 请求体做字段白名单（model/messages/temperature/max_tokens），messages 内容原样透传不改动
+ */
+function proxyLlm(req, res) {
+  readJsonBody(req, res, (payload) => {
+    const base = String(req.headers['x-llm-base'] || '').trim();
+    const key = String(req.headers['x-llm-key'] || '').trim();
+
+    if (!key) {
+      return sendJson(res, 400, { error: { message: '缺少生成模型 API Key（请求头 x-llm-key）' } });
+    }
+    if (!/^https:\/\//i.test(base) && !/^http:\/\/localhost(:\d+)?\/?/i.test(base) && !/^http:\/\/127\.0\.0\.1(:\d+)?\/?/i.test(base)) {
+      return sendJson(res, 400, { error: { message: 'Base URL 必须以 https:// 开头，或为 http://localhost 本机调试地址' } });
+    }
+    const model = String(payload.model || '').trim();
+    if (!model) return sendJson(res, 400, { error: { message: '缺少 model 字段' } });
+    if (!Array.isArray(payload.messages) || !payload.messages.length) {
+      return sendJson(res, 400, { error: { message: '缺少 messages 字段（非空数组）' } });
+    }
+
+    // 字段白名单重组：只透传约定的四个字段
+    const upstreamBody = JSON.stringify({
+      model: model,
+      messages: payload.messages,
+      temperature: typeof payload.temperature === 'number' ? payload.temperature : 0.3,
+      max_tokens: typeof payload.max_tokens === 'number' ? payload.max_tokens : 200,
+    });
+
+    // base 已带 /chat/completions 则不重复拼接
+    const upstreamUrl = /\/chat\/completions\/?$/i.test(base)
+      ? base
+      : base.replace(/\/+$/, '') + '/chat/completions';
+
+    const upstreamMod = upstreamUrl.toLowerCase().startsWith('http://') ? http : https;
+    const started = Date.now();
+    const upstreamReq = upstreamMod.request(
+      upstreamUrl,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + key,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(upstreamBody),
+        },
+        timeout: 60000,
+      },
+      (upstreamRes) => {
+        let data = '';
+        upstreamRes.on('data', (c) => (data += c));
+        upstreamRes.on('end', () => {
+          const latency = Date.now() - started;
+          let parsed = null;
+          try { parsed = JSON.parse(data); } catch (_) { /* 保留原文 */ }
+
+          if (upstreamRes.statusCode >= 200 && upstreamRes.statusCode < 300 && parsed) {
+            parsed._latency_ms = latency;
+            parsed._upstream = upstreamUrl;
+            return sendJson(res, 200, parsed);
+          }
+          sendJson(res, upstreamRes.statusCode >= 400 ? upstreamRes.statusCode : 502, {
+            error: {
+              status: upstreamRes.statusCode,
+              message: (parsed && parsed.error && (parsed.error.message || parsed.error)) || data || '上游返回异常',
+              upstream: upstreamUrl,
+            },
+            _latency_ms: latency,
+          });
+        });
+      }
+    );
+
+    upstreamReq.on('timeout', () => {
+      upstreamReq.destroy();
+      sendJson(res, 504, { error: { message: '请求生成模型超时（60s）', upstream: upstreamUrl } });
+    });
+    upstreamReq.on('error', (err) => {
+      sendJson(res, 502, { error: { message: '无法连接生成模型：' + err.message, upstream: upstreamUrl } });
+    });
+    upstreamReq.write(upstreamBody);
+    upstreamReq.end();
+  });
+}
+
 const server = http.createServer((req, res) => {
   const pathname = req.url.split('?')[0];
 
@@ -359,18 +446,34 @@ const server = http.createServer((req, res) => {
   if (pathname === '/api/workspace') return handleWorkspace(req, res);
   if (pathname.startsWith('/api/browser/')) return handleBrowser(req, res, pathname.slice('/api/browser/'.length));
   if (req.method === 'POST' && pathname === '/api/systemone') return proxySystemOne(req, res);
+  if (req.method === 'POST' && pathname === '/api/llm') return proxyLlm(req, res);
   if (req.method === 'GET' && pathname === '/api/health') {
     applyCors(res);
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     const d = getDriver();
-    const st = d ? d.status() : { available: false };
-    return res.end(JSON.stringify({ ok: true, model: 'jev-latest', hasKey: Boolean(API_KEY), browser: Boolean(st.available) }));
+    // browserDetail：playwright-cli 安装探测（结果缓存 60s），前端据此渲染 browserPill 三态
+    Promise.resolve(d ? d.status() : Promise.resolve({ available: false, reason: 'NO_DRIVER' }))
+      .then((st) => {
+        res.end(JSON.stringify({
+          ok: true,
+          model: 'jev-latest',
+          hasKey: Boolean(API_KEY),
+          browser: Boolean(st.available),
+          browserDetail: st,
+        }));
+      })
+      .catch(() => res.end(JSON.stringify({ ok: true, model: 'jev-latest', hasKey: Boolean(API_KEY), browser: false, browserDetail: { available: false } })));
+    return;
   }
   serveStatic(req, res);
 });
 
 server.listen(PORT, () => {
-  fs.mkdirSync(DATA_DIR, { recursive: true }); // 浏览器驱动把 .playwright-cli 产物写在这里
+  fs.mkdirSync(DATA_DIR, { recursive: true }); // 浏览器驱动把截图等产物写在这里
+  const major = Number((process.versions.node || '0').split('.')[0]);
+  if (major < 18) {
+    console.warn('  ⚠ 检测到 Node ' + process.versions.node + '：本项目要求 Node 18+（spawn/嵌套 fetch 依赖），部分功能可能异常');
+  }
   console.log('');
   console.log('  Jev 体验网页已启动');
   console.log('  →  http://localhost:' + PORT);
