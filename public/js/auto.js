@@ -125,7 +125,11 @@ const Auto = (() => {
   /* ---------- 浏览器 / 窗口尺寸选项 ---------- */
   function windowPlan() {
     const v = els.screen.value;
-    if (v === 'full') return { maximize: true };   // Chrome 原生 --start-maximized
+    if (v === 'full') {
+      /* 全屏 = Chrome 原生 --start-maximized；avail 尺寸一并带给 server，
+       * 用于 open 后校验最大化是否生效（未生效则 resize 兜底）。 */
+      return { maximize: true, width: window.screen.availWidth, height: window.screen.availHeight };
+    }
     const m = v.split('x');
     return { width: Number(m[0]), height: Number(m[1]) };
   }

@@ -168,7 +168,7 @@ test('BROWSERS 白名单只含 chrome / msedge；parseWindowSize 收敛到 200~1
   assert.strictEqual(parseWindowSize(null, undefined), null);
 });
 
-test('buildMaximizedConfig：chromium 原生最大化（args + viewport:null）', () => {
+test('buildMaximizedConfig：chromium 原生最大化（args + viewport:null，无 position —— 与最大化互斥）', () => {
   assert.deepStrictEqual(buildMaximizedConfig(), {
     browser: {
       launchOptions: { args: ['--start-maximized'] },

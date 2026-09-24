@@ -315,7 +315,9 @@ async function resize(session, w, h) {
  * browser.contextOptions 会被 daemon 原样透传给 launchPersistentContext
  * （coreBundle.js createPersistentBrowser），因此 chromium 原生
  * --start-maximized + viewport:null 即为真最大化（窗口进入最大化态，
- * viewport = 工作区全幅），不是 resize 模拟的「摆成工作区大小的普通窗口」。 */
+ * viewport = 工作区全幅），不是 resize 模拟的「摆成工作区大小的普通窗口」。
+ * 注意：不能再叠加 --window-position —— 实测应用位置会把最大化打回普通
+ * 窗口（视口 1036x710），两个参数互斥。 */
 function buildMaximizedConfig() {
   return {
     browser: {
@@ -323,6 +325,16 @@ function buildMaximizedConfig() {
       contextOptions: { viewport: null },
     },
   };
+}
+
+/* 工程自动执行（不占 Jev 名额，同 pageInfo）：读当前视口尺寸，
+ * 用于 open(maximize) 后校验最大化是否真的生效（企业策略等可能忽略
+ * --start-maximized），失败则由 server 触发 resize 兜底。 */
+async function viewport(session) {
+  const out = await exec(session, ['eval', "(function(){return window.innerWidth+'x'+window.innerHeight})()"]);
+  if (!out.ok) return null;
+  const m = String(out.result || '').match(/(\d+)x(\d+)/);
+  return m ? { w: Number(m[1]), h: Number(m[2]) } : null;
 }
 
 const MAXIMIZED_CONFIG_FILE = 'auto-cli.config.json';   // 落在 dataDir（daemon 的 cwd）
@@ -375,6 +387,7 @@ module.exports = {
   snapshot,
   pageInfo,
   resize,
+  viewport,
   act,
   screenshot,
   close,

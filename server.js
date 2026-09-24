@@ -222,10 +222,28 @@ function handleBrowser(req, res, action) {
     try {
       if (action === 'open') {
         const browser = ['chrome', 'msedge'].includes(payload.browser) ? payload.browser : undefined;
-        /* maximize：Chrome 原生 --start-maximized（真最大化态）。此时不能再
-         * resize —— 会把最大化的窗口打回普通窗口。 */
+        /* maximize：Chrome 原生 --start-maximized（真最大化态）。
+         * 前端同时传的 width/height（用户屏幕工作区）作校验参考：实测视口
+         * 若不足 85%（--start-maximized 被环境忽略）→ resize 兜底。 */
         const maximize = payload.maximize === true;
         out = await d.open(session, String(payload.url || ''), { browser, maximize });
+        if (out && out.ok && maximize) {
+          const ref = d._test.parseWindowSize(payload.width, payload.height);
+          if (ref) {
+            try {
+              /* 等 1.2s：open 返回时 Chrome 可能仍在应用最大化，立刻读视口
+               * 会拿到中间值导致误判走 resize 兜底 */
+              await new Promise((r) => setTimeout(r, 1200));
+              const vp = await d.viewport(session);
+              if (vp && (vp.w < ref.w * 0.85 || vp.h < ref.h * 0.85)) {
+                const rz = await d.resize(session, ref.w, ref.h);
+                out.maximized = false;
+                out.resized = Boolean(rz.ok);
+                if (!rz.ok) out.resizeError = rz.error;
+              }
+            } catch (_) { /* 校验失败不阻断，维持最大化结果 */ }
+          }
+        }
         /* 固定尺寸：前端传 width/height（工程侧 resize，不占 Jev 动作名额）；
          * 失败不致命，仅在响应里注明。 */
         if (out && out.ok && !maximize) {
