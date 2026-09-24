@@ -13,7 +13,9 @@
  *                                              缺失时自动换另一个内核重试；实例为独立临时 profile（不碰用户日常浏览器）
  *  snapshot(session)                         → {ok, snapshot(YAML 文本)}
  *  pageInfo(session)                         → {ok, url, title}（工程自动执行 tab-list，不占 Jev 动作）
- *  resize(session, w, h)                     → {ok}（工程自动执行，不占 Jev 动作）
+ *  resize(session, w, h)                     → {ok}（工程自动执行，设置页面视口尺寸）
+ *  viewport(session)                         → {w,h} | null（工程自动执行，读当前视口）
+ *  fullscreen(session)                       → {ok}（工程自动执行，CDP 真全屏）
  *  act(session, command, ref, text)          → {ok, result} | {ok:false, error}
  *  screenshot(session, name)                 → {ok, dataUrl} | {ok:false, error}
  *  close(session)                            → {ok}
@@ -261,7 +263,7 @@ async function open(session, url, opts) {
   if (opts && opts.maximize) {
     const cfgPath = path.join(dataDir, MAXIMIZED_CONFIG_FILE);
     try {
-      fs.writeFileSync(cfgPath, JSON.stringify(buildMaximizedConfig(), null, 2));
+      fs.writeFileSync(cfgPath, JSON.stringify(buildMaximizedConfig({ native: Boolean(opts.native) }), null, 2));
       configArgs = ['--config', cfgPath];
     } catch (e) {
       return { ok: false, error: '写入最大化配置失败：' + String(e && e.message || e) };
@@ -269,13 +271,13 @@ async function open(session, url, opts) {
   }
 
   const out = await exec(session, ['open', target, '--browser', first, '--headed'].concat(configArgs));
-  if (out.ok) return { ok: true, browser: first, maximized: Boolean(opts && opts.maximize) };
+  if (out.ok) return { ok: true, browser: first, maximized: Boolean(opts && opts.maximize), native: Boolean(opts && opts.native) };
 
   // 懒探测（设计 §4）：首选浏览器缺失时自动换另一个内核试一次，并把失败翻译成人话
   if (looksLikeBrowserMissing(out.error)) {
     const alt = first === 'msedge' ? 'chrome' : 'msedge';
     const retry = await exec(session, ['open', target, '--browser', alt, '--headed'].concat(configArgs));
-    if (retry.ok) return { ok: true, browser: alt, maximized: Boolean(opts && opts.maximize) };
+    if (retry.ok) return { ok: true, browser: alt, maximized: Boolean(opts && opts.maximize), native: Boolean(opts && opts.native) };
     return { ok: false, error: humanBrowserError(first + ' → ' + alt, retry.error) };
   }
   return { ok: false, error: humanBrowserError(first, out.error) };
@@ -317,11 +319,18 @@ async function resize(session, w, h) {
  * --start-maximized + viewport:null 即为真最大化（窗口进入最大化态，
  * viewport = 工作区全幅），不是 resize 模拟的「摆成工作区大小的普通窗口」。
  * 注意：不能再叠加 --window-position —— 实测应用位置会把最大化打回普通
- * 窗口（视口 1036x710），两个参数互斥。 */
-function buildMaximizedConfig() {
+ * 窗口（视口 1036x710），两个参数互斥。
+ *
+ * native=true 时追加 --force-device-scale-factor=1：让 Chrome 忽略 Windows
+ * 显示缩放按物理像素渲染。例如 1920×1080 屏 + 系统 125% 缩放，默认页面视口
+ * 只有 1536×864（CSS 像素 = 物理 ÷ 1.25）；强制 100% 后视口就是 1920×1080，
+ * 截图与页面布局都与屏幕原生分辨率一致。 */
+function buildMaximizedConfig(opts) {
+  const args = ['--start-maximized'];
+  if (opts && opts.native) args.push('--force-device-scale-factor=1', '--high-dpi-support=1');
   return {
     browser: {
-      launchOptions: { args: ['--start-maximized'] },
+      launchOptions: { args },
       contextOptions: { viewport: null },
     },
   };
@@ -335,6 +344,28 @@ async function viewport(session) {
   if (!out.ok) return null;
   const m = String(out.result || '').match(/(\d+)x(\d+)/);
   return m ? { w: Number(m[1]), h: Number(m[2]) } : null;
+}
+
+/* 真·全屏（工程自动执行，不占 Jev 名额）。
+ *
+ * 为什么不用启动参数：实测本机 Chrome 上，--start-fullscreen 与 --kiosk
+ * 虽进入进程命令行却被忽略（窗口仍是默认 1036x711），只有 --start-maximized
+ * 生效；F11 经 CDP 派发也到不了浏览器 UI 层。可靠路径是 CDP
+ * Browser.setWindowBounds(windowState:'fullscreen')：窗口进入全屏态
+ * （outer == inner == 屏幕全尺寸，连任务栏一起盖住，无浏览器工具栏）。
+ *
+ * 安全性：run-code 能执行任意 Playwright 代码，因此它**不在** OPS 白名单里
+ * （Jev 无法触发）；只有本文件的工程侧函数（pageInfo/resize/viewport/fullscreen）
+ * 直接调用 exec 使用它。片段本身不含双引号与百分号，符合 quoteArg 约束。 */
+const FULLSCREEN_SNIPPET =
+  'async page => { const cdp = await page.context().newCDPSession(page); ' +
+  'const info = await cdp.send(\'Browser.getWindowForTarget\'); ' +
+  'await cdp.send(\'Browser.setWindowBounds\', { windowId: info.windowId, bounds: { windowState: \'fullscreen\' } }); ' +
+  'return \'fullscreen\'; }';
+
+async function fullscreen(session) {
+  const out = await exec(session, ['run-code', FULLSCREEN_SNIPPET]);
+  return out.ok ? { ok: true } : out;
 }
 
 const MAXIMIZED_CONFIG_FILE = 'auto-cli.config.json';   // 落在 dataDir（daemon 的 cwd）
@@ -388,10 +419,11 @@ module.exports = {
   pageInfo,
   resize,
   viewport,
+  fullscreen,
   act,
   screenshot,
   close,
   set dataDir(v) { dataDir = v; },
   get dataDir() { return dataDir; },
-  _test: { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, parseEnvelope, unwrapResult, uploadPathAllowed, parseWindowSize, buildMaximizedConfig },
+  _test: { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, parseEnvelope, unwrapResult, uploadPathAllowed, parseWindowSize, buildMaximizedConfig, FULLSCREEN_SNIPPET },
 };

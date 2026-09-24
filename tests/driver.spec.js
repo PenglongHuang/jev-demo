@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const path = require('path');
 
 const driver = require(path.join(__dirname, '..', 'browser-driver.js'));
-const { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, parseEnvelope, unwrapResult, uploadPathAllowed, parseWindowSize, buildMaximizedConfig } = driver._test;
+const { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, parseEnvelope, unwrapResult, uploadPathAllowed, parseWindowSize, buildMaximizedConfig, FULLSCREEN_SNIPPET } = driver._test;
 
 /* ---------- quoteArg：cmd.exe 引号规则 ---------- */
 
@@ -175,4 +175,12 @@ test('buildMaximizedConfig：chromium 原生最大化（args + viewport:null，�
       contextOptions: { viewport: null },
     },
   });
+});
+
+test('全屏片段：走 CDP setWindowBounds，且不含 quoteArg 拒绝的字符', () => {
+  assert.match(FULLSCREEN_SNIPPET, /Browser\.setWindowBounds/);
+  assert.match(FULLSCREEN_SNIPPET, /windowState: 'fullscreen'/);
+  assert.match(FULLSCREEN_SNIPPET, /^async page =>/);
+  assert.doesNotMatch(FULLSCREEN_SNIPPET, /["%\r\n]/, '片段必须能安全通过 Windows cmd 引号封装');
+  assert.strictEqual(quoteArg(FULLSCREEN_SNIPPET).startsWith('"'), true);   // 含空格等 → 需包引号
 });

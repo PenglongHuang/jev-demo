@@ -222,12 +222,34 @@ function handleBrowser(req, res, action) {
     try {
       if (action === 'open') {
         const browser = ['chrome', 'msedge'].includes(payload.browser) ? payload.browser : undefined;
-        /* maximize：Chrome 原生 --start-maximized（真最大化态）。
-         * 前端同时传的 width/height（用户屏幕工作区）作校验参考：实测视口
-         * 若不足 85%（--start-maximized 被环境忽略）→ resize 兜底。 */
-        const maximize = payload.maximize === true;
-        out = await d.open(session, String(payload.url || ''), { browser, maximize });
-        if (out && out.ok && maximize) {
+        /* 窗口模式三档（前端 windowMode 指定，缺省 max）：
+         *   full — CDP 真全屏（铺满整屏，含任务栏，无浏览器工具栏）
+         *   max  — Chrome 原生 --start-maximized（最大化，保留工具栏）
+         *   size — 指定页面视口尺寸（resize）
+         * 前端同时传 width/height 作目标尺寸：full 用整屏、max 用工作区、
+         * size 用选项值 —— 既用于 size 档 resize，也用于开窗后校验。 */
+        const mode = ['full', 'max', 'size'].includes(payload.windowMode) ? payload.windowMode : 'max';
+        const maximize = mode !== 'size';
+        const native = mode === 'full' && payload.native === true;
+        out = await d.open(session, String(payload.url || ''), { browser, maximize, native });
+        if (out && out.ok && mode === 'full') {
+          /* 真全屏：先按最大化开窗（CDP 全屏失败时仍是体面的最大化窗口），
+           * 再经 CDP 切到 fullscreen 态，最后实测视口确认生效。 */
+          const r = await d.fullscreen(session);
+          out.fullscreen = Boolean(r && r.ok);
+          if (!out.fullscreen) out.fullscreenError = (r && r.error) || 'CDP 全屏调用失败';
+          const ref = d._test.parseWindowSize(payload.width, payload.height);
+          if (out.fullscreen && ref) {
+            try {
+              await new Promise((r2) => setTimeout(r2, 800));   // 全屏切换有过渡
+              const vp = await d.viewport(session);
+              if (vp && (vp.w < ref.w * 0.98 || vp.h < ref.h * 0.98)) {
+                out.fullscreen = false;
+                out.fullscreenError = '视口 ' + vp.w + '×' + vp.h + ' 未达整屏 ' + ref.w + '×' + ref.h;
+              }
+            } catch (_) { /* 校验异常不推翻已生效的全屏 */ }
+          }
+        } else if (out && out.ok && mode === 'max') {
           const ref = d._test.parseWindowSize(payload.width, payload.height);
           if (ref) {
             try {
@@ -243,10 +265,7 @@ function handleBrowser(req, res, action) {
               }
             } catch (_) { /* 校验失败不阻断，维持最大化结果 */ }
           }
-        }
-        /* 固定尺寸：前端传 width/height（工程侧 resize，不占 Jev 动作名额）；
-         * 失败不致命，仅在响应里注明。 */
-        if (out && out.ok && !maximize) {
+        } else if (out && out.ok) {
           const size = d._test.parseWindowSize(payload.width, payload.height);
           if (size) {
             const rz = await d.resize(session, size.w, size.h);
