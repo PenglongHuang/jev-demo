@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const path = require('path');
 
 const driver = require(path.join(__dirname, '..', 'browser-driver.js'));
-const { quoteArg, validateAct, buildArgv, OPS, REF_RE, parseEnvelope, unwrapResult, uploadPathAllowed } = driver._test;
+const { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, parseEnvelope, unwrapResult, uploadPathAllowed, parseWindowSize, buildMaximizedConfig } = driver._test;
 
 /* ---------- quoteArg：cmd.exe 引号规则 ---------- */
 
@@ -153,4 +153,26 @@ test('uploadPathAllowed：仅 data/ 目录内放行', () => {
   assert.strictEqual(uploadPathAllowed(dir, '..\\..\\secret.txt'), false, '相对路径穿越应拒绝');
   assert.strictEqual(uploadPathAllowed(dir, '/etc/passwd'), false);
   assert.strictEqual(uploadPathAllowed(dir, 'file:///C:/Windows/win.ini'), false);
+});
+
+/* ---------- 浏览器内核白名单与窗口尺寸校验 ---------- */
+
+test('BROWSERS 白名单只含 chrome / msedge；parseWindowSize 收敛到 200~10000 整数', () => {
+  assert.deepStrictEqual(Object.keys(BROWSERS).sort(), ['chrome', 'msedge']);
+  assert.deepStrictEqual(parseWindowSize(1920, 1080), { w: 1920, h: 1080 });
+  assert.deepStrictEqual(parseWindowSize('1366', '768'), { w: 1366, h: 768 });   // 页面传来的是字符串
+  assert.strictEqual(parseWindowSize(199.9, 800), null);
+  assert.strictEqual(parseWindowSize(100, 800), null);
+  assert.strictEqual(parseWindowSize(1920, 10001), null);
+  assert.strictEqual(parseWindowSize('abc', 800), null);
+  assert.strictEqual(parseWindowSize(null, undefined), null);
+});
+
+test('buildMaximizedConfig：chromium 原生最大化（args + viewport:null）', () => {
+  assert.deepStrictEqual(buildMaximizedConfig(), {
+    browser: {
+      launchOptions: { args: ['--start-maximized'] },
+      contextOptions: { viewport: null },
+    },
+  });
 });

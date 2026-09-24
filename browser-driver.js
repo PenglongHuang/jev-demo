@@ -9,9 +9,11 @@
  *
  * 对外接口（server.js 调用）：
  *  status()                                  → {available, version} | {available:false, reason:'not-installed', error}
- *  open(session, url, {browser})             → {ok, browser} | {ok:false, error(人话)}
+ *  open(session, url, {browser})             → {ok, browser} | {ok:false, error(人话)}；browser ∈ chrome(默认)/msedge，
+ *                                              缺失时自动换另一个内核重试；实例为独立临时 profile（不碰用户日常浏览器）
  *  snapshot(session)                         → {ok, snapshot(YAML 文本)}
  *  pageInfo(session)                         → {ok, url, title}（工程自动执行 tab-list，不占 Jev 动作）
+ *  resize(session, w, h)                     → {ok}（工程自动执行，不占 Jev 动作）
  *  act(session, command, ref, text)          → {ok, result} | {ok:false, error}
  *  screenshot(session, name)                 → {ok, dataUrl} | {ok:false, error}
  *  close(session)                            → {ok}
@@ -67,6 +69,10 @@ const OPS = {
 };
 
 const REF_RE = /^[A-Za-z0-9_-]+$/;
+
+/* 可选浏览器内核（open 的 --browser 只认这几个 chromium 系通道；
+ * firefox/webkit 对 accessibility 快照支持差，不开放）。 */
+const BROWSERS = { chrome: true, msedge: true };
 
 /* ---------------- Windows cmd.exe 引号封装 ----------------
  * shell:true 时 Node 不替我们加引号，必须自己拼命令行。
@@ -243,15 +249,33 @@ async function open(session, url, opts) {
   const target = String(url || '');
   if (!/^https?:\/\//i.test(target)) return { ok: false, error: '起始 URL 必须以 http:// 或 https:// 开头：' + JSON.stringify(target.slice(0, 80)) };
 
-  const first = (opts && opts.browser) || 'msedge';
-  const out = await exec(session, ['open', target, '--browser', first, '--headed']);
-  if (out.ok) return { ok: true, browser: first };
+  const requested = (opts && opts.browser) || 'chrome';
+  const first = BROWSERS[requested] ? requested : null;
+  if (!first) {
+    return { ok: false, error: '不支持的浏览器内核：' + JSON.stringify(String(requested).slice(0, 40)) + '（可选 chrome / msedge）' };
+  }
+
+  /* 最大化：写 config 文件并经 --config 传给 open（daemon 的 cwd 是 dataDir，
+   * config 路径含空格时 quoteArg 会自动包引号） */
+  let configArgs = [];
+  if (opts && opts.maximize) {
+    const cfgPath = path.join(dataDir, MAXIMIZED_CONFIG_FILE);
+    try {
+      fs.writeFileSync(cfgPath, JSON.stringify(buildMaximizedConfig(), null, 2));
+      configArgs = ['--config', cfgPath];
+    } catch (e) {
+      return { ok: false, error: '写入最大化配置失败：' + String(e && e.message || e) };
+    }
+  }
+
+  const out = await exec(session, ['open', target, '--browser', first, '--headed'].concat(configArgs));
+  if (out.ok) return { ok: true, browser: first, maximized: Boolean(opts && opts.maximize) };
 
   // 懒探测（设计 §4）：首选浏览器缺失时自动换另一个内核试一次，并把失败翻译成人话
   if (looksLikeBrowserMissing(out.error)) {
     const alt = first === 'msedge' ? 'chrome' : 'msedge';
-    const retry = await exec(session, ['open', target, '--browser', alt, '--headed']);
-    if (retry.ok) return { ok: true, browser: alt };
+    const retry = await exec(session, ['open', target, '--browser', alt, '--headed'].concat(configArgs));
+    if (retry.ok) return { ok: true, browser: alt, maximized: Boolean(opts && opts.maximize) };
     return { ok: false, error: humanBrowserError(first + ' → ' + alt, retry.error) };
   }
   return { ok: false, error: humanBrowserError(first, out.error) };
@@ -270,6 +294,38 @@ async function pageInfo(session) {
   const m = String(out.result || '').match(/-\s*\d+:\s*\(current\)\s*\[([^\]]*)\]\(([^)]*)\)/);
   return { ok: true, url: m ? m[2] : '', title: m ? m[1] : '' };
 }
+
+/* 工程自动执行（不占 Jev 动作名额，同 pageInfo/tab-list）：调整浏览器窗口尺寸。
+ * 固定尺寸场景用 resize；「全屏」场景不用 resize（会把已最大化的窗口又变回普通
+ * 窗口），而是走 open 的 maximize 分支（见 buildMaximizedConfig）。 */
+function parseWindowSize(w, h) {
+  const nw = Math.floor(Number(w));
+  const nh = Math.floor(Number(h));
+  if (!isFinite(nw) || !isFinite(nh) || nw < 200 || nh < 200 || nw > 10000 || nh > 10000) return null;
+  return { w: nw, h: nh };
+}
+
+async function resize(session, w, h) {
+  const size = parseWindowSize(w, h);
+  if (!size) return { ok: false, error: '窗口尺寸必须是 200~10000 的整数（收到 ' + JSON.stringify(String(w)) + '×' + JSON.stringify(String(h)) + '）' };
+  return exec(session, ['resize', String(size.w), String(size.h)]);
+}
+
+/* 最大化 config：playwright-cli 的 config 文件里 browser.launchOptions 与
+ * browser.contextOptions 会被 daemon 原样透传给 launchPersistentContext
+ * （coreBundle.js createPersistentBrowser），因此 chromium 原生
+ * --start-maximized + viewport:null 即为真最大化（窗口进入最大化态，
+ * viewport = 工作区全幅），不是 resize 模拟的「摆成工作区大小的普通窗口」。 */
+function buildMaximizedConfig() {
+  return {
+    browser: {
+      launchOptions: { args: ['--start-maximized'] },
+      contextOptions: { viewport: null },
+    },
+  };
+}
+
+const MAXIMIZED_CONFIG_FILE = 'auto-cli.config.json';   // 落在 dataDir（daemon 的 cwd）
 
 /* upload 文件路径必须落在 data/ 目录内（防「读任意本地文件 → 经页面文件框
  * 外发」的泄露原语）。允许相对 data/ 的路径与绝对路径两种写法；URI 形式
@@ -318,10 +374,11 @@ module.exports = {
   open,
   snapshot,
   pageInfo,
+  resize,
   act,
   screenshot,
   close,
   set dataDir(v) { dataDir = v; },
   get dataDir() { return dataDir; },
-  _test: { quoteArg, validateAct, buildArgv, OPS, REF_RE, parseEnvelope, unwrapResult, uploadPathAllowed },
+  _test: { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, parseEnvelope, unwrapResult, uploadPathAllowed, parseWindowSize, buildMaximizedConfig },
 };

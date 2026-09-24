@@ -3,7 +3,11 @@
  * 和纯透传代理。前端是 state/问题的唯一构造者 —— 步骤卡展示的请求体与真实
  * 发出的 payload 是同一个对象（可见性硬原则）。
  *
- * 依赖：util.js（escapeHtml/pct/toast）、auto-core.js（AutoCore）、app.js（Config）
+ * 展示层：步骤以轮播卡片呈现（‹ › 切换 / ←→ 键 / 时间线跳转 / 跟随最新），
+ * 卡片内概率分布、输入 state、4 道问题均为结构化渲染（非 JSON 倾倒），
+ * 原始报文折叠保留可复制。
+ *
+ * 依赖：util.js（escapeHtml/pct/toast/relaxedStringify）、auto-core.js（AutoCore）、app.js（Config）
  */
 const Auto = (() => {
   'use strict';
@@ -18,6 +22,8 @@ const Auto = (() => {
     demoPage: document.getElementById('autoDemoPage'),
     vars: document.getElementById('autoVars'),
     addVar: document.getElementById('autoAddVar'),
+    browser: document.getElementById('autoBrowser'),
+    screen: document.getElementById('autoScreen'),
     maxSteps: document.getElementById('autoMaxSteps'),
     screenshot: document.getElementById('autoScreenshot'),
     closeBrowser: document.getElementById('autoCloseBrowser'),
@@ -33,6 +39,7 @@ const Auto = (() => {
     timeline: document.getElementById('autoTimeline'),
     presetCard: document.getElementById('presetCard'),
     mainGrid: document.getElementById('mainGrid'),
+    apiSpec: document.getElementById('apiSpec'),
     modeSeg: document.getElementById('modeSeg'),
   };
 
@@ -47,6 +54,10 @@ const Auto = (() => {
   let startTs = 0;
   let timerId = null;
   let finished = false;
+
+  /* 轮播状态 */
+  const view = { idx: 0, follow: true };
+  const stage = {};          // wrap/track/counter/prev/next/follow
 
   const STEP_GAP_MS = 800;   // 步间间隔（设计 §11）
 
@@ -111,6 +122,14 @@ const Auto = (() => {
     if (!els.vars.children.length) addVarRow('', '');
   }
 
+  /* ---------- 浏览器 / 窗口尺寸选项 ---------- */
+  function windowPlan() {
+    const v = els.screen.value;
+    if (v === 'full') return { maximize: true };   // Chrome 原生 --start-maximized
+    const m = v.split('x');
+    return { width: Number(m[0]), height: Number(m[1]) };
+  }
+
   /* ---------- API 封装（本模式只服务同源后端） ---------- */
   async function apiJson(path, body, extraHeaders) {
     try {
@@ -129,7 +148,7 @@ const Auto = (() => {
     }
   }
 
-  /* ---------- 概率条（复用 output.js 的视觉，紧凑版） ---------- */
+  /* ---------- 概率条（与 Demo 的答案渲染同视觉） ---------- */
   function barsHtml(probs, hitKey, color) {
     const entries = Object.keys(probs || {})
       .map((k) => ({ k, p: Number(probs[k]) || 0 }))
@@ -164,11 +183,8 @@ const Auto = (() => {
     chip.type = 'button';
     chip.setAttribute('role', 'listitem');
     if (id != null) {
-      chip.title = '跳到步骤 ' + id;
-      chip.onclick = () => {
-        const card = document.getElementById('stepcard-' + id);
-        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      };
+      chip.title = '查看第 ' + id + ' 步卡片';
+      chip.onclick = () => gotoStep(id - 1, true);
     }
     els.timeline.appendChild(chip);
     return chip;
@@ -178,7 +194,58 @@ const Auto = (() => {
     if (chip) chip.className = 'tl-chip' + (cls ? ' ' + cls : '');
   }
 
-  /* ---------- 步骤卡 ---------- */
+  /* ---------- 轮播 ---------- */
+  function buildStage() {
+    els.flow.innerHTML = '';
+    view.idx = 0; view.follow = true;
+    stage.wrap = el('div', 'stage-wrap');
+    stage.wrap.tabIndex = 0;
+    const nav = el('div', 'stage-nav');
+    stage.prev = el('button', 'stage-btn', '‹');
+    stage.prev.type = 'button'; stage.prev.title = '上一步（←）'; stage.prev.setAttribute('aria-label', '上一步');
+    stage.prev.onclick = () => gotoStep(view.idx - 1, true);
+    stage.counter = el('div', 'stage-counter', '暂无步骤');
+    stage.follow = el('button', 'stage-follow', '→ 最新');
+    stage.follow.type = 'button'; stage.follow.title = '跳到最新步骤';
+    stage.follow.onclick = () => { view.follow = true; gotoStep(steps.length - 1, false); };
+    stage.next = el('button', 'stage-btn', '›');
+    stage.next.type = 'button'; stage.next.title = '下一步（→）'; stage.next.setAttribute('aria-label', '下一步');
+    stage.next.onclick = () => gotoStep(view.idx + 1, true);
+    nav.appendChild(stage.prev); nav.appendChild(stage.counter); nav.appendChild(stage.follow); nav.appendChild(stage.next);
+    stage.viewport = el('div', 'stage-viewport');
+    stage.track = el('div', 'stage-track');
+    stage.viewport.appendChild(stage.track);
+    stage.wrap.appendChild(nav); stage.wrap.appendChild(stage.viewport);
+    els.flow.appendChild(stage.wrap);
+    updateNav();
+  }
+  function gotoStep(i, user) {
+    const n = steps.length;
+    if (!n || !stage.track) return;
+    i = Math.max(0, Math.min(n - 1, i));
+    view.idx = i;
+    if (user) view.follow = i === n - 1;
+    stage.track.style.transform = 'translateX(' + (-i * 100) + '%)';
+    updateNav();
+  }
+  function updateNav() {
+    const n = steps.length;
+    stage.prev.disabled = view.idx <= 0;
+    stage.next.disabled = n === 0 || view.idx >= n - 1;
+    stage.follow.classList.toggle('show', n > 0 && view.idx < n - 1);
+    const s = steps[view.idx];
+    stage.counter.textContent = n
+      ? '步骤 ' + (view.idx + 1) + ' / ' + n + (s && s.label ? ' · ' + s.label : '')
+      : '暂无步骤';
+    stage.counter.title = stage.counter.textContent;
+  }
+
+  /* ---------- 步骤卡 ----------
+   * 信息分层（用户关注主体优先）：
+   *  ① 页面实时情况：执行后截图，卡片主体、通栏展示、点击放大
+   *  ② Jev 决策：摘要行常显（动作/参数/文本 + 置信度 + 未完成量表 + 执行命令），
+   *     概率分布明细默认折叠
+   *  ③ Jev 请求信息（输入 state + 4 道问题 + 输出）：默认折叠 */
   function newStepCard(step) {
     const card = el('article', 'step-card');
     card.id = 'stepcard-' + step.n;
@@ -191,52 +258,116 @@ const Auto = (() => {
     card.appendChild(head);
 
     const body = el('div', 'step-body');
-    const answers = el('div', 'step-answers');
-    answers.innerHTML = '<div class="skel-wrap"><div class="skel" style="width:34%"></div><div class="skel" style="width:72%"></div><div class="skel" style="width:52%"></div></div>';
-    body.appendChild(answers);
+    const shotSlot = el('div', 'shot-slot');          // ① 截图主体
+    body.appendChild(shotSlot);
+    const decision = el('div', 'step-decision');      // ② 决策摘要 + 折叠明细
+    decision.innerHTML = '<div class="skel-wrap"><div class="skel" style="width:34%"></div><div class="skel" style="width:58%"></div></div>';
+    body.appendChild(decision);
+    const execZone = el('div', 'step-exec-slot');     // ②执行命令行 / LLM 区
+    body.appendChild(execZone);
+    const ctx = el('div', 'ctx-slot');                // ③ 请求信息（折叠）
+    ctx.innerHTML = contextHtml(step);                // payload 在建卡前已就绪，一次性渲染
+    body.appendChild(ctx);
     card.appendChild(body);
 
-    els.flow.appendChild(card);
-    card.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    return { card, head, title, state, body, answers };
+    stage.track.appendChild(card);
+    if (view.follow) gotoStep(steps.length - 1, false);
+    else updateNav();
+    return { card, head, title, state, body, shotSlot, decision, execZone };
   }
 
-  function decisionHtml(step) {
+  /* ============ 决策区：摘要常显 + 明细折叠 ============ */
+  function meterHtml(score, unfinished, mini) {
+    const segs = [1, 2, 3, 4].map((k) => '<span class="meter-seg' + (score >= k ? ' on' : '') + '"></span>').join('');
+    const tone = unfinished <= 0.2 ? 'good' : (unfinished >= 0.6 ? 'bad' : 'mid');
+    const meter = '<div class="meter ' + tone + (mini ? ' mini' : '') + '">' + segs + '</div>';
+    if (mini) return meter;
+    return meter +
+      '<div class="meter-note">score ' + score + ' / 4 · 未完成度 <b>' + pct(unfinished) + '</b></div>' +
+      '<div class="meter-scale"><span>0 已完成</span><span>4 完全没进展</span></div>';
+  }
+
+  function decisionSummaryHtml(step) {
     const a = (step.response && step.response.answers) || {};
     const d = step.decision || {};
-    const line = (k, v, p, extra) =>
-      '<div class="ans-line"><span class="ans-k">' + k + '</span><span class="ans-v">' + escapeHtml(v) + (extra ? ' <span class="ans-p">' + escapeHtml(extra) + '</span>' : '') + '</span>' +
-      (p != null ? '<span class="ans-p">' + p + '</span>' : '') + '</div>';
-
-    const pOf = (name, key) => {
-      const pr = a[name] && a[name].probabilities;
-      return pr && pr[key] != null ? pct(pr[key]) : null;
+    const refLabels = step.refLabels || {};
+    const varOf = (name) => {
+      const v = (runCfg && runCfg.variables || []).find((x) => x.name === name);
+      return v ? v.value : name;
     };
-    const unfinished = a['未完成'];
-    const unfinishedTxt = unfinished
-      ? Number(unfinished.score).toFixed(1) + ' / 4 → 未完成度 ' + (d.unfinished != null ? d.unfinished.toFixed(2) : '—')
-      : '—';
+    /* 短标签：剥掉「【可交互】」前缀并截断（「无需元素」的说明很长，只显示裸键） */
+    const shortRef = (key) => {
+      if (key === '无需元素' || !refLabels[key]) return key;
+      const clean = refLabels[key].replace(/^【[^】]*】\s*/, '');
+      return key + ' · ' + (clean.length > 24 ? clean.slice(0, 24) + '…' : clean);
+    };
+    const chip = (k, v, cls) => '<span class="dec-chip ' + (cls || '') + '"><i>' + k + '</i>' + escapeHtml(v) + '</span>';
+    const conf = a['动作'] && typeof a['动作'].confidence === 'number'
+      ? '<span class="dec-conf">置信度 ' + pct(a['动作'].confidence) + '</span>' : '';
 
-    let html = '<div class="step-sub">Jev 决策</div>';
-    html += line('动作', d.action || '—', pOf('动作', d.action));
-    html += line('参数', d.param || '—', pOf('参数', d.param));
-    if (d.text != null) html += line('文本', d.text, pOf('文本', d.text));
-    html += line('未完成', unfinishedTxt, '');
-
-    const qNames = ['动作', '参数', '文本', '未完成'];
-    const colors = { 动作: 'var(--violet)', 参数: '#7c3aed', 文本: '#0d9268', 未完成: 'var(--amber)' };
-    const hits = { 动作: d.action, 参数: d.param, 文本: d.text };
-    html += '<details class="step-collapse" style="margin-top:6px"><summary>概率分布明细</summary>';
-    qNames.forEach((name) => {
-      const ans = a[name];
-      if (!ans || !ans.probabilities) return;
-      html += '<div class="ans-line" style="margin:4px 0"><span class="ans-k">' + name + '</span></div>';
-      html += barsHtml(ans.probabilities, hits[name] != null ? hits[name] : null, colors[name]);
-    });
-    html += '</details>';
+    let html = '<div class="dec-sum">' +
+      chip('动作', d.action || '—', 'act') +
+      (d.param ? chip('参数', shortRef(d.param)) : '') +
+      (d.text != null && d.text !== '无' ? chip('文本', varOf(d.text)) : '');
+    const u = a['未完成'];
+    if (d.unfinished != null && u && u.score != null) {
+      html += '<span class="dec-meter" title="score ' + u.score + ' / 4 · 未完成度 ' + pct(d.unfinished) + '">' +
+        meterHtml(u.score, d.unfinished, true) + '<b>' + u.score + '/4</b></span>';
+    }
+    html += conf + '</div>';
     return html;
   }
 
+  function decisionDetailsHtml(step) {
+    const a = (step.response && step.response.answers) || {};
+    const d = step.decision || {};
+    const refLabels = step.refLabels || {};
+    const varOf = (name) => {
+      const v = (runCfg && runCfg.variables || []).find((x) => x.name === name);
+      return v ? v.value : name;
+    };
+    const color = { 动作: 'var(--violet)', 参数: '#7c3aed', 文本: '#0d9268' };
+    const hit = { 动作: d.action, 参数: d.param, 文本: d.text };
+    const shortRef = (key) => {
+      if (key === '无需元素' || !refLabels[key]) return key;
+      const clean = refLabels[key].replace(/^【[^】]*】\s*/, '');
+      return key + ' · ' + (clean.length > 24 ? clean.slice(0, 24) + '…' : clean);
+    };
+    const chosenLabel = {
+      动作: d.action || '—',
+      参数: d.param ? shortRef(d.param) : '—',
+      文本: d.text === '无' ? '无' : (d.text ? varOf(d.text) : '—'),
+    };
+    const confBadge = (ans) => {
+      const c = ans && typeof ans.confidence === 'number' ? ans.confidence : null;
+      return c != null ? '<span class="qcard-conf">置信度 ' + pct(c) + '</span>' : '';
+    };
+    let html = '<div class="qgrid">';
+    ['动作', '参数', '文本'].forEach((name) => {
+      const ans = a[name] || {};
+      html += '<div class="qcard">' +
+        '<div class="qcard-head"><span class="qcard-name">' + name + '</span>' +
+        '<span class="qcard-chosen">' + escapeHtml(chosenLabel[name]) + '</span>' + confBadge(ans) + '</div>' +
+        (ans.probabilities ? barsHtml(ans.probabilities, hit[name] != null ? hit[name] : null, color[name]) : '<div class="muted" style="font-size:12px">无概率数据</div>') +
+        '</div>';
+    });
+    const u = a['未完成'] || {};
+    html += '<div class="qcard">' +
+      '<div class="qcard-head"><span class="qcard-name">未完成</span><span class="qcard-chosen score">' +
+      (u.score != null ? 'score ' + u.score + ' / 4' : '—') + '</span></div>' +
+      (d.unfinished != null ? meterHtml(u.score != null ? u.score : 0, d.unfinished) : '') +
+      '</div>';
+    html += '</div>';
+    return html;
+  }
+
+  function decisionHtml(step) {
+    return decisionSummaryHtml(step) +
+      '<details class="step-collapse prob-details"><summary>概率分布明细（4 道问题）</summary>' +
+      decisionDetailsHtml(step) + '</details>';
+  }
+
+  /* ============ 执行区 / LLM 区 ============ */
   function cmdDisplay(op, ref, text) {
     return 'playwright-cli ' + op + (ref ? ' ' + ref : '') + (text != null ? ' "' + text + '"' : '');
   }
@@ -244,54 +375,140 @@ const Auto = (() => {
   function execHtml(step) {
     const e = step.exec;
     if (!e) return '';
-    let html = '<div class="step-exec"><div class="step-sub">执行</div>';
-    if (e.skipped) {
-      html += '<div class="exec-line">用户跳过此步（未执行）</div></div>';
-      return html;
-    }
+    if (e.skipped) return '<div class="exec-line">用户跳过此步（未执行）</div>';
+    let html = '';
     if (e.cmd) {
-      html += '<div class="exec-line" style="font-family:var(--mono);font-size:12px">' + escapeHtml(e.cmd) +
-        (e.elapsedMs != null ? ' <span class="exec-url">· ' + e.elapsedMs + 'ms</span>' : '') + '</div>';
+      html += '<div class="cmd-line"><code>' + escapeHtml(e.cmd) + '</code>' +
+        (e.elapsedMs != null ? '<span class="exec-url">· ' + e.elapsedMs + 'ms</span>' : '') +
+        (e.ok != null ? '<span class="exec-verdict ' + (e.ok ? 'ok' : 'bad') + '">' + (e.ok ? '✓ 成功' : '✗ 失败') + '</span>' : '') +
+        '</div>';
+    } else if (e.ok != null) {
+      html += '<div class="exec-line">' + (e.ok ? '✓ 成功' : '✗ 失败') + '</div>';
     }
-    if (e.ok != null) html += '<div class="exec-line">' + (e.ok ? '✓ 成功' : '✗ 失败') + '</div>';
     if (e.error) html += '<div class="step-err">' + escapeHtml(e.error) + '</div>';
-    html += '</div>';
     return html;
   }
 
   function llmHtml(step) {
     const L = step.llm;
     if (!L) return '';
-    let html = '<div class="llm-block"><div class="step-sub">生成输入 · LLM</div>';
-    if (L.error) {
-      html += '<div class="step-err">' + escapeHtml(L.error) + '</div></div>';
-      return html;
-    }
+    let html = '<div class="llm-block"><div class="sec-head violet">生成输入 · LLM</div>';
+    if (L.error) return html + '<div class="step-err">' + escapeHtml(L.error) + '</div></div>';
+    if (L.text) html += '<div class="llm-gen">生成文本 → ' + escapeHtml(L.text) + '</div>';
     html += '<details class="step-collapse"><summary>Prompt（工程组装，前端可见）</summary>' +
       '<pre class="step-pre">' + escapeHtml(L.messages.map((m) => '[' + m.role + ']\n' + m.content).join('\n\n')) + '</pre></details>';
     html += '<details class="step-collapse"><summary>模型原始响应</summary>' +
       '<pre class="step-pre">' + escapeHtml(JSON.stringify(L.raw, null, 2)) + '</pre></details>';
-    if (L.text) html += '<div class="llm-gen">生成文本 → ' + escapeHtml(L.text) + '</div>';
     html += '</div>';
     return html;
   }
 
-  function contextHtml(step) {
-    if (!step.payload) return '';
-    const stateText = relaxedStringify(step.payload.state);
-    const qText = relaxedStringify(step.payload.questions);
+  /* ============ 输入区（结构化 state + 4 道问题，建卡时一次性渲染） ============ */
+  function snapshotDetailsHtml(snap) {
+    const text = String(snap || '');
+    const lines = text ? text.split('\n').length : 0;
+    const refs = Object.keys(AutoCore.refCriteria(text)).length;
+    return '<details class="snap-details"><summary>accessibility 快照 · ' + lines + ' 行 · ' + refs + ' 个元素（点开查看）</summary>' +
+      '<pre class="step-pre tall">' + escapeHtml(text) + '</pre></details>';
+  }
+
+  function stateSectionHtml(state) {
+    const page = state['当前页面'] || {};
+    const hist = Array.isArray(state['已完成步骤']) ? state['已完成步骤'] : [];
+    const lastResult = String(state['上一步结果'] || '');
+    const lastCls = /^成功/.test(lastResult) ? ' ok-text' : /^失败/.test(lastResult) ? ' bad-text' : '';
+    return '<div class="sec"><div class="sec-head">本轮输入 · state</div><div class="kv-list">' +
+      '<div class="kv"><div class="kv-k">任务目标</div><div class="kv-v"><span class="goal-text">' + escapeHtml(state['任务目标'] || '') + '</span></div></div>' +
+      '<div class="kv"><div class="kv-k">当前页面</div><div class="kv-v"><span class="mono-chip">' + escapeHtml(page.url || '') + '</span>' +
+      (page['标题'] ? '<span class="page-title">' + escapeHtml(page['标题']) + '</span>' : '') + '</div></div>' +
+      '<div class="kv"><div class="kv-k">上一步结果</div><div class="kv-v' + lastCls + '">' + escapeHtml(lastResult) + '</div></div>' +
+      '<div class="kv"><div class="kv-k">已完成步骤</div><div class="kv-v">' +
+      (hist.length ? '<ol class="hist-list">' + hist.map((h) => '<li>' + escapeHtml(h) + '</li>').join('') + '</ol>' : '<span class="muted">（第一步，暂无）</span>') +
+      '</div></div>' +
+      '<div class="kv"><div class="kv-k">页面快照</div><div class="kv-v">' + snapshotDetailsHtml(state['页面快照']) + '</div></div>' +
+      '</div></div>';
+  }
+
+  function criteriaAreaHtml(name, q, step) {
+    const crit = q.criteria;
+    if (name === '动作') {
+      const terminal = AutoCore.TERMINAL_TOOLS || {};
+      const chips = Object.keys(crit).map((k) => {
+        let tone = '';
+        if (terminal[k]) tone = k === '任务已完成' ? ' good' : ' warn';
+        else if (k === '生成输入' || k === '无操作') tone = ' violet';
+        return '<span class="crit-chip' + tone + '" title="' + escapeHtml(crit[k]) + '">' + escapeHtml(k) + '</span>';
+      }).join('');
+      return '<div class="crit-cloud">' + chips + '</div>';
+    }
+    if (name === '参数') {
+      const refLabels = step.refLabels || {};
+      const rows = Object.keys(crit).map((ref) =>
+        '<div class="ref-row"><span class="ref-id">' + escapeHtml(ref) + '</span>' +
+        '<span class="ref-label" title="' + escapeHtml(crit[ref]) + '">' + escapeHtml(refLabels[ref] || crit[ref]) + '</span></div>').join('');
+      return '<div class="ref-scroll">' + rows + '</div>';
+    }
+    if (name === '文本') {
+      const chips = Object.keys(crit).map((k) => {
+        const raw = String(crit[k]);
+        const val = k === '无' ? '' : raw.replace(/^取值：/, '');
+        return '<span class="crit-chip" title="' + escapeHtml(raw) + '">' +
+          (k === '无' ? '无' : escapeHtml(k) + ' = ' + escapeHtml(val)) + '</span>';
+      }).join('');
+      return '<div class="crit-cloud">' + chips + '</div>';
+    }
+    /* 未完成：5 级量表 */
+    const levels = Array.isArray(crit) ? crit : [];
+    return '<div class="scale-row">' + levels.map((c, i) =>
+      '<div class="scale-cell" title="' + escapeHtml(c) + '"><span class="scale-no">' + i + '</span><span class="scale-txt">' + escapeHtml(c) + '</span></div>').join('') +
+      '</div>';
+  }
+
+  function questionsSectionHtml(step) {
+    const qs = (step.payload && step.payload.questions) || {};
+    const meta = {
+      动作: Object.keys(qs['动作'] && qs['动作'].criteria || {}).length + ' 个候选',
+      参数: Object.keys(qs['参数'] && qs['参数'].criteria || {}).length + ' 个候选 ref',
+      文本: Object.keys(qs['文本'] && qs['文本'].criteria || {}).length + ' 个选项',
+      未完成: '5 级分值',
+    };
+    let html = '<div class="sec"><div class="sec-head">本轮输入 · 4 道问题</div><div class="qlist">';
+    ['动作', '参数', '文本', '未完成'].forEach((name) => {
+      const q = qs[name];
+      if (!q) return;
+      html += '<div class="qblock">' +
+        '<div class="qblock-head"><span class="qblock-name">' + name + '</span>' +
+        '<span class="type-badge">' + escapeHtml(q.type || '') + '</span>' +
+        '<span class="qblock-meta">' + escapeHtml(meta[name] || '') + '</span></div>' +
+        (q.instructions ? '<div class="qblock-inst" title="' + escapeHtml(q.instructions) + '">' + escapeHtml(q.instructions) + '</div>' : '') +
+        criteriaAreaHtml(name, q, step) +
+        '</div>';
+    });
+    html += '</div></div>';
+    return html;
+  }
+
+  function rawDetailsHtml(step) {
+    const reqText = relaxedStringify(step.payload);
     const respText = step.response ? JSON.stringify({
       model: step.response.model, answers: step.response.answers,
       usage: step.response.usage, _latency_ms: step.response._latency_ms,
     }, null, 2) : '（调用失败，无响应）';
-    return '<details class="step-collapse"><summary>① 构造的 state（含全量快照，可复制）</summary>' +
-      '<pre class="step-pre tall">' + escapeHtml(stateText) + '</pre></details>' +
-      '<details class="step-collapse"><summary>② 构造的 4 道问题（criteria 明细）</summary>' +
-      '<pre class="step-pre tall">' + escapeHtml(qText) + '</pre></details>' +
-      '<details class="step-collapse"><summary>③ 发出的完整请求体（与实际 payload 同一对象）</summary>' +
-      '<pre class="step-pre tall">' + escapeHtml(relaxedStringify(step.payload)) + '</pre></details>' +
-      '<details class="step-collapse"><summary>④ Jev 原始响应 JSON</summary>' +
-      '<pre class="step-pre">' + escapeHtml(respText) + '</pre></details>';
+    return '<details class="raw-details"><summary>原始报文（与真实请求同一对象，可复制）</summary>' +
+      '<div class="raw-label">① 请求体</div><pre class="step-pre tall">' + escapeHtml(reqText) + '</pre>' +
+      '<div class="raw-label">② Jev 响应</div><pre class="step-pre tall">' + escapeHtml(respText) + '</pre>' +
+      '</details>';
+  }
+
+  /* ③ 请求信息：外层统一折叠（输入 state + 4 道问题 + 原始报文） */
+  function contextHtml(step) {
+    if (!step.payload) return '';
+    return '<details class="req-details"><summary>Jev 请求信息（输入 state · 4 道问题 · 输出答案）</summary>' +
+      '<div class="req-inner">' +
+      stateSectionHtml(step.payload.state) +
+      questionsSectionHtml(step) +
+      rawDetailsHtml(step) +
+      '</div></details>';
   }
 
   function updateStepCard(step, nodes) {
@@ -300,30 +517,20 @@ const Auto = (() => {
     if (step.jevError) {
       nodes.state.textContent = 'Jev 调用失败';
       nodes.state.className = 'step-state error';
-      nodes.answers.innerHTML = '<div class="step-err">' + escapeHtml(step.jevError) + '</div>';
+      nodes.decision.innerHTML = '<div class="step-err">' + escapeHtml(step.jevError) + '</div>';
     } else if (step.decision) {
-      nodes.answers.innerHTML = decisionHtml(step);
-      animateBars(nodes.answers);
+      nodes.decision.innerHTML = decisionHtml(step);
+      animateBars(nodes.decision);
     }
-    let execZone = nodes.body.querySelector('.step-exec-slot');
-    if (!execZone) {
-      execZone = el('div', 'step-exec-slot');
-      /* 顺序：决策区 → 执行区 → 上下文折叠区 */
-      nodes.body.insertBefore(execZone, nodes.answers.nextSibling);
-    }
-    execZone.innerHTML = llmHtml(step) + execHtml(step);
-    if (step.screenshot && !execZone.querySelector('.step-shot')) {
+    nodes.execZone.innerHTML = llmHtml(step) + execHtml(step);
+    /* ① 截图主体：通栏大图，到达即挂载 */
+    if (step.screenshot && !nodes.shotSlot.querySelector('.step-shot')) {
       const img = document.createElement('img');
       img.src = step.screenshot;
       img.className = 'step-shot';
       img.alt = '第 ' + step.n + ' 步执行后截图';
       img.onclick = () => openLightbox(step.screenshot, img.alt);
-      execZone.appendChild(img);
-    }
-    if (!nodes.body.querySelector('.ctx-slot')) {
-      const ctx = el('div', 'ctx-slot');
-      ctx.innerHTML = contextHtml(step);
-      nodes.body.appendChild(ctx);
+      nodes.shotSlot.appendChild(img);
     }
     if (e) {
       nodes.state.textContent = e.skipped ? '已跳过' : (e.ok ? '成功' + (e.elapsedMs != null ? ' · ' + e.elapsedMs + 'ms' : '') : '失败');
@@ -332,6 +539,7 @@ const Auto = (() => {
       nodes.state.textContent = '终止 · ' + step.terminal;
       nodes.state.className = 'step-state ' + (step.terminal === '任务已完成' ? 'ok' : 'warn');
     }
+    updateNav();
   }
 
   /* ---------- 灯箱 ---------- */
@@ -541,7 +749,11 @@ const Auto = (() => {
 
     abortFlag = false; finished = false;
     steps = []; history = []; consecutiveFails = 0; unfinishedHistory = [];
-    runCfg = { goal, url, maxSteps, variables: collectVars(), screenshotOn: els.screenshot.checked };
+    const plan = windowPlan();
+    runCfg = {
+      goal, url, maxSteps, variables: collectVars(), screenshotOn: els.screenshot.checked,
+      browser: els.browser.value, window: plan,
+    };
 
     els.stop.hidden = false;
     els.statusBar.hidden = false;
@@ -549,7 +761,7 @@ const Auto = (() => {
     els.runPill.textContent = '运行中';
     els.timeline.hidden = false;
     els.timeline.innerHTML = '';
-    els.flow.innerHTML = '';
+    buildStage();
     els.summary.textContent = '';
     els.exportBtn.hidden = true;
     setProgress(0);
@@ -580,14 +792,20 @@ const Auto = (() => {
   }
 
   async function runLoop() {
-    /* 打开浏览器 */
+    /* 打开浏览器（内核可选；窗口方案随请求带给 server：全屏=原生最大化，固定尺寸=resize）。
+     * 先静默关闭残留会话：上轮结束后浏览器可能还开着，已开会话上再 open 会报错；
+     * 顺带保证每轮拿到全新的内存态页面（如演示邮箱）。 */
+    await apiJson('/api/browser/close', {});
     addChip('open · ' + shortUrl(runCfg.url), 'current', null).dataset.chip = 'open';
-    const opened = await apiJson('/api/browser/open', { url: runCfg.url, browser: 'msedge' });
+    const opened = await apiJson('/api/browser/open', Object.assign(
+      { url: runCfg.url, browser: runCfg.browser }, runCfg.window));
     markChip('open', opened.ok ? 'ok' : 'error');
     if (!opened.ok) {
       finishRun({ done: false, reason: '打开浏览器失败：' + opened.error, level: 'error' });
       return;
     }
+    if (opened.resized === false) toast('窗口尺寸调整失败：' + (opened.resizeError || ''));
+    runCfg.browserUsed = opened.browser;
 
     let lastResult = '';
     for (let n = 1; n <= runCfg.maxSteps; n++) {
@@ -616,7 +834,7 @@ const Auto = (() => {
       const step = {
         n, label: '第 ' + n + ' 步', decision: null, payload, response: null, jevError: null,
         exec: null, llm: null, screenshot: null, terminal: null,
-        pageInfo, snapshot: snap.snapshot, historyLine: null, generatedText: null,
+        pageInfo, snapshot: snap.snapshot, refLabels, historyLine: null, generatedText: null,
       };
       steps.push(step);
       const nodes = newStepCard(step);
@@ -720,6 +938,8 @@ const Auto = (() => {
       exportedAt: new Date().toISOString(),
       goal: runCfg && runCfg.goal,
       startUrl: runCfg && runCfg.url,
+      browser: runCfg && runCfg.browserUsed,
+      window: runCfg ? runCfg.window : null,
       variables: runCfg ? runCfg.variables : [],
       maxSteps: runCfg && runCfg.maxSteps,
       screenshotOn: runCfg && runCfg.screenshotOn,
@@ -760,6 +980,7 @@ const Auto = (() => {
     els.panel.hidden = mode !== 'auto';
     els.presetCard.hidden = mode === 'auto';
     els.mainGrid.hidden = mode === 'auto';
+    if (els.apiSpec) els.apiSpec.hidden = mode === 'auto';
     if (mode === 'auto') probeEngine();
   }
 
@@ -784,6 +1005,15 @@ const Auto = (() => {
       if (!collectVars().length) addVarRow('回车', 'Enter');
       toast('已填入内置演示页（离线可完整演示）');
     };
+    /* 轮播键盘切换（输入控件聚焦时不抢按键） */
+    document.addEventListener('keydown', (e) => {
+      if (els.panel.hidden || !steps.length) return;
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      const t = e.target;
+      if (t && /^(input|textarea|select)$/i.test(t.tagName)) return;
+      gotoStep(view.idx + (e.key === 'ArrowRight' ? 1 : -1), true);
+      e.preventDefault();
+    });
   }
 
   function init() {

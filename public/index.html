@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Jev 体验台 · System One 决策模型</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Ctext x='16' y='22' font-size='17' fill='white' text-anchor='middle'%3E%E2%97%87%3C/text%3E%3C/svg%3E" />
-<link rel="stylesheet" href="styles.css?v=20260924a" />
+<link rel="stylesheet" href="styles.css?v=20260924c" />
 </head>
 <body>
 
@@ -54,71 +54,89 @@
       <span class="sub">playwright-cli 快照 → state/问题构造 → Jev 选动作与 ref → 执行 → 循环</span>
     </div>
 
-    <div class="warnbar" id="autoInstallHint" hidden>
-      <div class="title">⚠ 浏览器引擎不可用</div>
-      Auto 浏览器模式需要 <b>全局安装 playwright-cli</b> 和本机 Chrome / Edge：在终端执行
-      <code>npm i -g @playwright/cli</code>（只装 CLI，复用你本机已装的浏览器），装好后刷新本页。
-      Demo 模式不受影响。
-    </div>
+    <div class="auto-body">
+      <div class="warnbar" id="autoInstallHint" hidden>
+        <div class="title">⚠ 浏览器引擎不可用</div>
+        Auto 浏览器模式需要 <b>全局安装 playwright-cli</b> 和本机 Chrome / Edge：在终端执行
+        <code>npm i -g @playwright/cli</code>（只装 CLI，复用你本机已装的浏览器），装好后刷新本页。
+        Demo 模式不受影响。
+      </div>
 
-    <div class="auto-config">
-      <div class="field">
-        <label for="autoGoal">任务目标</label>
-        <input type="text" id="autoGoal" placeholder="例如：在收件箱里归档招商银行 9 月电子对账单邮件" spellcheck="false" />
-      </div>
-      <div class="field">
-        <label for="autoUrl">起始 URL</label>
-        <div class="url-row">
-          <input type="text" id="autoUrl" placeholder="http://localhost:3000/demo/mailbox.html" spellcheck="false" />
-          <button class="chip" id="autoDemoPage" type="button" title="用项目内置的可交互演示页，离线可完整演示">📦 内置演示页</button>
+      <div class="auto-config">
+        <div class="field">
+          <label for="autoGoal">任务目标</label>
+          <input type="text" id="autoGoal" placeholder="例如：在收件箱里归档招商银行 9 月电子对账单邮件" spellcheck="false" />
         </div>
-      </div>
-      <div class="field">
-        <label>输入变量（fill / press / goto 等动作的文本来源；Jev 用选择题从中挑选）</label>
-        <div id="autoVars" class="vars-box"></div>
-        <button class="chip" id="autoAddVar" type="button">＋ 添加变量</button>
-      </div>
-      <div class="field field-row">
-        <div class="inline-field">
-          <label for="autoMaxSteps">步数上限</label>
-          <input type="number" id="autoMaxSteps" value="15" min="1" max="50" />
-        </div>
-        <div class="inline-field">
-          <label>节奏</label>
-          <div class="seg">
-            <label class="seg-btn radio-btn"><input type="radio" name="autoCadence" value="single" checked />单步确认</label>
-            <label class="seg-btn radio-btn"><input type="radio" name="autoCadence" value="auto" />连续自动</label>
+        <div class="field">
+          <label for="autoUrl">起始 URL</label>
+          <div class="url-row">
+            <input type="text" id="autoUrl" placeholder="http://localhost:3000/demo/mailbox.html" spellcheck="false" />
+            <button class="chip" id="autoDemoPage" type="button" title="用项目内置的可交互演示页，离线可完整演示">📦 内置演示页</button>
           </div>
         </div>
-        <label class="check-inline"><input type="checkbox" id="autoScreenshot" checked />每步截图</label>
+        <div class="field">
+          <label>输入变量（fill / press / goto 等动作的文本来源；Jev 用选择题从中挑选）</label>
+          <div id="autoVars" class="vars-box"></div>
+          <button class="chip" id="autoAddVar" type="button">＋ 添加变量</button>
+        </div>
+        <div class="field field-row">
+          <div class="inline-field">
+            <label for="autoMaxSteps">步数上限</label>
+            <input type="number" id="autoMaxSteps" value="15" min="1" max="50" />
+          </div>
+          <div class="inline-field">
+            <label>节奏</label>
+            <div class="seg">
+              <label class="seg-btn radio-btn"><input type="radio" name="autoCadence" value="single" checked />单步确认</label>
+              <label class="seg-btn radio-btn"><input type="radio" name="autoCadence" value="auto" />连续自动</label>
+            </div>
+          </div>
+          <div class="inline-field">
+            <label for="autoBrowser">浏览器内核</label>
+            <select id="autoBrowser">
+              <option value="chrome" selected>Chrome（独立实例）</option>
+              <option value="msedge">Edge（独立实例）</option>
+            </select>
+          </div>
+          <div class="inline-field">
+            <label for="autoScreen">窗口尺寸</label>
+            <select id="autoScreen">
+              <option value="full" selected>跟随屏幕（全屏）</option>
+              <option value="1920x1080">1920 × 1080</option>
+              <option value="1440x900">1440 × 900</option>
+              <option value="1280x720">1280 × 720</option>
+            </select>
+          </div>
+          <label class="check-inline"><input type="checkbox" id="autoScreenshot" checked />每步截图</label>
+        </div>
+        <div class="btn-row">
+          <button class="btn-ghost" id="autoCloseBrowser" type="button">关闭浏览器</button>
+          <button class="btn-ghost" id="autoStop" type="button" hidden>■ 中止</button>
+          <button class="btn-primary" id="autoStart" type="button">▶ 打开浏览器并开始</button>
+        </div>
       </div>
-      <div class="btn-row">
-        <button class="btn-ghost" id="autoCloseBrowser" type="button">关闭浏览器</button>
-        <button class="btn-ghost" id="autoStop" type="button" hidden>■ 中止</button>
-        <button class="btn-primary" id="autoStart" type="button">▶ 打开浏览器并开始</button>
-      </div>
-    </div>
 
-    <div class="auto-flow-wrap">
-      <div class="card-head">
-        <h2>运行流水</h2>
-        <span class="spacer"></span>
-        <span class="sub" id="autoSummary"></span>
-        <button class="chip" id="autoExport" type="button" hidden
-                title="下载本次运行的完整 JSON 记录（每一步的请求体、响应、执行与截图）">⬇ 导出运行记录</button>
-      </div>
-      <div class="auto-status" id="autoStatus" hidden>
-        <span class="status-pill busy" id="autoRunPill">运行中</span>
-        <span class="auto-progress" id="autoProgress">第 0 / 15 步</span>
-        <span class="auto-elapsed" id="autoElapsed">0s</span>
-      </div>
-      <div class="auto-timeline" id="autoTimeline" hidden role="list" aria-label="运行轨迹时间线"></div>
-      <div id="autoFlow" class="auto-flow" aria-live="polite">
-        <div class="out-empty">
-          <div class="big" aria-hidden="true">▶</div>
-          填好任务后点「打开浏览器并开始」。<br />
-          每一步完整可见：① 构造的 state ② 构造的 4 道问题 ③ Jev 决策概率 ④ 执行结果与截图；<br />
-          顶部时间线是全程轨迹，点击任意节点跳到对应步骤卡。
+      <div class="auto-flow-wrap">
+        <div class="flow-head">
+          <h2>运行流水</h2>
+          <span class="spacer"></span>
+          <span class="sub" id="autoSummary"></span>
+          <button class="chip" id="autoExport" type="button" hidden
+                  title="下载本次运行的完整 JSON 记录（每一步的请求体、响应、执行与截图）">⬇ 导出运行记录</button>
+        </div>
+        <div class="auto-status" id="autoStatus" hidden>
+          <span class="status-pill busy" id="autoRunPill">运行中</span>
+          <span class="auto-progress" id="autoProgress">第 0 / 15 步</span>
+          <span class="auto-elapsed" id="autoElapsed">0s</span>
+        </div>
+        <div class="auto-timeline" id="autoTimeline" hidden role="list" aria-label="运行轨迹时间线"></div>
+        <div id="autoFlow" class="auto-flow" aria-live="polite">
+          <div class="out-empty">
+            <div class="big" aria-hidden="true">▶</div>
+            填好任务后点「打开浏览器并开始」。<br />
+            每一步是一张可切换的卡片：Jev 决策概率、执行的命令与截图、本轮输入的 state 与 4 道问题全部结构化展示；<br />
+            用 ‹ › 按钮或键盘 ← → 切换步骤，点击顶部时间线任意节点直达对应卡片。
+          </div>
         </div>
       </div>
     </div>
@@ -221,7 +239,7 @@
 
   </div>
 
-  <details class="api">
+  <details class="api" id="apiSpec">
     <summary>Jev 接口规范与字段速查</summary>
     <div class="inner">
       <h4>请求</h4>
@@ -363,6 +381,6 @@
 <script src="js/questions.js?v=20260924a"></script>
 <script src="js/output.js?v=20260924a"></script>
 <script src="js/app.js?v=20260924a"></script>
-<script src="js/auto.js?v=20260924a"></script>
+<script src="js/auto.js?v=20260924c"></script>
 </body>
 </html>

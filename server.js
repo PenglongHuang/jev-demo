@@ -220,7 +220,23 @@ function handleBrowser(req, res, action) {
   readJsonBody(req, res, async (payload) => {
     let out;
     try {
-      if (action === 'open') out = await d.open(session, String(payload.url || ''), { browser: payload.browser });
+      if (action === 'open') {
+        const browser = ['chrome', 'msedge'].includes(payload.browser) ? payload.browser : undefined;
+        /* maximize：Chrome 原生 --start-maximized（真最大化态）。此时不能再
+         * resize —— 会把最大化的窗口打回普通窗口。 */
+        const maximize = payload.maximize === true;
+        out = await d.open(session, String(payload.url || ''), { browser, maximize });
+        /* 固定尺寸：前端传 width/height（工程侧 resize，不占 Jev 动作名额）；
+         * 失败不致命，仅在响应里注明。 */
+        if (out && out.ok && !maximize) {
+          const size = d._test.parseWindowSize(payload.width, payload.height);
+          if (size) {
+            const rz = await d.resize(session, size.w, size.h);
+            out.resized = Boolean(rz.ok);
+            if (!rz.ok) out.resizeError = rz.error;
+          }
+        }
+      }
       else if (action === 'snapshot') out = await d.snapshot(session);
       else if (action === 'page-info') out = await d.pageInfo(session);
       else if (action === 'act') out = await d.act(session, String(payload.command || ''), payload.ref ? String(payload.ref) : null, payload.text != null ? String(payload.text) : null);
