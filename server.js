@@ -223,14 +223,14 @@ function handleBrowser(req, res, action) {
       if (action === 'open') {
         const browser = ['chrome', 'msedge'].includes(payload.browser) ? payload.browser : undefined;
         /* 窗口模式三档（前端 windowMode 指定，缺省 max）：
-         *   full — CDP 真全屏（铺满整屏，含任务栏，无浏览器工具栏）
-         *   max  — Chrome 原生 --start-maximized（最大化，保留工具栏）
+         *   max  — 最大化：窗口铺满屏幕（保留浏览器工具栏，任务栏照常）★默认
+         *   full — 真全屏：CDP fullscreen，连任务栏一起盖住、无工具栏
          *   size — 指定页面视口尺寸（resize）
-         * 前端同时传 width/height 作目标尺寸：full 用整屏、max 用工作区、
-         * size 用选项值 —— 既用于 size 档 resize，也用于开窗后校验。 */
+         * native=true 时按物理像素渲染（忽略系统缩放），max/full 都适用。
+         * 前端同时传 width/height 作目标尺寸参考（size 档直接用，其余用于校验）。 */
         const mode = ['full', 'max', 'size'].includes(payload.windowMode) ? payload.windowMode : 'max';
         const maximize = mode !== 'size';
-        const native = mode === 'full' && payload.native === true;
+        const native = maximize && payload.native === true;
         out = await d.open(session, String(payload.url || ''), { browser, maximize, native });
         if (out && out.ok && mode === 'full') {
           /* 真全屏：先按最大化开窗（CDP 全屏失败时仍是体面的最大化窗口），
