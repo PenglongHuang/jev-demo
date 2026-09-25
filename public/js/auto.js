@@ -67,6 +67,46 @@ const Auto = (() => {
   let finished = false;
   let endText = '';          // 结束结论（导出记录用；展示只走状态条）
 
+  /* ---------- 会话落盘（设计 §5） ---------- */
+  let runId = null;            // 本轮会话 id（start 时生成）
+  let runStartedAt = null;
+  let saveTimer = null;
+  let saveFailedOnce = false;
+  let endReasonText = '';
+
+  /* 500ms 尾随节流；final=true 立即落盘并刷新会话列表 */
+  function saveRun(final) {
+    if (!runId || !runCfg) return;
+    const doSave = async () => {
+      try {
+        const record = AutoCore.buildRunRecord({
+          id: runId, runCfg,
+          jevModel: Config.current.model,
+          llmModel: Config.llm.configured() ? Config.llm.get().model : null,
+          startedAt: runStartedAt,
+          endedAt: final ? new Date().toISOString() : null,
+          endState: final ? (els.runPill.dataset.state || 'error') : 'running',
+          endReason: final ? endReasonText : null,
+          steps,
+        });
+        const r = await fetch('/api/runs/' + runId, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(record),
+        });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        saveFailedOnce = false;
+        if (final) refreshRunsList();
+      } catch (e) {
+        if (!saveFailedOnce) { toast('运行记录保存失败（不影响运行）：' + (e && e.message ? e.message : e)); saveFailedOnce = true; }
+      }
+    };
+    if (final) { if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; } return doSave(); }
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => { saveTimer = null; doSave(); }, 500);
+  }
+
+  async function refreshRunsList() { /* Task 5 实装（拉 GET /api/runs） */ }
+
   /* 轮播状态 */
   const view = { idx: 0, follow: true };
   const stage = {};          // wrap/track/counter/prev/next/follow
@@ -1273,6 +1313,9 @@ const Auto = (() => {
       browser: els.browser.value, window: plan,
       paramTrim: Config.paramTrim.get(),
     };
+    runId = AutoCore.newRunId();
+    runStartedAt = new Date().toISOString();
+    endReasonText = ''; saveFailedOnce = false;
 
     els.stop.hidden = false;
     els.statusBar.hidden = false;
@@ -1319,6 +1362,8 @@ const Auto = (() => {
     stopTimer();                                  /* 停在最终值，与下面读的 elapsed 同源 */
     const s = END_STATES[t.state] || END_STATES.error;
     const secs = Math.round((Date.now() - startTs) / 1000);
+    /* 人类可读的结束原因，供落盘 meta.endReason；必须在 const s 之后（TDZ） */
+    endReasonText = t.reason || s.label;
     els.runPill.className = 'status-pill ' + s.tone;
     els.runPill.textContent = s.label;
     els.runPill.dataset.state = t.state || 'error';
@@ -1327,6 +1372,7 @@ const Auto = (() => {
     els.elapsed.textContent = secs + 's';
     endText = steps.length + ' 步 · ' + s.label;
     els.exportBtn.hidden = false;
+    saveRun(true);
     toast(t.reason || s.label);
   }
 
@@ -1546,6 +1592,7 @@ const Auto = (() => {
           lastResult = '用户跳过（未执行）';
           markChip(n, 'pending');
           updateStepCard(step, nodes);
+          saveRun(false);
           continue;
         }
       }
@@ -1599,6 +1646,7 @@ const Auto = (() => {
 
       markChip(n, ok ? 'ok' : 'error');
       updateStepCard(step, nodes);
+      saveRun(false);
 
       /* ⑪ 终止判断 */
       const t = AutoCore.shouldTerminate({
