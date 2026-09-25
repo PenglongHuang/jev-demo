@@ -28,9 +28,23 @@ const Config = (() => {
     models: 'jev-models',
     customEndpoint: 'jev-custom-endpoint',
     llm: 'jev-llm',
+    paramTrim: 'jev-param-trim',
   };
 
-  const current = { provider: 'official', key: '', endpoint: 'official', model: 'jev-latest', llm: { base: '', key: '', model: '' } };
+  /* 「参数」题候选裁剪的默认值（与 AutoCore.normalizeTrim 的口径一致） */
+  const TRIM_DEFAULTS = { on: true, limit: 80, maxTranches: 3 };
+  function normalizeTrim(raw) {
+    const t = (raw && typeof raw === 'object') ? raw : {};
+    const limit = Number(t.limit);
+    const batches = Number(t.maxTranches);
+    return {
+      on: t.on !== false,
+      limit: isFinite(limit) ? Math.max(10, Math.min(250, Math.round(limit))) : TRIM_DEFAULTS.limit,
+      maxTranches: isFinite(batches) ? Math.max(0, Math.min(5, Math.round(batches))) : TRIM_DEFAULTS.maxTranches,
+    };
+  }
+
+  const current = { provider: 'official', key: '', endpoint: 'official', model: 'jev-latest', llm: { base: '', key: '', model: '' }, paramTrim: Object.assign({}, TRIM_DEFAULTS) };
   let draft = null;
 
   function readJson(key, fallback) {
@@ -53,6 +67,7 @@ const Config = (() => {
     current.llm = (llm && typeof llm === 'object')
       ? { base: String(llm.base || ''), key: String(llm.key || ''), model: String(llm.model || '') }
       : { base: '', key: '', model: '' };
+    current.paramTrim = normalizeTrim(readJson(STORAGE.paramTrim, null));
     updateBadge();
   }
 
@@ -102,6 +117,9 @@ const Config = (() => {
     document.getElementById('cfgLlmBase').value = current.llm.base;
     document.getElementById('cfgLlmKey').value = current.llm.key;
     document.getElementById('cfgLlmModel').value = current.llm.model;
+    document.getElementById('cfgTrimOn').checked = current.paramTrim.on;
+    document.getElementById('cfgTrimLimit').value = String(current.paramTrim.limit);
+    document.getElementById('cfgTrimBatches').value = String(current.paramTrim.maxTranches);
     refreshFormForProvider(draft.provider, true);
     document.getElementById('configModal').hidden = false;
     setTimeout(() => keyInp.focus(), 50);
@@ -239,7 +257,7 @@ const Config = (() => {
       localStorage.setItem(STORAGE.customEndpoint, url);
     }
 
-    /* 生成模型槽位（可选功能：Auto 浏览器「生成输入」）：填了任一字段就要求整组完整 */
+    /* 生成模型槽位（可选功能：playwright-jev-agent「生成输入」）：填了任一字段就要求整组完整 */
     const llmBase = document.getElementById('cfgLlmBase').value.trim();
     const llmKey = document.getElementById('cfgLlmKey').value.trim();
     const llmModel = document.getElementById('cfgLlmModel').value.trim();
@@ -251,6 +269,19 @@ const Config = (() => {
     }
     localStorage.setItem(STORAGE.llm, JSON.stringify({ base: llmBase, key: llmKey, model: llmModel }));
 
+    /* 高级参数：候选项裁剪（只影响 playwright-jev-agent 的「参数」题） */
+    const trimLimit = Number(document.getElementById('cfgTrimLimit').value);
+    const trimBatches = Number(document.getElementById('cfgTrimBatches').value);
+    if (document.getElementById('cfgTrimOn').checked) {
+      if (!isFinite(trimLimit) || trimLimit < 10 || trimLimit > 250) return toast('候选元素上限需在 10–250 之间（接口硬上限 255）');
+      if (!isFinite(trimBatches) || trimBatches < 0 || trimBatches > 5) return toast('最多候选批次数需在 0–5 之间');
+    }
+    localStorage.setItem(STORAGE.paramTrim, JSON.stringify(normalizeTrim({
+      on: document.getElementById('cfgTrimOn').checked,
+      limit: trimLimit,
+      maxTranches: trimBatches,
+    })));
+
     loadProvider(providerId);
     close();
     toast('已切换到 ' + prov.label + (key ? '' : '（API Key 未填）'));
@@ -260,10 +291,15 @@ const Config = (() => {
     init: init,
     current: current,
     providers: PROVIDERS,
-    /* 生成模型槽位（Auto 浏览器「生成输入」动作用，独立于 Jev 提供商） */
+    /* 生成模型槽位（playwright-jev-agent「生成输入」动作用，独立于 Jev 提供商） */
     llm: {
       get: function () { return current.llm; },
       configured: function () { return Boolean(current.llm.base && current.llm.key && current.llm.model); },
+    },
+    /* 高级参数：候选项裁剪（AutoCore.paramCriteria 消费） */
+    paramTrim: {
+      get: function () { return Object.assign({}, current.paramTrim); },
+      defaults: function () { return Object.assign({}, TRIM_DEFAULTS); },
     },
   };
 })();

@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const path = require('path');
 
 const driver = require(path.join(__dirname, '..', 'browser-driver.js'));
-const { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, parseEnvelope, unwrapResult, uploadPathAllowed, parseWindowSize, buildMaximizedConfig, FULLSCREEN_SNIPPET } = driver._test;
+const { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, parseEnvelope, unwrapResult, uploadPathAllowed, parseWindowSize, buildMaximizedConfig, FULLSCREEN_SNIPPET, RECT_SNIPPET } = driver._test;
 
 /* ---------- quoteArg：cmd.exe 引号规则 ---------- */
 
@@ -183,4 +183,27 @@ test('全屏片段：走 CDP setWindowBounds，且不含 quoteArg 拒绝的字�
   assert.match(FULLSCREEN_SNIPPET, /^async page =>/);
   assert.doesNotMatch(FULLSCREEN_SNIPPET, /["%\r\n]/, '片段必须能安全通过 Windows cmd 引号封装');
   assert.strictEqual(quoteArg(FULLSCREEN_SNIPPET).startsWith('"'), true);   // 含空格等 → 需包引号
+});
+
+/* ---------- RECT_SNIPPET：操作前读元素矩形（标注用） ---------- */
+
+test('读位置片段：能安全通过 cmd 引号封装，且同时回读视口尺寸', () => {
+  assert.match(RECT_SNIPPET, /^el => \{/);
+  assert.doesNotMatch(RECT_SNIPPET, /["%\r\n]/, '片段必须能安全通过 Windows cmd 引号封装');
+  assert.strictEqual(quoteArg(RECT_SNIPPET).startsWith('"'), true);   // 含空格 → 需包引号
+  assert.match(RECT_SNIPPET, /getBoundingClientRect/);
+  /* 视口宽度必须与矩形同一时刻读到：截图是设备像素、矩形是 CSS 像素，
+   * 换算比例只能由这两个数算出来（DPR 随窗口方案变，不能假设 1:1） */
+  assert.match(RECT_SNIPPET, /window\.innerWidth/);
+  assert.match(RECT_SNIPPET, /window\.innerHeight/);
+  /* 只读，不得改动页面 —— 标注只画在图上，被驱动页面里不留任何痕迹 */
+  assert.ok(!/append|remove|insert|innerHTML|style\./.test(RECT_SNIPPET), '读位置片段必须是只读的');
+});
+
+test('rect：ref 形状非法时直接拒绝（不进 argv）', async () => {
+  const bad = await driver.rect('nosession', 'e12;rm');
+  assert.ok(!bad.ok && /ref/.test(bad.error), '带命令分隔符的 ref 必须被拒：' + JSON.stringify(bad));
+  assert.ok(!(await driver.rect('nosession', '')).ok);
+  assert.ok(!(await driver.rect('nosession', '无需元素')).ok);
+  assert.ok(!(await driver.rect('nosession', null)).ok);
 });

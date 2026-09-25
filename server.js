@@ -169,7 +169,7 @@ function handleWorkspace(req, res) {
   sendJson(res, 405, { ok: false, error: { message: 'Method Not Allowed' } });
 }
 
-/* ---------------- Auto 浏览器模式 ----------------
+/* ---------------- playwright-jev-agent ----------------
  * 驱动模块懒加载：playwright 未安装时不影响其余功能。
  * 租户隔离与场景保存一致：按 IP 哈希得到 CLI session 名。
  */
@@ -277,7 +277,19 @@ function handleBrowser(req, res, action) {
       else if (action === 'snapshot') out = await d.snapshot(session);
       else if (action === 'page-info') out = await d.pageInfo(session);
       else if (action === 'act') out = await d.act(session, String(payload.command || ''), payload.ref ? String(payload.ref) : null, payload.text != null ? String(payload.text) : null);
-      else if (action === 'screenshot') out = await d.screenshot(session, session);
+      else if (action === 'screenshot') {
+        /* 带 ref 时把该元素的矩形与当时视口一并返回（工程自动执行，不占 Jev 名额）：
+         * 前端拿它把「即将被操作的元素」标到这张图上去。位置与截图取自同一时刻、且
+         * 都在动作之前 —— 元素此刻必定还在，位置唯一确定，不存在 ref 失效或行位移的问题。
+         * 标注画在图上（public/js/anno.js），被驱动页面里不留痕迹。 */
+        const ref = payload.ref ? String(payload.ref) : null;
+        const pos = ref ? await d.rect(session, ref) : null;
+        out = await d.screenshot(session, session);
+        if (out && out.ok && pos && pos.ok) {
+          out.rect = pos.rect;
+          out.viewport = pos.viewport;
+        }
+      }
       else if (action === 'close') out = await d.close(session);
       else return sendJson(res, 404, { ok: false, error: { message: 'Unknown browser action' } });
     } catch (e) {
@@ -439,7 +451,7 @@ function proxySystemOne(req, res) {
 }
 
 /* ---------------- 转发到生成模型（OpenAI 兼容 /chat/completions） ----------------
- * Auto 浏览器模式「生成输入」动作用的纯透传：
+ * playwright-jev-agent「生成输入」动作用的纯透传：
  *  - 地址与 Key 全部来自页面请求头（x-llm-base / x-llm-key），服务端不保存
  *  - base 仅允许 https:// 或 http://localhost（内网地址一律拒绝）
  *  - 请求体做字段白名单（model/messages/temperature/max_tokens），messages 内容原样透传不改动

@@ -1,5 +1,5 @@
 /**
- * browser-driver — playwright-cli 薄驱动（Auto 浏览器模式）
+ * browser-driver — playwright-cli 薄驱动（playwright-jev-agent）
  *
  * 职责（设计文档 §5）：
  *  - 以子进程方式调用全局安装的 playwright-cli（Windows 下是 .cmd，必须 shell:true）
@@ -17,6 +17,7 @@
  *  viewport(session)                         → {w,h} | null（工程自动执行，读当前视口）
  *  fullscreen(session)                       → {ok}（工程自动执行，CDP 真全屏）
  *  act(session, command, ref, text)          → {ok, result} | {ok:false, error}
+ *  rect(session, ref)                        → {ok, rect:{x,y,w,h}, viewport:{w,h}}（操作前读位置，标注用）
  *  screenshot(session, name)                 → {ok, dataUrl} | {ok:false, error}
  *  close(session)                            → {ok}
  *
@@ -368,6 +369,30 @@ async function fullscreen(session) {
   return out.ok ? { ok: true } : out;
 }
 
+/* ---------------- 读元素矩形（工程自动执行，不占 Jev 名额） ----------------
+ * 步骤截图的标注用它：在**操作前**读被操作元素的位置，连同当时的视口尺寸一起返回。
+ * 两者必须同一时刻读到 —— 截图是设备像素、矩形是 CSS 像素，换算比例只能这么算出来
+ * （本项目窗口方案有原生像素/固定尺寸等，DPR 不固定，不能假设 1:1）。
+ * 标注本身画在图上（public/js/anno.js），被驱动的页面里不留任何痕迹。 */
+const RECT_SNIPPET =
+  'el => { var r=el.getBoundingClientRect(); return Math.round(r.left)+\',\'+Math.round(r.top)+\',\''
+  + '+Math.round(r.width)+\',\'+Math.round(r.height)+\',\'+window.innerWidth+\',\'+window.innerHeight; }';
+
+async function rect(session, ref) {
+  const r = String(ref == null ? '' : ref);
+  if (!REF_RE.test(r)) return { ok: false, error: '读元素位置需要合法 ref（形如 e12），收到：' + JSON.stringify(r.slice(0, 40)) };
+  const out = await exec(session, ['eval', RECT_SNIPPET, r]);
+  if (!out.ok) return out;
+  /* eval 的返回值被 CLI 又 JSON 序列化了一次，字符串带引号 —— 剥掉再解析 */
+  let text = out.result;
+  if (typeof text === 'string' && /^".*"$/.test(text)) {
+    try { text = JSON.parse(text); } catch (_) { /* 保持原样 */ }
+  }
+  const m = String(text).match(/^(-?\d+),(-?\d+),(\d+),(\d+),(\d+),(\d+)$/);
+  if (!m) return { ok: false, error: '元素位置解析失败：' + JSON.stringify(String(text).slice(0, 60)) };
+  return { ok: true, rect: { x: +m[1], y: +m[2], w: +m[3], h: +m[4] }, viewport: { w: +m[5], h: +m[6] } };
+}
+
 const MAXIMIZED_CONFIG_FILE = 'auto-cli.config.json';   // 落在 dataDir（daemon 的 cwd）
 
 /* upload 文件路径必须落在 data/ 目录内（防「读任意本地文件 → 经页面文件框
@@ -421,9 +446,10 @@ module.exports = {
   viewport,
   fullscreen,
   act,
+  rect,
   screenshot,
   close,
   set dataDir(v) { dataDir = v; },
   get dataDir() { return dataDir; },
-  _test: { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, parseEnvelope, unwrapResult, uploadPathAllowed, parseWindowSize, buildMaximizedConfig, FULLSCREEN_SNIPPET },
+  _test: { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, parseEnvelope, unwrapResult, uploadPathAllowed, parseWindowSize, buildMaximizedConfig, FULLSCREEN_SNIPPET, RECT_SNIPPET },
 };

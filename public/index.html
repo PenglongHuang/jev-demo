@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Jev 体验台 · System One 决策模型</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Ctext x='16' y='22' font-size='17' fill='white' text-anchor='middle'%3E%E2%97%87%3C/text%3E%3C/svg%3E" />
-<link rel="stylesheet" href="styles.css?v=20260924c" />
+<link rel="stylesheet" href="styles.css?v=20260924k" />
 </head>
 <body>
 
@@ -16,99 +16,61 @@
     <div class="brand">
       <span class="logo" aria-hidden="true">◇</span>
       Jev 体验台
-      <span class="sub">System One 决策模型</span>
     </div>
+
+    <!-- 模式 Tab：整页最大的一次切换，按一级导航给权重 —— 占满顶栏整行高，
+         下沿一条滑动指示条。正文里的「表单 / 源码」分段控件不受影响。 -->
+    <nav class="topbar-tabs">
+      <div class="seg" id="modeSeg" role="tablist" aria-label="运行模式">
+        <button type="button" class="seg-btn active" data-mode="demo" role="tab" aria-selected="true">Demo 模式</button>
+        <button type="button" class="seg-btn" data-mode="auto" role="tab" aria-selected="false">
+          playwright-jev-agent<span class="beta-tag" title="Beta：接口与界面仍在演进">Beta</span>
+        </button>
+      </div>
+    </nav>
+
     <div class="topbar-spacer"></div>
+    <span class="status-pill" id="browserPill" role="status" hidden>引擎检测中…</span>
     <button class="btn-ghost btn-config" id="openConfig" type="button" title="API 配置：提供商、Key、模型、接口地址">
-      <span class="config-badge" id="configBadge">官网</span>⚙ 配置
+      <span class="config-icon" aria-hidden="true">⚙</span>
+      <span class="sr-only">API 配置 · 提供商</span>
+      <span class="config-badge" id="configBadge">官网</span>
     </button>
   </div>
 </header>
 
 <main class="wrap" id="main">
 
-  <div class="hero">
-    <h1>一个拒绝写作的模型</h1>
-    <p>Jev 不生成文本。给它一段<strong>状态</strong>和几道<strong>类型化问题</strong>，它只回答「选哪个 / 打几分 / 是或否」，
-       并给出<strong>经过校准的概率</strong> —— 让代码可以直接 <code>if (p &gt; 0.5)</code> 拿来做判断。</p>
-  </div>
-
   <div class="warnbar" id="warnbar" role="status"></div>
 
-  <!-- ============ 顶层模式切换 ============ -->
-  <section class="card mode-card" aria-label="模式切换">
-    <div class="mode-row">
-      <div class="seg" id="modeSeg" role="tablist" aria-label="运行模式">
-        <button type="button" class="seg-btn active" data-mode="demo" role="tab" aria-selected="true">Demo 模式</button>
-        <button type="button" class="seg-btn" data-mode="auto" role="tab" aria-selected="false">Auto 浏览器</button>
-      </div>
-      <span class="spacer"></span>
-      <span class="status-pill" id="browserPill" role="status">引擎检测中…</span>
-    </div>
-  </section>
-
-  <!-- ============ Auto 浏览器面板 ============ -->
-  <section class="card auto-card" id="autoPanel" hidden aria-label="Auto 浏览器模式">
+  <!-- ============ playwright-jev-agent 面板 ============ -->
+  <section class="card auto-card" id="autoPanel" hidden aria-label="playwright-jev-agent 模式">
     <div class="card-head">
-      <h2>Auto 浏览器 · 工程闭环 + Jev 决策</h2>
+      <h2>playwright-jev-agent · 工程闭环 + Jev 决策</h2>
       <span class="sub">playwright-cli 快照 → state/问题构造 → Jev 选动作与 ref → 执行 → 循环</span>
     </div>
 
     <div class="auto-body">
       <div class="warnbar" id="autoInstallHint" hidden>
         <div class="title">⚠ 浏览器引擎不可用</div>
-        Auto 浏览器模式需要 <b>全局安装 playwright-cli</b> 和本机 Chrome / Edge：在终端执行
+        playwright-jev-agent 需要 <b>全局安装 playwright-cli</b> 和本机 Chrome / Edge：在终端执行
         <code>npm i -g @playwright/cli</code>（只装 CLI，复用你本机已装的浏览器），装好后刷新本页。
         Demo 模式不受影响。
       </div>
 
-      <div class="auto-config">
-        <div class="field">
-          <label for="autoGoal">任务目标</label>
-          <input type="text" id="autoGoal" placeholder="例如：在收件箱里归档招商银行 9 月电子对账单邮件" spellcheck="false" />
+      <!-- 外层只读摘要：日常路径是「看一眼 → 点开始」，编辑走弹窗 -->
+      <div class="task-summary" id="taskSummary">
+        <div class="ts-head">
+          <h3>任务配置</h3>
+          <span class="spacer"></span>
+          <button class="chip" id="autoEditTask" type="button" aria-haspopup="dialog"
+                  title="打开表单，编辑任务目标、起始 URL、输入变量与运行参数">✎ 编辑配置</button>
         </div>
-        <div class="field">
-          <label for="autoUrl">起始 URL</label>
-          <div class="url-row">
-            <input type="text" id="autoUrl" placeholder="http://localhost:3000/demo/mailbox.html" spellcheck="false" />
-            <button class="chip" id="autoDemoPage" type="button" title="用项目内置的可交互演示页，离线可完整演示">📦 内置演示页</button>
-          </div>
+        <div class="ts-scenarios">
+          <span class="ts-label">演示场景</span>
+          <div class="chips" id="autoScenarios" role="group" aria-label="内置演示场景"></div>
         </div>
-        <div class="field">
-          <label>输入变量（fill / press / goto 等动作的文本来源；Jev 用选择题从中挑选）</label>
-          <div id="autoVars" class="vars-box"></div>
-          <button class="chip" id="autoAddVar" type="button">＋ 添加变量</button>
-        </div>
-        <div class="field field-row">
-          <div class="inline-field">
-            <label for="autoMaxSteps">步数上限</label>
-            <input type="number" id="autoMaxSteps" value="15" min="1" max="50" />
-          </div>
-          <div class="inline-field">
-            <label>节奏</label>
-            <div class="seg">
-              <label class="seg-btn radio-btn"><input type="radio" name="autoCadence" value="single" checked />单步确认</label>
-              <label class="seg-btn radio-btn"><input type="radio" name="autoCadence" value="auto" />连续自动</label>
-            </div>
-          </div>
-          <div class="inline-field">
-            <label for="autoBrowser">浏览器内核</label>
-            <select id="autoBrowser">
-              <option value="chrome" selected>Chrome（独立实例）</option>
-              <option value="msedge">Edge（独立实例）</option>
-            </select>
-          </div>
-          <div class="inline-field">
-            <label for="autoScreen">窗口尺寸</label>
-            <select id="autoScreen">
-              <option value="full" selected>跟随屏幕（全屏）</option>
-              <option value="1920x1080">1920 × 1080</option>
-              <option value="1440x900">1440 × 900</option>
-              <option value="1280x720">1280 × 720</option>
-            </select>
-          </div>
-          <label class="check-inline"><input type="checkbox" id="autoScreenshot" checked />每步截图</label>
-        </div>
+        <div class="ts-body" id="taskSummaryBody"></div>
         <div class="btn-row">
           <button class="btn-ghost" id="autoCloseBrowser" type="button">关闭浏览器</button>
           <button class="btn-ghost" id="autoStop" type="button" hidden>■ 中止</button>
@@ -120,7 +82,6 @@
         <div class="flow-head">
           <h2>运行流水</h2>
           <span class="spacer"></span>
-          <span class="sub" id="autoSummary"></span>
           <button class="chip" id="autoExport" type="button" hidden
                   title="下载本次运行的完整 JSON 记录（每一步的请求体、响应、执行与截图）">⬇ 导出运行记录</button>
         </div>
@@ -133,10 +94,77 @@
         <div id="autoFlow" class="auto-flow" aria-live="polite">
           <div class="out-empty">
             <div class="big" aria-hidden="true">▶</div>
-            填好任务后点「打开浏览器并开始」。<br />
+            点右上「✎ 编辑配置」填好任务后，回到这里点「▶ 打开浏览器并开始」。<br />
             每一步是一张可切换的卡片：Jev 决策概率、执行的命令与截图、本轮输入的 state 与 4 道问题全部结构化展示；<br />
             用 ‹ › 按钮或键盘 ← → 切换步骤，点击顶部时间线任意节点直达对应卡片。
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- 编辑表单（居中模态）----
+         输入框本体留在这里，id 全部不变：auto.js 直接读 .value，
+         所以打开/关闭弹窗不影响运行循环。取消时用快照回滚，保证摘要与实际值一致。 -->
+    <div class="modal-backdrop" id="taskModal" hidden role="dialog" aria-modal="true" aria-labelledby="taskModalTitle">
+      <div class="modal task-modal">
+        <div class="modal-head">
+          <h3 id="taskModalTitle">编辑任务配置</h3>
+          <button class="modal-close" id="taskModalClose" type="button" aria-label="关闭">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="auto-config">
+            <div class="field">
+              <label for="autoGoal">任务目标</label>
+              <textarea id="autoGoal" rows="2" placeholder="用一句完整的话说清要达成什么，例如：在收件箱里找到招商银行信用卡中心发来的 9 月电子对账单邮件，点击那一行的「归档」按钮" spellcheck="false"></textarea>
+            </div>
+            <div class="field">
+              <label for="autoUrl">起始 URL</label>
+              <input type="text" id="autoUrl" placeholder="http://localhost:3000/demo/mailbox.html" spellcheck="false" />
+            </div>
+            <div class="field">
+              <label>输入变量 <span class="hint">fill / press / goto 等动作的文本来源，Jev 用选择题从中挑选</span></label>
+              <div id="autoVars" class="vars-box"></div>
+              <button class="chip" id="autoAddVar" type="button">＋ 添加变量</button>
+            </div>
+            <div class="field field-row">
+              <div class="inline-field">
+                <label for="autoMaxSteps">步数上限</label>
+                <input type="number" id="autoMaxSteps" value="15" min="1" max="50" />
+              </div>
+              <div class="inline-field">
+                <label>节奏</label>
+                <div class="seg">
+                  <label class="seg-btn radio-btn"><input type="radio" name="autoCadence" value="single" />单步确认</label>
+                  <label class="seg-btn radio-btn"><input type="radio" name="autoCadence" value="auto" checked />连续自动</label>
+                </div>
+              </div>
+              <div class="inline-field">
+                <label for="autoBrowser">浏览器内核</label>
+                <select id="autoBrowser">
+                  <option value="chrome" selected>Chrome（独立实例）</option>
+                  <option value="msedge">Edge（独立实例）</option>
+                </select>
+              </div>
+              <div class="inline-field">
+                <label for="autoScreen">窗口尺寸</label>
+                <select id="autoScreen">
+                  <option value="max" selected>占满屏幕 · 原生分辨率（忽略系统缩放）</option>
+                  <option value="maxScaled">占满屏幕 · 跟随系统缩放</option>
+                  <option value="full">全屏 · 无边框，盖住任务栏</option>
+                  <option value="fullScaled">全屏 · 跟随系统缩放</option>
+                  <option value="1920x1080">视口 1920 × 1080</option>
+                  <option value="1440x900">视口 1440 × 900</option>
+                  <option value="1280x720">视口 1280 × 720</option>
+                </select>
+              </div>
+              <label class="check-inline"><input type="checkbox" id="autoScreenshot" checked />每步截图</label>
+            </div>
+          </div>
+          <p class="field-tip task-error" id="taskError" role="alert" tabindex="-1" hidden></p>
+        </div>
+        <div class="modal-foot">
+          <button class="btn-ghost" id="taskCancel" type="button">取消</button>
+          <button class="btn-primary" id="taskSave" type="button">保存并应用</button>
         </div>
       </div>
     </div>
@@ -346,7 +374,7 @@
           <p class="field-tip" id="cfgModelTip"></p>
         </div>
         <div class="llm-slot">
-          <div class="llm-slot-title">生成模型 <span class="llm-slot-sub">Auto 浏览器「生成输入」动作用 · OpenAI 兼容</span></div>
+          <div class="llm-slot-title">生成模型 <span class="llm-slot-sub">playwright-jev-agent「生成输入」动作用 · OpenAI 兼容</span></div>
           <div class="field">
             <label for="cfgLlmBase">Base URL</label>
             <input type="text" id="cfgLlmBase" placeholder="https://api.openai.com/v1" spellcheck="false" />
@@ -359,6 +387,23 @@
             <label for="cfgLlmModel">模型名</label>
             <input type="text" id="cfgLlmModel" placeholder="gpt-4o-mini / qwen-turbo / deepseek-chat…" spellcheck="false" />
             <p class="field-tip">只存浏览器 localStorage，请求时经本地服务透传到 <code>&lt;base&gt;/chat/completions</code>。不填则「生成输入」动作会失败并提示；与上方 Jev 提供商相互独立。</p>
+          </div>
+        </div>
+        <div class="llm-slot">
+          <div class="llm-slot-title">高级参数 <span class="llm-slot-sub">仅影响 playwright-jev-agent 的「参数」题</span></div>
+          <label class="check-row" for="cfgTrimOn">
+            <input type="checkbox" id="cfgTrimOn" />
+            <span>参数候选智能裁剪<em>元素太多时，按相关性只把前 N 个候选给 Jev（关掉则全量发出，超过接口 255 个选项上限会直接报错）</em></span>
+          </label>
+          <div class="field">
+            <label for="cfgTrimLimit">候选元素上限</label>
+            <input type="number" id="cfgTrimLimit" min="10" max="250" step="10" />
+            <p class="field-tip">一页元素数超过 250 个时才启用裁剪，届时按相关性取前 N 个（10–250，默认 80）。</p>
+          </div>
+          <div class="field">
+            <label for="cfgTrimBatches">最多候选批次数</label>
+            <input type="number" id="cfgTrimBatches" min="0" max="5" step="1" />
+            <p class="field-tip">Jev 在前 N 个里找不到目标时，会选「其他」让我们展开下一批；这里限总共最多给几批（0–5，默认 3，即首批 + 最多 2 次展开；0 = 不附「其他」项）。</p>
           </div>
         </div>
       </div>
@@ -375,12 +420,14 @@
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
 <script src="presets.js?v=20260924a"></script>
-<script src="js/util.js?v=20260924a"></script>
-<script src="js/auto-core.js?v=20260924a"></script>
+<script src="js/util.js?v=20260924l"></script>
+<script src="js/ref-funnel.js?v=20260924j"></script>
+<script src="js/auto-core.js?v=20260924l"></script>
+<script src="js/anno.js?v=20260924m"></script>
 <script src="js/state-editor.js?v=20260924a"></script>
 <script src="js/questions.js?v=20260924a"></script>
 <script src="js/output.js?v=20260924a"></script>
-<script src="js/app.js?v=20260924a"></script>
-<script src="js/auto.js?v=20260924c"></script>
+<script src="js/app.js?v=20260924j"></script>
+<script src="js/auto.js?v=20260924m"></script>
 </body>
 </html>

@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>星河招聘中台 · 候选人管理</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --border: #e7e8ec; --border-strong: #d7d9e0;
+    --text: #1a1c20; --text-2: #565c66; --text-3: #6e7480;
+    --accent: #4f46e5; --accent-soft: #eef2ff; --green: #0d9268; --green-soft: #e7f6f0;
+    --red: #dc2626; --red-soft: #fdecec; --radius: 12px;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  .topbar {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; align-items: center; gap: 14px;
+    background: rgba(255,255,255,.9); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border); padding: 10px 22px;
+  }
+  .brand { font-weight: 700; font-size: 15.5px; color: var(--accent); white-space: nowrap; }
+  .topbar input[type="search"] {
+    flex: 1; max-width: 460px; padding: 8px 12px; font-size: 13.5px; font-family: inherit;
+    border: 1px solid var(--border-strong); border-radius: 9px; outline: none; background: #fbfbfc;
+  }
+  .topbar input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .btn {
+    padding: 7px 14px; font-size: 13px; font-weight: 600; font-family: inherit; cursor: pointer;
+    border-radius: 9px; border: 1px solid var(--border-strong); background: #fff; color: var(--text-2);
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { background: #443ad4; color: #fff; }
+  .btn.danger:hover { border-color: var(--red); color: var(--red); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn:disabled:hover { border-color: var(--border-strong); color: var(--text-2); }
+  .btn:focus-visible, .name:focus-visible, select:focus-visible, a:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+  .layout { display: grid; grid-template-columns: 200px 1fr; gap: 18px; max-width: 1180px; margin: 20px auto; padding: 0 22px; }
+  .side { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; height: fit-content; }
+  .side ul { list-style: none; margin: 0; padding: 0; }
+  .side button {
+    display: flex; justify-content: space-between; gap: 8px; width: 100%; padding: 8px 11px; font-size: 13.5px;
+    background: none; border: none; border-radius: 8px; cursor: pointer; font-family: inherit; color: var(--text-2);
+  }
+  .side button:hover { background: #f2f3f6; color: var(--text); }
+  .side button.active { background: var(--accent-soft); color: var(--accent); font-weight: 650; }
+  .side .count { font-size: 11.5px; color: var(--text-3); font-family: var(--mono); }
+  .side-note { font-size: 11.5px; color: var(--text-3); padding: 8px 11px 2px; margin: 0; }
+  .side-note b { font-family: var(--mono); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .panel-head {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 13px 18px; border-bottom: 1px solid var(--border);
+  }
+  .panel-head h1 { font-size: 16px; margin: 0; }
+  .meta { font-size: 12px; color: var(--text-3); font-family: var(--mono); }
+  .filters {
+    display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap;
+    padding: 13px 18px; border-bottom: 1px solid var(--border); background: #fbfbfd;
+  }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 12px; font-weight: 600; color: var(--text-2); }
+  .field select {
+    padding: 7px 10px; font-size: 13.5px; font-family: inherit; color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: 9px; background: #fff; outline: none;
+  }
+  .field select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .cand-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(322px, 1fr)); gap: 14px; padding: 16px 18px; }
+  .cand {
+    display: flex; flex-direction: column; gap: 9px;
+    background: #fff; border: 1px solid var(--border); border-radius: var(--radius); padding: 14px;
+  }
+  .cand:hover { border-color: var(--border-strong); }
+  .cand.done { border-color: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
+  .cand.rejected { opacity: .6; }
+  .cand-head { display: flex; align-items: center; gap: 8px; }
+  .cand-head .name {
+    background: none; border: none; padding: 0; cursor: pointer; font-family: inherit;
+    font-size: 15px; font-weight: 700; color: var(--text); text-align: left;
+  }
+  .cand-head .name:hover { color: var(--accent); }
+  .pill {
+    font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 100px;
+    background: var(--accent-soft); color: var(--accent); white-space: nowrap;
+  }
+  .status {
+    margin-left: auto; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 100px;
+    background: #f1f2f5; color: var(--text-3); white-space: nowrap;
+  }
+  .cand.done .status { background: var(--green-soft); color: var(--green); }
+  .cand.rejected .status { background: var(--red-soft); color: var(--red); }
+  .facts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; font-size: 12.5px; color: var(--text-2); }
+  .facts .pay { font-family: var(--mono); font-weight: 700; color: var(--text); }
+  .facts .sep { color: var(--border-strong); }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tag {
+    font-size: 11.5px; padding: 2px 9px; border-radius: 100px;
+    border: 1px solid var(--border-strong); background: #fbfbfc; color: var(--text-2);
+  }
+  .exp { margin: 0; font-size: 12.5px; color: var(--text-3); }
+  .phone { margin: 0; font-size: 11.5px; color: var(--text-3); font-family: var(--mono); }
+  .ops { display: flex; flex-wrap: wrap; gap: 8px; margin-top: auto; padding-top: 3px; }
+  .ops .btn { padding: 5.5px 12px; font-size: 12.5px; border-radius: 8px; }
+  .empty { padding: 56px 20px; text-align: center; color: var(--text-3); font-size: 13px; }
+  .pager {
+    display: flex; align-items: center; justify-content: center; gap: 16px;
+    padding: 13px 18px; border-top: 1px solid var(--border);
+  }
+  .toast {
+    position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%) translateY(14px);
+    background: #17181c; color: #fff; padding: 10px 18px; border-radius: 10px; font-size: 13px;
+    opacity: 0; pointer-events: none; transition: .22s; z-index: 99;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%); }
+  dialog {
+    border: none; border-radius: 14px; padding: 0; width: min(520px, 92vw);
+    box-shadow: 0 18px 50px rgba(16,18,24,.18);
+  }
+  dialog::backdrop { background: rgba(20,22,28,.42); }
+  .dlg-head { display: flex; align-items: center; justify-content: space-between; padding: 15px 20px; border-bottom: 1px solid var(--border); font-weight: 700; }
+  .dlg-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+  .dlg-body dl { margin: 0; display: grid; grid-template-columns: 88px 1fr; gap: 6px 12px; font-size: 13px; }
+  .dlg-body dt { color: var(--text-3); font-size: 12.5px; }
+  .dlg-body dd { margin: 0; color: var(--text); }
+  .dlg-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 13px 20px; border-top: 1px solid var(--border); }
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; }
+    .cand-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <span class="brand">◇ 星河招聘中台</span>
+  <label class="sr-only" for="searchBox">搜索姓名 / 手机号</label>
+  <input id="searchBox" type="search" aria-label="搜索姓名 / 手机号" placeholder="搜索姓名 / 手机号" />
+  <button class="btn primary" id="resetBtn" type="button">重置演示</button>
+</header>
+
+<div class="layout">
+  <nav class="side" aria-label="处理状态快捷筛选">
+    <ul id="statusList"></ul>
+    <p class="side-note">已邀请 <b id="invitedCount">0</b> 位<br />已标记不合适 <b id="rejectCount">0</b> 位</p>
+    <p class="side-note" id="invitedNames">最近邀请：暂无</p>
+  </nav>
+
+  <main class="panel">
+    <div class="panel-head">
+      <h1 id="panelTitle">候选人管理</h1>
+      <span class="meta" id="listMeta"></span>
+    </div>
+
+    <div class="filters">
+      <div class="field">
+        <label for="jobFilter">投递岗位</label>
+        <select id="jobFilter" aria-label="投递岗位">
+          <option>全部岗位</option>
+          <option>高级前端工程师</option>
+          <option>前端工程师</option>
+          <option>测试工程师</option>
+          <option>Java 后端工程师</option>
+          <option>UI 设计师</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="statusFilter">处理状态</label>
+        <select id="statusFilter" aria-label="处理状态">
+          <option>全部</option>
+          <option>待处理</option>
+          <option>已邀请面试</option>
+          <option>已标记不合适</option>
+        </select>
+      </div>
+      <button class="btn primary" id="queryBtn" type="button">查询</button>
+      <button class="btn" id="clearBtn" type="button">重置</button>
+    </div>
+
+    <div class="cand-grid" id="candGrid"></div>
+    <div class="empty" id="emptyState" hidden>没有匹配的候选人</div>
+
+    <nav class="pager" aria-label="分页">
+      <button class="btn" id="prevPage" type="button" disabled>上一页</button>
+      <span class="meta" id="pageMeta">第 1 / 2 页 · 共 27 位候选人</span>
+      <button class="btn" id="nextPage" type="button">下一页</button>
+    </nav>
+  </main>
+</div>
+
+<dialog id="resumeDlg" aria-labelledby="resumeTitle">
+  <form method="dialog" style="margin:0">
+    <div class="dlg-head"><span id="resumeTitle">候选人简历</span><button class="btn" type="submit" value="cancel" formnovalidate>关闭</button></div>
+    <div class="dlg-body">
+      <dl>
+        <dt>姓名</dt><dd id="rName"></dd>
+        <dt>投递岗位</dt><dd id="rJob"></dd>
+        <dt>期望薪资</dt><dd id="rPay"></dd>
+        <dt>工作年限</dt><dd id="rYears"></dd>
+        <dt>技能标签</dt><dd id="rSkills"></dd>
+        <dt>最近一份工作</dt><dd id="rLast"></dd>
+      </dl>
+    </div>
+    <div class="dlg-foot">
+      <button class="btn" type="submit" value="cancel" formnovalidate>关闭</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+/* ============ 内置演示：候选人管理（与 presets.js「浏览器·简历筛选」同一批数据、同干扰项） ============
+ * 唯一符合「岗位=高级前端工程师 + 技能含 React 与 TypeScript + 期望薪资 ≤ 35K」的是周一鸣。
+ * 干扰项：两位同名「李强」（一位 38K 超预算、一位岗位/技能不符）；陈默（缺 TypeScript）、
+ * 黄志远（缺 React）；张雨薇/郑飞/徐蕾/马奔腾（技能满足但薪资超 35K）；
+ * 刘畅/王思颖/罗静（投的是「前端工程师」）；吴佳宁/冯超/高翔/宋雨桐（岗位与技能全不对）。
+ */
+'use strict';
+
+const ROWS = [
+  { name: '李强',   job: '高级前端工程师',  skills: ['React', 'TypeScript', 'Webpack', 'Jest'],                 last: '远山电商 高级前端（2019.06 至今）',   pay: 38, years: 7,  date: '09-22', phone: '138****2210' },
+  { name: '李强',   job: '前端工程师',      skills: ['Vue', 'JavaScript', 'Vite', 'ECharts'],                  last: '蓝湾信息 前端（2022.03 至今）',       pay: 28, years: 4,  date: '09-21', phone: '139****7742' },
+  { name: '张雨薇', job: '高级前端工程师',  skills: ['React', 'TypeScript', 'Node.js', '微前端'],              last: '启明星云 高级前端（2018.07 至今）',   pay: 45, years: 8,  date: '09-22', phone: '137****3156' },
+  { name: '刘畅',   job: '前端工程师',      skills: ['React', 'TypeScript', 'React Query'],                    last: '橘子互娱 前端（2023.04 至今）',       pay: 30, years: 3,  date: '09-20', phone: '136****8820' },
+  { name: '陈默',   job: '高级前端工程师',  skills: ['React', 'Redux', 'Webpack', 'Node.js'],                  last: '北岭科技 高级前端（2020.01 至今）',   pay: 33, years: 6,  date: '09-22', phone: '135****4491' },
+  { name: '周一鸣', job: '高级前端工程师',  skills: ['React', 'TypeScript', 'Node.js', 'Vite', 'CI/CD'],       last: '星图数据 高级前端（2020.09 至今）',   pay: 32, years: 6,  date: '09-23', phone: '188****6027' },
+  { name: '吴佳宁', job: '测试工程师',      skills: ['Selenium', 'Postman', 'JMeter', '禅道'],                 last: '白云山健康 测试（2021.05 至今）',     pay: 25, years: 5,  date: '09-19', phone: '186****1358' },
+  { name: '郑飞',   job: '高级前端工程师',  skills: ['React', 'TypeScript', 'qiankun 微前端', '前端监控'],     last: '大河金服 资深前端（2017.03 至今）',   pay: 36, years: 9,  date: '09-21', phone: '159****7734' },
+  { name: '王思颖', job: '前端工程师',      skills: ['React', 'JavaScript', '微信小程序'],                     last: '拾光文创 前端（2024.02 至今）',       pay: 26, years: 2,  date: '09-20', phone: '158****2261' },
+  { name: '冯超',   job: 'Java 后端工程师', skills: ['Java', 'Spring Cloud', 'MySQL', 'Redis'],                last: '万川物流 后端（2019.11 至今）',       pay: 30, years: 6,  date: '09-18', phone: '150****9905' },
+  { name: '徐蕾',   job: '高级前端工程师',  skills: ['React', 'TypeScript', 'AntV 数据可视化'],               last: '晨曦医疗 高级前端（2021.02 至今）',   pay: 36, years: 5,  date: '09-22', phone: '151****4473' },
+  { name: '高翔',   job: '测试开发工程师',  skills: ['Python', 'Pytest', 'Allure', 'Jenkins'],                 last: '远航出行 测试开发（2022.08 至今）',   pay: 28, years: 4,  date: '09-17', phone: '152****6688' },
+  { name: '罗静',   job: '前端工程师',      skills: ['React', 'TypeScript', '微信小程序'],                     last: '竹间教育 前端（2023.06 至今）',       pay: 27, years: 3,  date: '09-19', phone: '153****3102' },
+  { name: '黄志远', job: '高级前端工程师',  skills: ['Vue', 'TypeScript', 'Vite', 'Pinia'],                    last: '南山智驾 高级前端（2019.04 至今）',   pay: 33, years: 6,  date: '09-21', phone: '155****8845' },
+  { name: '宋雨桐', job: 'UI 设计师',       skills: ['Figma', 'Sketch', 'C4D'],                                last: '光合工作室 UI 设计（2023.01 至今）',  pay: 20, years: 3,  date: '09-16', phone: '156****2276' },
+  { name: '马奔腾', job: '高级前端工程师',  skills: ['React', 'TypeScript', 'GraphQL', '性能优化'],            last: '九天智算 资深前端（2016.05 至今）',   pay: 40, years: 10, date: '09-22', phone: '157****9931' }
+];
+
+const STATUS = { PENDING: '待处理', INVITED: '已邀请面试', REJECTED: '已标记不合适' };
+const DEFAULT_JOB = '全部岗位';
+const DEFAULT_STATUS = '全部';
+
+const state = {
+  candidates: [],
+  job: DEFAULT_JOB,
+  status: DEFAULT_STATUS,
+  query: '',
+  invited: []   /* 记录被邀请的是哪一位：{ id, name, job } */
+};
+
+let uid = 0;
+const $ = (id) => document.getElementById(id);
+
+let toastTimer;
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+function reset() {
+  state.candidates = ROWS.map((r) => Object.assign({}, r, { id: ++uid, status: STATUS.PENDING }));
+  state.job = DEFAULT_JOB;
+  state.status = DEFAULT_STATUS;
+  state.query = '';
+  state.invited = [];
+  $('searchBox').value = '';
+  $('jobFilter').value = DEFAULT_JOB;
+  $('statusFilter').value = DEFAULT_STATUS;
+  render();
+}
+
+function visible() {
+  const q = state.query.trim().toLowerCase();
+  return state.candidates.filter((c) => {
+    if (state.job !== DEFAULT_JOB && c.job !== state.job) return false;
+    if (state.status !== DEFAULT_STATUS && c.status !== state.status) return false;
+    if (!q) return true;
+    return (c.name + ' ' + c.phone + ' ' + c.job + ' ' + c.skills.join(' ')).toLowerCase().includes(q);
+  });
+}
+
+function isFiltered() {
+  return state.job !== DEFAULT_JOB || state.status !== DEFAULT_STATUS || state.query.trim() !== '';
+}
+
+/* ---------- 侧栏：状态快捷筛选 + 邀请记录 ---------- */
+function renderSide() {
+  const rows = [
+    { id: DEFAULT_STATUS, name: '全部候选人' },
+    { id: STATUS.PENDING, name: STATUS.PENDING },
+    { id: STATUS.INVITED, name: STATUS.INVITED },
+    { id: STATUS.REJECTED, name: STATUS.REJECTED }
+  ];
+  const ul = $('statusList');
+  ul.innerHTML = '';
+  rows.forEach((r) => {
+    const n = r.id === DEFAULT_STATUS
+      ? state.candidates.length
+      : state.candidates.filter((c) => c.status === r.id).length;
+    const li = document.createElement('li');
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = state.status === r.id ? 'active' : '';
+    const label = r.name + ' (' + n + ')';
+    const name = document.createElement('span');
+    name.textContent = r.name;
+    const count = document.createElement('span');
+    count.className = 'count';
+    count.textContent = '(' + n + ')';
+    b.appendChild(name);
+    b.appendChild(count);
+    b.setAttribute('aria-label', label);
+    b.onclick = () => {
+      state.status = r.id;
+      $('statusFilter').value = r.id;
+      render();
+    };
+    li.appendChild(b);
+    ul.appendChild(li);
+  });
+  $('invitedCount').textContent = String(state.invited.length);
+  $('rejectCount').textContent = String(state.candidates.filter((c) => c.status === STATUS.REJECTED).length);
+  $('invitedNames').textContent = state.invited.length
+    ? '最近邀请：' + state.invited.map((x) => x.name + '（' + x.job + '）').join('、')
+    : '最近邀请：暂无';
+}
+
+/* ---------- 主区：候选人卡片 ---------- */
+function openResume(c) {
+  $('resumeTitle').textContent = c.name + ' · 简历摘要';
+  $('rName').textContent = c.name;
+  $('rJob').textContent = c.job;
+  $('rPay').textContent = '期望 ' + c.pay + 'K';
+  $('rYears').textContent = c.years + ' 年（更新于 2026-' + c.date + '）';
+  $('rSkills').textContent = c.skills.join('、');
+  $('rLast').textContent = c.last;
+  $('resumeDlg').showModal();
+}
+
+function invite(c) {
+  if (c.status === STATUS.INVITED) return;
+  c.status = STATUS.INVITED;
+  state.invited.push({ id: c.id, name: c.name, job: c.job });
+  render();
+  toast('已向「' + c.name + '」（' + c.job + '）发出面试邀请（演示，未真实发送）');
+}
+
+function reject(c) {
+  if (c.status === STATUS.REJECTED) return;
+  c.status = STATUS.REJECTED;
+  state.invited = state.invited.filter((x) => x.id !== c.id);
+  render();
+  toast('已将「' + c.name + '」标记为不合适（演示，未真实提交）');
+}
+
+function card(c) {
+  const el = document.createElement('article');
+  el.className = 'cand' + (c.status === STATUS.INVITED ? ' done' : '') + (c.status === STATUS.REJECTED ? ' rejected' : '');
+  el.setAttribute('aria-label', '候选人 ' + c.name + '（' + c.job + '）');
+
+  const head = document.createElement('div');
+  head.className = 'cand-head';
+
+  const name = document.createElement('button');
+  name.type = 'button';
+  name.className = 'name';
+  name.textContent = c.name;
+  name.setAttribute('aria-label', c.name);
+  name.title = '查看简历摘要';
+  name.onclick = () => openResume(c);
+  head.appendChild(name);
+
+  const pill = document.createElement('span');
+  pill.className = 'pill';
+  pill.textContent = c.job;
+  head.appendChild(pill);
+
+  const st = document.createElement('span');
+  st.className = 'status';
+  st.textContent = c.status;
+  head.appendChild(st);
+  el.appendChild(head);
+
+  const facts = document.createElement('p');
+  facts.className = 'facts';
+  [['期望 ' + c.pay + 'K', 'pay'], ['工作年限 ' + c.years + ' 年', ''], ['更新于 2026-' + c.date, '']].forEach((pair) => {
+    if (facts.childNodes.length) {
+      const sep = document.createElement('span');
+      sep.className = 'sep';
+      sep.textContent = '·';
+      facts.appendChild(sep);
+    }
+    const s = document.createElement('span');
+    if (pair[1]) s.className = pair[1];
+    s.textContent = pair[0];
+    facts.appendChild(s);
+  });
+  el.appendChild(facts);
+
+  const tags = document.createElement('div');
+  tags.className = 'tags';
+  c.skills.forEach((s) => {
+    const t = document.createElement('span');
+    t.className = 'tag';
+    t.textContent = s;
+    tags.appendChild(t);
+  });
+  el.appendChild(tags);
+
+  const exp = document.createElement('p');
+  exp.className = 'exp';
+  exp.textContent = '最近一份工作：' + c.last;
+  el.appendChild(exp);
+
+  const phone = document.createElement('p');
+  phone.className = 'phone';
+  phone.textContent = c.phone;
+  el.appendChild(phone);
+
+  const ops = document.createElement('div');
+  ops.className = 'ops';
+  const mk = (label, cls, fn) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn ' + cls;
+    b.textContent = label;
+    b.setAttribute('aria-label', label);
+    b.onclick = fn;
+    return b;
+  };
+  ops.appendChild(mk('查看简历', '', () => openResume(c)));
+  const inviteBtn = mk('邀请面试', 'primary', () => invite(c));
+  inviteBtn.disabled = c.status === STATUS.INVITED;
+  ops.appendChild(inviteBtn);
+  const rejectBtn = mk('标记不合适', 'danger', () => reject(c));
+  rejectBtn.disabled = c.status === STATUS.REJECTED;
+  ops.appendChild(rejectBtn);
+  el.appendChild(ops);
+
+  return el;
+}
+
+function render() {
+  renderSide();
+
+  const list = visible();
+  const grid = $('candGrid');
+  grid.innerHTML = '';
+  $('emptyState').hidden = list.length > 0;
+  if (!list.length) {
+    $('emptyState').textContent = isFiltered() ? '没有符合当前筛选条件的候选人' : '暂无候选人';
+  }
+  list.forEach((c) => grid.appendChild(card(c)));
+
+  $('listMeta').textContent =
+    '共 ' + list.length + ' 位 · 待处理 ' + state.candidates.filter((c) => c.status === STATUS.PENDING).length +
+    ' 位 · 已邀请 ' + state.invited.length + ' 位';
+
+  $('pageMeta').textContent = isFiltered()
+    ? '第 1 / 1 页 · 共 ' + list.length + ' 位（已筛选）'
+    : '第 1 / 2 页 · 共 27 位候选人';
+}
+
+/* ---------- 顶栏与筛选交互 ---------- */
+$('searchBox').addEventListener('input', (e) => {
+  state.query = e.target.value;
+  render();
+});
+$('jobFilter').addEventListener('change', (e) => { state.job = e.target.value; render(); });
+$('statusFilter').addEventListener('change', (e) => { state.status = e.target.value; render(); });
+
+$('queryBtn').onclick = () => {
+  state.job = $('jobFilter').value;
+  state.status = $('statusFilter').value;
+  state.query = $('searchBox').value;
+  render();
+  toast('已按条件查询：岗位 ' + state.job + ' · 状态 ' + state.status + '（' + visible().length + ' 位）');
+};
+$('clearBtn').onclick = () => {
+  state.job = DEFAULT_JOB;
+  state.status = DEFAULT_STATUS;
+  state.query = '';
+  $('searchBox').value = '';
+  $('jobFilter').value = DEFAULT_JOB;
+  $('statusFilter').value = DEFAULT_STATUS;
+  render();
+  toast('筛选条件已重置为「全部」');
+};
+$('resetBtn').onclick = () => {
+  reset();
+  toast('演示已重置为初始 16 位候选人');
+};
+$('nextPage').onclick = () => { toast('演示：第 2 页数据未内置（共 27 位候选人）'); };
+
+reset();
+</script>
+</body>
+</html>

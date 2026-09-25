@@ -1,4 +1,4 @@
-/* ===================== Auto 浏览器模式 · 前端循环 =====================
+/* ===================== playwright-jev-agent · 前端循环 =====================
  * 设计文档 §2/§9/§10：循环在本页面 JS 中运行；server 只 spawn playwright-cli
  * 和纯透传代理。前端是 state/问题的唯一构造者 —— 步骤卡展示的请求体与真实
  * 发出的 payload 是同一个对象（可见性硬原则）。
@@ -19,7 +19,7 @@ const Auto = (() => {
     installHint: document.getElementById('autoInstallHint'),
     goal: document.getElementById('autoGoal'),
     url: document.getElementById('autoUrl'),
-    demoPage: document.getElementById('autoDemoPage'),
+    scenarios: document.getElementById('autoScenarios'),
     vars: document.getElementById('autoVars'),
     addVar: document.getElementById('autoAddVar'),
     browser: document.getElementById('autoBrowser'),
@@ -30,7 +30,6 @@ const Auto = (() => {
     stop: document.getElementById('autoStop'),
     start: document.getElementById('autoStart'),
     flow: document.getElementById('autoFlow'),
-    summary: document.getElementById('autoSummary'),
     exportBtn: document.getElementById('autoExport'),
     statusBar: document.getElementById('autoStatus'),
     runPill: document.getElementById('autoRunPill'),
@@ -41,6 +40,13 @@ const Auto = (() => {
     mainGrid: document.getElementById('mainGrid'),
     apiSpec: document.getElementById('apiSpec'),
     modeSeg: document.getElementById('modeSeg'),
+    editTask: document.getElementById('autoEditTask'),
+    summaryBody: document.getElementById('taskSummaryBody'),
+    taskModal: document.getElementById('taskModal'),
+    taskModalClose: document.getElementById('taskModalClose'),
+    taskCancel: document.getElementById('taskCancel'),
+    taskSave: document.getElementById('taskSave'),
+    taskError: document.getElementById('taskError'),
   };
 
   /* ---------- 状态 ---------- */
@@ -51,9 +57,15 @@ const Auto = (() => {
   let consecutiveFails = 0;
   let unfinishedHistory = [];
   let runCfg = null;
+  /* 本页内执行失败过的 ref：ref 跨快照稳定（实测同页前后两次快照 74 个同名元素全部不变），
+   * 记下来给下一轮的候选排序降权，避免反复点同一个点不动的元素。
+   * 放在模块级是因为补问逻辑（resolveMoreBatches）也要读它。 */
+  let failedRefs = Object.create(null);
+  let refPageUrl = '';
   let startTs = 0;
   let timerId = null;
   let finished = false;
+  let endText = '';          // 结束结论（导出记录用；展示只走状态条）
 
   /* 轮播状态 */
   const view = { idx: 0, follow: true };
@@ -76,6 +88,7 @@ const Auto = (() => {
   function shortUrl(u) { return String(u || '').replace(/^https?:\/\//, '').slice(0, 40); }
 
   /* ---------- 环境探测（设计 §4） ---------- */
+  /* 状态用顶栏胶囊的圆点表达（颜色跟着 .ok / .error 走），文案里不再带 ✅⚠ */
   async function probeEngine() {
     els.pill.textContent = '引擎检测中…';
     els.pill.className = 'status-pill';
@@ -84,18 +97,18 @@ const Auto = (() => {
       const h = await res.json();
       const d = h.browserDetail || {};
       if (d.available) {
-        els.pill.textContent = '✅ 引擎就绪 ' + (d.version || '');
+        els.pill.textContent = '引擎就绪 ' + (d.version || '');
         els.pill.className = 'status-pill ok';
         els.installHint.hidden = true;
         return true;
       }
-      const msg = d.reason === 'not-installed' ? '⚠ 引擎未安装' : '⚠ 引擎不可用';
+      const msg = d.reason === 'not-installed' ? '引擎未安装' : '引擎不可用';
       els.pill.textContent = msg;
       els.pill.className = 'status-pill error';
       els.installHint.hidden = false;
       return false;
     } catch (_) {
-      els.pill.textContent = '⚠ 无后端服务';
+      els.pill.textContent = '无后端服务';
       els.pill.className = 'status-pill error';
       els.installHint.hidden = true;   /* 后端问题由顶部 warnbar 负责，不重复 */
       return false;
@@ -122,16 +135,226 @@ const Auto = (() => {
     if (!els.vars.children.length) addVarRow('', '');
   }
 
-  /* ---------- 浏览器 / 窗口尺寸选项 ---------- */
+  /* ---------- 内置演示场景 ----------
+   * 每个场景 = 一个可离线跑通的内置页面 + 配套的任务目标与变量，与 Demo 模式的
+   * 浏览器类预设同一批设定（同干扰项）。在外层选中即写进表单并刷新摘要，不必开弹窗。 */
+  const SCENARIOS = [
+    {
+      id: 'mailbox', icon: '📦', name: '邮箱收件箱', path: '/demo/mailbox.html',
+      goal: '在收件箱里找到「招商银行信用卡中心」发来的最新一期（9 月）电子对账单邮件，点击该行的「归档」按钮把它移出收件箱',
+      vars: [{ name: '关键词', value: '招商银行' }],
+    },
+    {
+      id: 'resume', icon: '📄', name: '简历筛选', path: '/demo/resume.html',
+      goal: '在候选人列表中找出投递「高级前端工程师」岗位、技能同时包含 React 和 TypeScript、且期望薪资不超过 35K 的唯一候选人，点击其卡片上的「邀请面试」按钮',
+      vars: [{ name: '岗位', value: '高级前端工程师' }],
+    },
+    {
+      id: 'orders', icon: '🧾', name: '订单后台', path: '/demo/orders.html',
+      goal: '在订单列表中找到商品为 AirPods Pro（苹果降噪耳机）且状态是「已付款待发货」的那一笔订单，点击该行的「发货」按钮，把它标记为发货',
+      vars: [{ name: '商品', value: 'AirPods Pro' }],
+    },
+  ];
+
+  /* 选中态直接由「当前 URL 是否落在某个场景页」推出，不另存状态 ——
+   * 用户手改了 URL 就自然取消高亮，不会出现选择器与表单说的不是一回事 */
+  function activeScenarioId() {
+    const u = els.url.value.trim();
+    const hit = SCENARIOS.find((s) => u.endsWith(s.path));
+    return hit ? hit.id : '';
+  }
+
+  function renderScenarios() {
+    const active = activeScenarioId();
+    els.scenarios.innerHTML = '';
+    SCENARIOS.forEach((s) => {
+      const b = el('button', 'chip' + (s.id === active ? ' active' : ''), s.icon + ' ' + s.name);
+      b.type = 'button';
+      b.title = s.goal;
+      b.onclick = () => applyScenario(s.id);
+      els.scenarios.appendChild(b);
+    });
+  }
+
+  function applyScenario(id, quiet) {
+    const s = SCENARIOS.find((x) => x.id === id);
+    if (!s) return;
+    els.url.value = location.origin + s.path;
+    els.goal.value = s.goal;
+    els.vars.innerHTML = '';   /* 顺带清掉遗留的空变量行 */
+    (s.vars.length ? s.vars : [{ name: '', value: '' }]).forEach((v) => addVarRow(v.name, v.value));
+    renderSummary();
+    if (!quiet) toast('已填入「' + s.name + '」场景（离线可完整演示）');
+  }
+
+  /* ---------- 任务配置：只读摘要 + 编辑弹窗 ----------
+   * 唯一数据源始终是弹窗里的那些输入框（id 没动，auto.js 其余部分照旧读 .value），
+   * 摘要只是它的投影。取消/✕/Esc/切模式一律用快照回滚，避免「摘要与实际值不一致」。 */
+  let formSnapshot = null;
+
+  function readForm() {
+    return {
+      goal: els.goal.value,
+      url: els.url.value,
+      vars: collectVars(),
+      maxSteps: els.maxSteps.value,
+      cadence: cadence(),
+      browser: els.browser.value,
+      screen: els.screen.value,
+      screenshot: els.screenshot.checked,
+    };
+  }
+  function writeForm(c) {
+    if (!c) return;
+    els.goal.value = c.goal;
+    els.url.value = c.url;
+    els.vars.innerHTML = '';
+    (c.vars.length ? c.vars : [{ name: '', value: '' }]).forEach((v) => addVarRow(v.name, v.value));
+    els.maxSteps.value = c.maxSteps;
+    const radio = document.querySelector('input[name="autoCadence"][value="' + c.cadence + '"]');
+    if (radio) radio.checked = true;
+    els.browser.value = c.browser;
+    els.screen.value = c.screen;
+    els.screenshot.checked = c.screenshot;
+  }
+
+  /* 窗口尺寸取选项当前文案 —— primeScreenOptions() 开机时会把它改成本机真实分辨率，
+   * 硬编码映射会立刻过期。去掉尾部括号说明后作为摘要值。 */
+  function screenLabel() {
+    const o = els.screen.options[els.screen.selectedIndex];
+    const t = (o ? o.textContent : '').replace(/（[^）]*）/g, '').trim();
+    return t || els.screen.value;
+  }
+
+  function tsRow(label, cls, content) {
+    const r = el('div', 'ts-row');
+    r.appendChild(el('div', 'ts-label', label));
+    const v = el('div', 'ts-value' + (cls ? ' ' + cls : ''));
+    if (typeof content === 'string') v.textContent = content; else v.appendChild(content);
+    r.appendChild(v);
+    els.summaryBody.appendChild(r);
+    return v;
+  }
+
+  function renderSummary() {
+    const f = readForm();
+    els.summaryBody.innerHTML = '';
+    renderScenarios();   /* 场景高亮跟着 URL 走，和摘要同源同刷 */
+
+    if (!f.goal.trim() && !f.url.trim()) {
+      const p = el('div', 'ts-empty');
+      p.innerHTML = '尚未配置任务 —— 点右上「✎ 编辑配置」填写<b>任务目标</b>与<b>起始 URL</b>。';
+      els.summaryBody.appendChild(p);
+      return;
+    }
+
+    const goal = tsRow('任务目标', 'clamp2', f.goal.trim() || '（未填写）');
+    if (f.goal.trim()) goal.title = f.goal.trim();
+
+    const url = tsRow('起始 URL', 'mono', f.url.trim() ? shortUrl(f.url.trim()) : '（未填写）');
+    if (f.url.trim()) url.title = f.url.trim();
+
+    const varsWrap = el('span');
+    if (f.vars.length) {
+      f.vars.forEach((v) => varsWrap.appendChild(el('span', 'ts-var', v.name + '=' + v.value)));
+    } else {
+      varsWrap.textContent = '（无）';
+    }
+    tsRow('输入变量', '', varsWrap);
+
+    tsRow('运行参数', '', [
+      f.maxSteps + ' 步',
+      f.cadence === 'single' ? '单步确认' : '连续自动',
+      f.browser === 'msedge' ? 'Edge' : 'Chrome',
+      screenLabel(),
+      f.screenshot ? '每步截图' : '不截图',
+    ].join(' · '));
+  }
+
+  /* 与 start() 共用同一份规则，避免两处漂移 */
+  function validateForm() {
+    const f = readForm();
+    if (!f.goal.trim()) return '请先填写任务目标';
+    if (!/^https?:\/\//i.test(f.url.trim())) return '起始 URL 必须以 http:// 或 https:// 开头';
+    return '';
+  }
+
+  let lastFocus = null;   /* 关闭后把焦点还给「✎ 编辑配置」 */
+
+  function openTaskModal() {
+    formSnapshot = readForm();
+    lastFocus = document.activeElement;
+    els.taskError.hidden = true;
+    els.taskError.textContent = '';
+    els.taskModal.hidden = false;
+    setTimeout(() => els.goal.focus(), 50);
+  }
+  function closeTaskModal() {
+    els.taskModal.hidden = true;
+    formSnapshot = null;
+    if (lastFocus && lastFocus.focus) lastFocus.focus();
+    lastFocus = null;
+  }
+  function cancelTaskModal() {
+    writeForm(formSnapshot);   /* 必须回滚后再置空快照 */
+    closeTaskModal();
+  }
+  function saveTaskModal() {
+    const invalid = validateForm();
+    if (invalid) {
+      els.taskError.textContent = invalid;
+      els.taskError.hidden = false;
+      els.taskError.focus();
+      return;
+    }
+    renderSummary();
+    closeTaskModal();
+    toast('任务配置已更新');
+  }
+
+  /* ---------- 浏览器 / 窗口尺寸选项 ----------
+   * max  → 最大化：窗口铺满屏幕（保留浏览器工具栏、任务栏照常）★默认
+   * full → 真全屏：CDP fullscreen，盖住任务栏、无工具栏
+   * size → 指定页面视口尺寸（resize 模拟，不改窗口）
+   * native=true 时追加 --force-device-scale-factor=1 按物理像素渲染：
+   * 1920×1080 屏 + 系统 125% 缩放，默认视口只有 1536×864（CSS 像素 =
+   * 物理 ÷ 1.25），强制 100% 后就是 1920 宽的那套原生数值。
+   * width/height 一并上报，服务端既用于 size 档 resize，也用于开窗后校验。 */
   function windowPlan() {
     const v = els.screen.value;
-    if (v === 'full') {
-      /* 全屏 = Chrome 原生 --start-maximized；avail 尺寸一并带给 server，
-       * 用于 open 后校验最大化是否生效（未生效则 resize 兜底）。 */
-      return { maximize: true, width: window.screen.availWidth, height: window.screen.availHeight };
+    const dpr = window.devicePixelRatio || 1;
+    const native = v !== 'maxScaled' && v !== 'fullScaled';
+    if (v === 'max' || v === 'maxScaled') {
+      /* 校验参考：原生按物理像素的工作区（整屏减任务栏），跟随缩放则按 CSS 工作区 */
+      return {
+        windowMode: 'max', native,
+        width: Math.round(window.screen.availWidth * (native ? dpr : 1)),
+        height: Math.round(window.screen.availHeight * (native ? dpr : 1)),
+      };
+    }
+    if (v === 'full' || v === 'fullScaled') {
+      return {
+        windowMode: 'full', native,
+        width: Math.round(window.screen.width * (native ? dpr : 1)),
+        height: Math.round(window.screen.height * (native ? dpr : 1)),
+      };
     }
     const m = v.split('x');
-    return { width: Number(m[0]), height: Number(m[1]) };
+    return { windowMode: 'size', width: Number(m[0]), height: Number(m[1]) };
+  }
+
+  /* 选项文案写成这台机器的真实数值（用户最认 1920×1080 这种数字） */
+  function primeScreenOptions() {
+    const dpr = window.devicePixelRatio || 1;
+    const pw = Math.round(window.screen.width * dpr);
+    const ph = Math.round(window.screen.height * dpr);
+    const set = (val, text) => {
+      const o = els.screen.querySelector('option[value="' + val + '"]');
+      if (o) o.textContent = text;
+    };
+    set('max', '占满屏幕 · 原生 ' + pw + ' × ' + ph + '（忽略系统缩放）');
+    set('maxScaled', '占满屏幕 · 跟随系统缩放（' + window.screen.availWidth + ' × ' + window.screen.availHeight + '）');
+    if (dpr !== 1) set('full', '全屏 · 无边框，盖住任务栏');
   }
 
   /* ---------- API 封装（本模式只服务同源后端） ---------- */
@@ -237,10 +460,8 @@ const Auto = (() => {
     stage.prev.disabled = view.idx <= 0;
     stage.next.disabled = n === 0 || view.idx >= n - 1;
     stage.follow.classList.toggle('show', n > 0 && view.idx < n - 1);
-    const s = steps[view.idx];
-    stage.counter.textContent = n
-      ? '步骤 ' + (view.idx + 1) + ' / ' + n + (s && s.label ? ' · ' + s.label : '')
-      : '暂无步骤';
+    /* 只报位置；步骤名由卡片头承担，避免同一句话在导航行与卡片头各说一遍 */
+    stage.counter.textContent = n ? '步骤 ' + (view.idx + 1) + ' / ' + n : '暂无步骤';
     stage.counter.title = stage.counter.textContent;
   }
 
@@ -277,7 +498,7 @@ const Auto = (() => {
     stage.track.appendChild(card);
     if (view.follow) gotoStep(steps.length - 1, false);
     else updateNav();
-    return { card, head, title, state, body, shotSlot, decision, execZone };
+    return { card, head, title, state, body, shotSlot, decision, execZone, ctx, ctxRev: ctxRevision(step) };
   }
 
   /* ============ 决策区：摘要常显 + 明细折叠 ============ */
@@ -332,6 +553,9 @@ const Auto = (() => {
     };
     const color = { 动作: 'var(--violet)', 参数: '#7c3aed', 文本: '#0d9268' };
     const hit = { 动作: d.action, 参数: d.param, 文本: d.text };
+    /* 参数若是补问回合定下来的，本轮的「参数」概率分布里没有它 —— 不能拿第一批的
+     * 概率条去解释第二批复问的答案，改成指向下方的补问记录 */
+    const followUpRec = (step.followUps || []).find((r) => r.param && r.param === d.param);
     const shortRef = (key) => {
       if (key === '无需元素' || !refLabels[key]) return key;
       const clean = refLabels[key].replace(/^【[^】]*】\s*/, '');
@@ -339,7 +563,7 @@ const Auto = (() => {
     };
     const chosenLabel = {
       动作: d.action || '—',
-      参数: d.param ? shortRef(d.param) : '—',
+      参数: d.param ? shortRef(d.param) + (followUpRec ? '（第 ' + followUpRec.batch + ' 批补问）' : '') : '—',
       文本: d.text === '无' ? '无' : (d.text ? varOf(d.text) : '—'),
     };
     const confBadge = (ans) => {
@@ -349,10 +573,14 @@ const Auto = (() => {
     let html = '<div class="qgrid">';
     ['动作', '参数', '文本'].forEach((name) => {
       const ans = a[name] || {};
+      const fromFollowUp = (name === '参数' && followUpRec);
+      /* 补问回合定下的 ref 不在本轮概率分布里，别错误高亮别项 */
+      const mark = (hit[name] != null && ans.probabilities && ans.probabilities[hit[name]] != null) ? hit[name] : null;
       html += '<div class="qcard">' +
         '<div class="qcard-head"><span class="qcard-name">' + name + '</span>' +
         '<span class="qcard-chosen">' + escapeHtml(chosenLabel[name]) + '</span>' + confBadge(ans) + '</div>' +
-        (ans.probabilities ? barsHtml(ans.probabilities, hit[name] != null ? hit[name] : null, color[name]) : '<div class="muted" style="font-size:12px">无概率数据</div>') +
+        (ans.probabilities ? barsHtml(ans.probabilities, mark, color[name]) : '<div class="muted" style="font-size:12px">无概率数据</div>') +
+        (fromFollowUp ? '<div class="muted" style="font-size:12px">本行选项由第 ' + fromFollowUp.batch + ' 批补问确定，该题概率见下方「参数补问」记录</div>' : '') +
         '</div>';
     });
     const u = a['未完成'] || {};
@@ -390,6 +618,10 @@ const Auto = (() => {
       html += '<div class="exec-line">' + (e.ok ? '✓ 成功' : '✗ 失败') + '</div>';
     }
     if (e.error) html += '<div class="step-err">' + escapeHtml(e.error) + '</div>';
+    /* 标注失败不推翻这一步，只挂一句说明（图退回未标注的原图） */
+    if (step.annoError) {
+      html += '<div class="exec-line"><span class="exec-url">未标注：' + escapeHtml(step.annoError) + '</span></div>';
+    }
     return html;
   }
 
@@ -505,18 +737,108 @@ const Auto = (() => {
   }
 
   /* ③ 请求信息：外层统一折叠（输入 state + 4 道问题 + 原始报文） */
+  /* 参数题候选裁剪的摘要：让人一眼看出「本来多少个、给了 Jev 多少个、为什么」 */
+  function trimSummary(step) {
+    const m = step.trim;
+    if (!m || !m.trimmed) return '';
+    const head = '本批 ' + m.top.length + ' 个 / 全页 ' + m.totalRefs + ' 个';
+    const why = [];
+    why.push('关键词命中');
+    why.push('可点击优先');
+    why.push('已失败降权');
+    let s = '候选已折叠：' + head + '（' + why.join(' · ') + '）';
+    if (m.folded) s += '，已折叠 ' + (m.folded) + ' 个';
+    if (step.payload && step.payload.questions && step.payload.questions['参数']
+      && step.payload.questions['参数'].criteria['其他']) s += ' + 「其他」兜底';
+    if (m.hiddenMore) s += '（已到最后一批）';
+    return s;
+  }
+
+  function trimDetailHtml(step) {
+    const m = step.trim;
+    if (!m || !m.trimmed) return '';
+    const rows = (m.top || []).map((x) =>
+      '<div class="ref-row scored"><span class="ref-id">' + escapeHtml(x.ref) + '</span>' +
+      '<span class="ref-score">' + escapeHtml(String(x.score)) + '</span>' +
+      '<span class="ref-label" title="' + escapeHtml(x.reasons.join(' · ')) + '">' +
+      escapeHtml(x.label) + (x.ancestor ? '（' + escapeHtml(x.ancestor) + '）' : '') + '</span></div>').join('');
+    return '<div class="sec"><div class="sec-head">候选裁剪明细（分数 = 关键词稀有度 + 可点击 + 已失败）</div>' +
+      '<div class="ref-scroll">' + rows + '</div></div>';
+  }
+
+  /* 补问记录：两类共用同一张卡 ——
+   *   kind='param'  候选裁剪展开下一批（「其他」）
+   *   kind='action' 动作与元素角色不兼容，重新问「动作」
+   * 结果落定前默认展开（用户能看见"正在补问"），落定后收起。 */
+  function followUpDetails(title, requestLabel, rec, hit, settled) {
+    return '<details class="req-details"' + (settled ? '' : ' open') + '>' +
+      '<summary>' + title + '（' + escapeHtml(hit) + '）</summary>' +
+      '<div class="req-inner">' +
+      '<div class="raw-label">① 发送的请求体（仅「' + requestLabel + '」一题）</div>' +
+      '<pre class="step-pre tall">' + escapeHtml(relaxedStringify(rec.payload)) + '</pre>' +
+      (rec.response ? '<div class="raw-label">② Jev 响应</div>' +
+        '<pre class="step-pre tall">' + escapeHtml(JSON.stringify(rec.response, null, 2)) + '</pre>' : '') +
+      '</div></details>';
+  }
+
+  /* 「其他」展开的补问记录：每批的请求体、响应、命中元素 */
+  function followUpsHtml(step) {
+    const list = step.followUps || [];
+    if (!list.length && !step.trimNote) return '';
+    let html = '';
+    if (step.trimNote) {
+      html += '<div class="sec"><div class="sec-head">候选兜底项</div><div class="qblock-inst">' +
+        escapeHtml(step.trimNote) + '</div></div>';
+    }
+    list.forEach((r) => {
+      if (r.kind === 'action') {
+        const hit = r.action ? ('已改为 ' + r.action) : (r.error ? '失败：' + r.error : '未返回');
+        html += followUpDetails(
+          '动作补问 · 「' + escapeHtml(String(r.from || '')) + '」与元素角色 '
+            + escapeHtml(String(r.role || '')) + ' 不兼容',
+          '动作', r, hit, Boolean(r.action || r.error));
+        return;
+      }
+      const hit = r.param ? ('命中 ' + r.param) : (r.error ? '失败：' + r.error : '未命中');
+      html += followUpDetails('参数补问 · 第 ' + r.batch + ' 批', '参数', r, hit, Boolean(r.param || r.error));
+    });
+    return html;
+  }
+
   function contextHtml(step) {
     if (!step.payload) return '';
     return '<details class="req-details"><summary>Jev 请求信息（输入 state · 4 道问题 · 输出答案）</summary>' +
       '<div class="req-inner">' +
+      (trimSummary(step) ? '<div class="trim-note">' + escapeHtml(trimSummary(step)) + '</div>' : '') +
       stateSectionHtml(step.payload.state) +
       questionsSectionHtml(step) +
+      trimDetailHtml(step) +
+      followUpsHtml(step) +
       rawDetailsHtml(step) +
       '</div></details>';
   }
 
+  /* 请求信息区的「版本号」：补问/兜底说明是建卡之后才产生的，
+   * 靠它决定要不要重渲染（否则步骤卡里承诺的补问记录永远不显示）。
+   * 必须把「已落定的记录数」也算进来：补问记录在发请求前就 push 了，
+   * 只看 length 的话，拿到响应后不会重渲染，屏幕上永远停在「未命中、无响应」。 */
+  function ctxRevision(step) {
+    const list = step.followUps || [];
+    const settled = list.filter((r) => r.param || r.action || r.error).length;
+    return list.length + '.' + settled + '|' + (step.trimNote ? '1' : '0') + '|' + (step.exhausted ? '1' : '0');
+  }
+
   function updateStepCard(step, nodes) {
     nodes.title.textContent = step.label || '第 ' + step.n + ' 步';
+    const rev = ctxRevision(step);
+    if (nodes.ctx && nodes.ctxRev !== rev) {
+      const prev = nodes.ctx.querySelector('details.req-details');
+      const wasOpen = prev ? prev.open : false;
+      nodes.ctx.innerHTML = contextHtml(step);
+      nodes.ctxRev = rev;
+      const now = nodes.ctx.querySelector('details.req-details');
+      if (now) now.open = wasOpen;      // 重渲染不打断用户已展开的阅读状态
+    }
     const e = step.exec;
     if (step.jevError) {
       nodes.state.textContent = 'Jev 调用失败';
@@ -532,7 +854,12 @@ const Auto = (() => {
       const img = document.createElement('img');
       img.src = step.screenshot;
       img.className = 'step-shot';
-      img.alt = '第 ' + step.n + ' 步执行后截图';
+      img.alt = '第 ' + step.n + ' 步操作前的页面' + (step.anno && step.anno.box ? '（已标注被操作元素）' : '');
+      /* 标注几何落在 data-* 上：E2E 直接采这些坐标的像素，证明「标注真的在人看到的那张图上」 */
+      if (step.anno && step.anno.box) {
+        img.dataset.anno = [step.anno.box.x, step.anno.box.y, step.anno.box.w, step.anno.box.h,
+          step.anno.badge.x, step.anno.badge.y].join(',');
+      }
       img.onclick = () => openLightbox(step.screenshot, img.alt);
       nodes.shotSlot.appendChild(img);
     }
@@ -540,7 +867,8 @@ const Auto = (() => {
       nodes.state.textContent = e.skipped ? '已跳过' : (e.ok ? '成功' + (e.elapsedMs != null ? ' · ' + e.elapsedMs + 'ms' : '') : '失败');
       nodes.state.className = 'step-state ' + (e.skipped ? 'warn' : e.ok ? 'ok' : 'error');
     } else if (step.terminal) {
-      nodes.state.textContent = '终止 · ' + step.terminal;
+      /* 标题已写明 Jev 判定的动作（如「任务已完成」），状态位只需说明「这是终止帧」 */
+      nodes.state.textContent = '终止';
       nodes.state.className = 'step-state ' + (step.terminal === '任务已完成' ? 'ok' : 'warn');
     }
     updateNav();
@@ -629,14 +957,120 @@ const Auto = (() => {
     }
   }
 
-  /* ---------- 截图 ---------- */
-  async function takeShot(step, name) {
-    const r = await apiJson('/api/browser/screenshot', { name });
-    if (r.ok && r.dataUrl) {
-      step.screenshot = r.dataUrl;
-      return true;
+  /* ---------- 候选裁剪：Jev 选了「其他」时补问下一批 ----------
+   * 只补问「参数」一题（动作已定，不重发 4 题以免连带动摇动作决策），
+   * 每一步最多展开 maxTranches 批；每批的请求/响应都留在步骤卡里。 */
+  async function resolveMoreBatches(step, nodes, chip) {
+    const trim = AutoCore.normalizeTrim(runCfg.paramTrim);
+    for (let batch = 2; batch <= trim.maxTranches; batch++) {
+      const pc = AutoCore.paramCriteria({
+        snapshot: step.snapshot, goal: runCfg.goal,
+        avoidRefs: Object.keys(failedRefs), paramTrim: runCfg.paramTrim, batch,
+      });
+      const questions = AutoCore.buildParamFollowUp({
+        paramCriteria: pc, action: step.decision.action, batch,
+        totalRefs: pc.meta.totalRefs, limit: pc.meta.limit,
+      });
+      const payload = { state: step.payload.state, model: Config.current.model, questions };
+      const rec = { kind: 'param', batch, payload, response: null, error: null, param: null };
+      step.followUps.push(rec);
+      chip.textContent = step.n + ' · 展开第 ' + batch + ' 批候选';
+      updateStepCard(step, nodes);
+
+      const jev = await callJev(payload);
+      if (!jev.ok) { rec.error = jev.error; return false; }
+      rec.response = jev.data;
+
+      let param;
+      try { param = AutoCore.parseParamAnswer(jev.data.answers || {}); }
+      catch (e) { rec.error = '决策解析失败：' + ((e && e.message) || String(e)); return false; }
+      if (!pc.criteria[param]) { rec.error = 'Jev 返回了不在候选里的元素：' + param; return false; }
+      rec.param = param;
+
+      if (!AutoCore.isRefMore(param)) {
+        step.decision = Object.assign({}, step.decision, { param: param });
+        return true;
+      }
+      if (batch === trim.maxTranches) { rec.error = '本批仍选了「其他」，但已是最后一批'; }
     }
     return false;
+  }
+
+  /* ---------- 动作 × 元素角色不兼容：同一步内补问「动作」 ----------
+   * 实测事故：模型对 button "发货" 选了 select，命令打到 playwright 才被
+   * "Element is not a <select> element" 拦下，白烧一步。现在这一类"物理上不可能"的组合
+   * 在发命令前就被拦下，只补问「动作」一题（候选已去掉该元素上不可能的动作，且不带终止态 ——
+   * 终止只能走主循环那条通道）。补问的请求/响应同样留在步骤卡里。
+   * 与 resolveMoreBatches 的分工：那个改「参数」，这个改「动作」。 */
+  async function resolveActionConflict(step, nodes, chip, conflict, refRoles) {
+    const questions = AutoCore.buildActionFollowUp(conflict);
+    const payload = { state: step.payload.state, model: Config.current.model, questions };
+    const rec = {
+      kind: 'action', payload, response: null, error: null, action: null,
+      from: conflict.action, role: conflict.role, ref: conflict.ref, why: conflict.why,
+    };
+    step.followUps.push(rec);
+    chip.textContent = step.n + ' · 动作与元素（' + conflict.role + '）不兼容，补问动作';
+    updateStepCard(step, nodes);
+
+    const jev = await callJev(payload);
+    if (!jev.ok) { rec.error = jev.error; return false; }
+    rec.response = jev.data;
+
+    let action;
+    try { action = AutoCore.parseActionAnswer(jev.data.answers || {}); }
+    catch (e) { rec.error = '决策解析失败：' + ((e && e.message) || String(e)); return false; }
+    if (!questions['动作'].criteria[action]) { rec.error = 'Jev 返回了不在候选里的动作：' + action; return false; }
+    rec.action = action;
+
+    /* 补问后仍不兼容（例如又选了另一个该元素上不可能的动作）：不发命令，记失败步 */
+    const next = Object.assign({}, step.decision, { action });
+    const again = AutoCore.checkActionRole(next, refRoles);
+    if (again.conflict) { rec.error = '补问后仍选了不兼容的动作：' + action; return false; }
+    step.decision = next;
+    return true;
+  }
+
+  /* ---------- 截图（操作前，带元素标注） ----------
+   * 图来自 server 的 screenshot（动作前拍），标注在这里用 canvas 画到图上 ——
+   * 被驱动的浏览器窗口里不留任何痕迹，标注只存在于可视化页面展示的这张图里。
+   * 几何换算（CSS 像素 → 图像像素）由 anno.js 负责：截图是设备像素、元素矩形是 CSS
+   * 像素，差一个 deviceScaleFactor，而那由窗口方案决定、不能假设 1:1。 */
+  async function takeShot(step, name, ref) {
+    const r = await apiJson('/api/browser/screenshot', { name, ref: ref || null });
+    if (!r.ok || !r.dataUrl) return false;
+    if (!r.rect || !r.viewport || !window.Anno) {
+      step.screenshot = r.dataUrl;              /* 无元素可标（goto / press / 终止帧）就显示原图 */
+      step.anno = null;
+      return true;
+    }
+    const composed = await Anno.compose(r.dataUrl, r.rect, r.viewport, step.n);
+    step.screenshot = composed.dataUrl;
+    if (composed.box) {
+      const b = composed.box;
+      /* 几何落进 step.anno 与 img 的 data-*：导出记录里有据可查，E2E 也据此在
+       * 「人看到的那张图」上取样，证明标注真的画进去了（页面里没有任何痕迹） */
+      step.anno = {
+        ref: ref,
+        rect: r.rect,
+        viewport: r.viewport,
+        box: { x: Math.round(b.x), y: Math.round(b.y), w: Math.round(b.w), h: Math.round(b.h) },
+        badge: { x: Math.round(b.center.x), y: Math.round(b.center.y) },
+      };
+    } else {
+      step.anno = { ref: ref, error: composed.error };
+      step.annoError = composed.error;
+    }
+    return true;
+  }
+
+  /* 本步要操作的元素的 ref（用于标注）：终止动作与「无操作」没有目标，返回 null。
+   * 「生成输入」的目标是 decision.param，其余动作走 planExecution，但这里只需要 ref，
+   * 可以直接用 decision.param（与 planExecution 的 ref 同源）。 */
+  function assignRef(decision) {
+    if (!decision) return null;
+    if (AutoCore.TERMINAL_TOOLS[decision.action] || decision.action === '无操作') return null;
+    return /^e[A-Za-z0-9_-]+$/.test(String(decision.param || '')) ? decision.param : null;
   }
 
   /* ---------- 执行决策 ---------- */
@@ -713,6 +1147,7 @@ const Auto = (() => {
   /* ---------- 状态条 / 计时 ---------- */
   function setProgress(n) {
     els.progress.textContent = '第 ' + n + ' / ' + runCfg.maxSteps + ' 步';
+    els.progress.title = '';   /* 清上一轮结束原因，免得悬停看到过期解释 */
   }
   function startTimer() {
     startTs = Date.now();
@@ -731,14 +1166,15 @@ const Auto = (() => {
     const goal = els.goal.value.trim();
     const url = els.url.value.trim();
     const maxSteps = Math.max(1, Math.min(50, Number(els.maxSteps.value) || 15));
-    if (!goal) return toast('请先填写任务目标');
-    if (!/^https?:\/\//i.test(url)) return toast('起始 URL 必须以 http:// 或 https:// 开头');
+    const invalid = validateForm();
+    if (invalid) return toast(invalid);
     if (!Config.current.key.trim()) return toast('请先在右上角「⚙ 配置」填写 Jev 的 API Key');
 
     /* 同步占坑（设计 §11：同会话仅一个循环）：必须在任何 await 之前，
      * 否则 probeEngine 的网络间隙内双击会并发两个 runLoop */
     running = true;
     els.start.disabled = true;
+    els.editTask.disabled = true;   /* 运行中锁配置，避免改到一半参数与 runCfg 不一致 */
 
     let engineOk = false;
     try {
@@ -747,26 +1183,29 @@ const Auto = (() => {
       if (!engineOk) {
         running = false;
         els.start.disabled = false;
+        els.editTask.disabled = false;
       }
     }
     if (!engineOk) return toast('浏览器引擎不可用，请先按提示安装 playwright-cli');
 
     abortFlag = false; finished = false;
     steps = []; history = []; consecutiveFails = 0; unfinishedHistory = [];
+    failedRefs = Object.create(null); refPageUrl = '';
     const plan = windowPlan();
     runCfg = {
       goal, url, maxSteps, variables: collectVars(), screenshotOn: els.screenshot.checked,
       browser: els.browser.value, window: plan,
+      paramTrim: Config.paramTrim.get(),
     };
 
     els.stop.hidden = false;
     els.statusBar.hidden = false;
     els.runPill.className = 'status-pill busy';
     els.runPill.textContent = '运行中';
+    els.runPill.dataset.state = 'running';
     els.timeline.hidden = false;
     els.timeline.innerHTML = '';
     buildStage();
-    els.summary.textContent = '';
     els.exportBtn.hidden = true;
     setProgress(0);
     startTimer();
@@ -777,22 +1216,42 @@ const Auto = (() => {
       running = false;
       stopTimer();
       els.start.disabled = false;
+      els.editTask.disabled = false;
       els.stop.hidden = true;
-      els.runPill.className = 'status-pill';
-      els.runPill.textContent = '已结束';
+      /* 兜底：runLoop 抛异常时 finishRun 尚未执行，走同一条结论文案，
+       * 不能再像以前那样把 pill 一律改写为「已结束」—— 那会盖掉真正的结论。 */
+      if (!finished) finishRun({ done: false, state: 'error', reason: '运行异常中断' });
     }
   }
+
+  /* ---------- 结束态 ----------
+   * 展示层唯一出口：状态条（pill = 结论 + 共 N 步 + 用时）。
+   * 曾经这里还额外插一条 run-banner、并在标题行写 #autoSummary，三处复述同一件事，
+   * 且计时器与 banner 各算一次导致「17s / 用时 18s」同屏打架 —— 已合并到这里。 */
+  const END_STATES = {
+    done:    { label: '任务已完成',   tone: 'done' },
+    aborted: { label: '用户中止',     tone: 'warn' },
+    giveup:  { label: 'Jev 放弃任务', tone: 'warn' },
+    limit:   { label: '已达步数上限', tone: 'warn' },
+    fails:   { label: '连续执行失败', tone: 'warn' },
+    error:   { label: '出错',         tone: 'error' },
+  };
 
   function finishRun(t) {
     if (finished) return;
     finished = true;
-    const banner = el('div', 'run-banner ' + (t.done ? 'ok' : (t.level === 'error' ? 'error' : 'warn')));
-    banner.innerHTML = (t.done ? '🏁 ' : '⏹ ') + '<b>' + escapeHtml(t.reason) + '</b>' +
-      '<span style="margin-left:10px;color:inherit;opacity:.75">共 ' + steps.length + ' 步 · 用时 ' + Math.round((Date.now() - startTs) / 1000) + 's</span>';
-    els.flow.insertBefore(banner, els.flow.firstChild);
-    els.summary.textContent = steps.length + ' 步 · ' + t.reason;
+    stopTimer();                                  /* 停在最终值，与下面读的 elapsed 同源 */
+    const s = END_STATES[t.state] || END_STATES.error;
+    const secs = Math.round((Date.now() - startTs) / 1000);
+    els.runPill.className = 'status-pill ' + s.tone;
+    els.runPill.textContent = s.label;
+    els.runPill.dataset.state = t.state || 'error';
+    els.progress.textContent = '共 ' + steps.length + ' 步';
+    els.progress.title = t.reason || '';
+    els.elapsed.textContent = secs + 's';
+    endText = steps.length + ' 步 · ' + s.label;
     els.exportBtn.hidden = false;
-    toast(t.reason);
+    toast(t.reason || s.label);
   }
 
   async function runLoop() {
@@ -805,21 +1264,23 @@ const Auto = (() => {
       { url: runCfg.url, browser: runCfg.browser }, runCfg.window));
     markChip('open', opened.ok ? 'ok' : 'error');
     if (!opened.ok) {
-      finishRun({ done: false, reason: '打开浏览器失败：' + opened.error, level: 'error' });
+      finishRun({ done: false, state: 'error', reason: '打开浏览器失败：' + opened.error });
       return;
     }
-    if (opened.resized === false) toast('窗口尺寸调整失败：' + (opened.resizeError || ''));
+    if (opened.fullscreen === false) toast('全屏未生效（已退化为最大化窗口）：' + (opened.fullscreenError || ''));
+    else if (opened.resized === false) toast('窗口尺寸调整失败：' + (opened.resizeError || ''));
     runCfg.browserUsed = opened.browser;
+    runCfg.fullscreenUsed = opened.fullscreen === true;
 
     let lastResult = '';
     for (let n = 1; n <= runCfg.maxSteps; n++) {
-      if (abortFlag) { finishRun({ done: false, reason: '用户中止' }); return; }
+      if (abortFlag) { finishRun({ done: false, state: 'aborted', reason: '用户中止' }); return; }
       setProgress(n);
 
       /* ① 快照 */
       const snap = await apiJson('/api/browser/snapshot', {});
       if (!snap.ok || typeof snap.snapshot !== 'string') {
-        finishRun({ done: false, reason: '获取页面快照失败：' + ((snap && snap.error) || '无快照内容'), level: 'error' });
+        finishRun({ done: false, state: 'error', reason: '获取页面快照失败：' + ((snap && snap.error) || '无快照内容') });
         return;
       }
       /* ② 当前页信息（工程自动执行） */
@@ -827,18 +1288,30 @@ const Auto = (() => {
       const pageInfo = info.ok ? { url: info.url, title: info.title } : { url: runCfg.url, title: '' };
 
       /* ③④ 组装 state + 问题（前端是唯一构造者）并调用 Jev */
-      const refLabels = AutoCore.refCriteria(snap.snapshot);
+      if (pageInfo.url !== refPageUrl) {
+        /* 跳转后 ref 编号会重排，失败记忆只在同一页面内有效 */
+        refPageUrl = pageInfo.url;
+        Object.keys(failedRefs).forEach((k) => { delete failedRefs[k]; });
+      }
+      const refLabels = AutoCore.refCriteria(snap.snapshot);   // 展示用：始终是全量 ref
+      const refRoles = AutoCore.refRoles(snap.snapshot);       // 动作 × 角色兼容性校验用
       const state = AutoCore.buildState({
         goal: runCfg.goal, url: pageInfo.url, title: pageInfo.title,
         history, lastResult, snapshot: snap.snapshot,
       });
-      const questions = AutoCore.buildQuestions({ snapshot: snap.snapshot, variables: runCfg.variables });
+      /* 「参数」题候选：≤250 个 ref 原样透传，超限才按相关性裁剪（高级参数可关） */
+      const param = AutoCore.paramCriteria({
+        snapshot: snap.snapshot, goal: runCfg.goal,
+        avoidRefs: Object.keys(failedRefs), paramTrim: runCfg.paramTrim,
+      });
+      const questions = AutoCore.buildQuestions({ snapshot: snap.snapshot, variables: runCfg.variables, param });
       const payload = { state, model: Config.current.model, questions };
 
       const step = {
         n, label: '第 ' + n + ' 步', decision: null, payload, response: null, jevError: null,
-        exec: null, llm: null, screenshot: null, terminal: null,
+        exec: null, llm: null, screenshot: null, terminal: null, annotated: null,
         pageInfo, snapshot: snap.snapshot, refLabels, historyLine: null, generatedText: null,
+        trim: param.meta, followUps: [], trimNote: null,
       };
       steps.push(step);
       const nodes = newStepCard(step);
@@ -851,7 +1324,7 @@ const Auto = (() => {
         step.jevError = jev.error;
         chip.textContent = n + ' · Jev 失败'; markChip(n, 'error');
         updateStepCard(step, nodes);
-        finishRun({ done: false, reason: jev.error, level: 'error' });
+        finishRun({ done: false, state: 'error', reason: jev.error });
         return;
       }
       step.response = jev.data;
@@ -872,10 +1345,64 @@ const Auto = (() => {
       }
       updateStepCard(step, nodes);
 
+      /* ⑤b 候选裁剪的兜底项「其他」：同一步内补问下一批（最多 maxTranches 批） */
+      if (step.decision) {
+        const norm = AutoCore.normalizeParam(step.decision);
+        if (norm.note) {
+          step.decision = Object.assign({}, step.decision, { param: norm.param });
+          step.trimNote = norm.note;
+        } else if (AutoCore.isRefMore(step.decision.param)) {
+          if (!param.meta.trimmed) {
+            /* 没启用裁剪时候选里根本没有「其他」，这是无效答案，不能拿它去补问 */
+            step.exhausted = true;
+            step.exec = { ok: false, error: 'Jev 选了候选里没有的「其他」（当前页面未触发候选裁剪）', cmd: null };
+            step.label = step.decision.action + '【' + AutoCore.REF_MORE + ' · 无效选项】';
+            chip.textContent = n + ' · ' + step.label;
+          } else if (await resolveMoreBatches(step, nodes, chip)) {
+            step.label = AutoCore.describeDecision(step.decision, refLabels, runCfg.variables);
+            chip.textContent = n + ' · ' + step.label;
+          } else {
+            /* 失败原因取补问记录里的真实原因（Jev 调用失败 / 解析失败 / 答案不在候选里…） */
+            const last = step.followUps[step.followUps.length - 1] || {};
+            step.exhausted = true;
+            step.exec = { ok: false, error: last.error || '候选已展开到最后一批仍未命中目标元素', cmd: null };
+            step.label = step.decision.action + '【' + AutoCore.REF_MORE + ' · 补问未命中】';
+            chip.textContent = n + ' · ' + step.label;
+          }
+        }
+        updateStepCard(step, nodes);
+      }
+
+      /* ⑤c 动作 × 元素角色不兼容（如 select 配 button）：同一步内补问「动作」，
+       * 补不回来就记失败步 —— 两种情况都不把命令发给浏览器 */
+      if (step.decision && !step.exhausted) {
+        const conflict = AutoCore.checkActionRole(step.decision, refRoles);
+        if (conflict.conflict) {
+          const fixed = await resolveActionConflict(step, nodes, chip, conflict, refRoles);
+          if (fixed) {
+            step.label = AutoCore.describeDecision(step.decision, refLabels, runCfg.variables);
+            chip.textContent = n + ' · ' + step.label;
+          } else {
+            const last = step.followUps[step.followUps.length - 1] || {};
+            step.exhausted = true;
+            step.exec = {
+              ok: false, cmd: null,
+              error: last.error || ('动作 ' + conflict.action + ' 与元素角色 ' + conflict.role + ' 不兼容'),
+            };
+            /* 这条命令从没发出去过，元素本身没问题 —— 别让它背 failedRefs 的降权
+             * （那会把真正的目标挤出候选首批，逼出多余的补问） */
+            step.refNotTried = true;
+            step.label = step.decision.action + '【与元素角色不兼容】';
+            chip.textContent = n + ' · ' + step.label;
+          }
+          updateStepCard(step, nodes);
+        }
+      }
+
       /* ⑦ 单步确认（设计 §10/§11：单步确认是安全阀，终止判定同样要过门） */
       if (cadence() === 'single') {
         const choice = await awaitConfirm(nodes.card);
-        if (choice === 'abort') { abortFlag = true; markChip(n, 'pending'); step.exec = { skipped: true }; updateStepCard(step, nodes); finishRun({ done: false, reason: '用户中止' }); return; }
+        if (choice === 'abort') { abortFlag = true; markChip(n, 'pending'); step.exec = { skipped: true }; updateStepCard(step, nodes); finishRun({ done: false, state: 'aborted', reason: '用户中止' }); return; }
         if (choice === 'skip') {
           step.exec = { skipped: true };
           step.historyLine = n + '. ' + step.label + ' · 用户跳过';
@@ -887,29 +1414,42 @@ const Auto = (() => {
         }
       }
 
-      /* 终止动作：截图留证后收尾（放在确认门之后，单步模式下用户可选择跳过） */
+      /* 终止动作：截图留证后收尾（放在确认门之后，单步模式下用户可选择跳过）
+       * 终止判定不是「一步操作」，所以在时间线上不留 chip（结论由状态条承担）；
+       * 卡片保留 —— 它的最终页面截图是完成证据。 */
       if (step.decision && AutoCore.TERMINAL_TOOLS[step.decision.action]) {
+        const doneTerminal = step.decision.action === '任务已完成';
         step.terminal = step.decision.action;
         step.label = step.decision.action;
         if (runCfg.screenshotOn) { await takeShot(step, 'step-' + n + '-final'); }
         updateStepCard(step, nodes);
-        markChip(n, step.terminal === '任务已完成' ? 'ok' : 'error');
-        history.push(AutoCore.formatHistoryStep(n, step.label, step.terminal === '任务已完成', null));
-        finishRun({ done: step.terminal === '任务已完成', reason: 'Jev 判定：' + step.terminal });
+        chip.remove();
+        history.push(AutoCore.formatHistoryStep(n, step.label, doneTerminal, null));
+        finishRun({
+          done: doneTerminal,
+          state: doneTerminal ? 'done' : 'giveup',
+          reason: 'Jev 判定：' + step.terminal,
+        });
         return;
       }
 
-      /* ⑧ 执行 */
-      if (step.decision) {
+      /* ⑧ 操作前截图 + 标注
+       * 位置与截图都取自动作之前：元素此刻必定还在、位置唯一确定。放到动作后取位置的话，
+       * 演示页「归档」「发货」点完就重渲染、ref 立刻失效，一条都标不出来，而且删行会让
+       * 后续行往上顶、环落到相邻行上（两种毛病都是实测过的）。标注画在图上，页面不留痕迹。 */
+      const noop = step.decision && step.decision.action === '无操作';
+      if (runCfg.screenshotOn && !noop) {
+        await takeShot(step, 'step-' + n, assignRef(step.decision));
+      }
+
+      /* ⑨ 执行 */
+      if (step.decision && !step.exhausted) {
         const r = await executeDecision(step, step.decision, refLabels);
         if (r.terminal) { /* 上文已处理 terminal 路径，此处不会到 */ }
       }
       const ok = Boolean(step.exec && step.exec.ok);
-      const noop = step.decision && step.decision.action === '无操作';
-
-      /* ⑨ 截图 */
-      if (runCfg.screenshotOn && !noop) {
-        await takeShot(step, 'step-' + n);
+      if (!ok && !noop && !step.refNotTried && step.decision && /^e[A-Za-z0-9_-]+$/.test(String(step.decision.param || ''))) {
+        failedRefs[step.decision.param] = 1;
       }
 
       /* ⑩ 历史与失败计数 */
@@ -932,7 +1472,7 @@ const Auto = (() => {
 
       await sleep(STEP_GAP_MS);
     }
-    finishRun({ done: false, reason: '达到步数上限（' + runCfg.maxSteps + '）' });
+    finishRun({ done: false, state: 'limit', reason: '达到步数上限（' + runCfg.maxSteps + '）' });
   }
 
   /* ---------- 导出 ---------- */
@@ -947,9 +1487,10 @@ const Auto = (() => {
       variables: runCfg ? runCfg.variables : [],
       maxSteps: runCfg && runCfg.maxSteps,
       screenshotOn: runCfg && runCfg.screenshotOn,
+      paramTrim: runCfg ? AutoCore.normalizeTrim(runCfg.paramTrim) : null,
       jevModel: Config.current.model,
       llmModel: Config.llm.configured() ? Config.llm.get().model : null,
-      summary: els.summary.textContent,
+      summary: endText,
       steps: steps.map((s) => ({
         n: s.n,
         label: s.label,
@@ -959,9 +1500,17 @@ const Auto = (() => {
         response: s.response,
         jevError: s.jevError,
         exec: s.exec,
+        anno: s.anno || null,
         llm: s.llm ? { messages: s.llm.messages, response: s.llm.raw, text: s.llm.text, error: s.llm.error } : null,
         screenshot: s.screenshot || null,
         historyLine: s.historyLine,
+        trim: s.trim || null,
+        trimNote: s.trimNote || null,
+        followUps: (s.followUps || []).map((r) => ({
+          kind: r.kind || 'param', request: r.payload, response: r.response,
+          batch: r.batch, param: r.param, action: r.action, from: r.from, role: r.role, ref: r.ref,
+          why: r.why, error: r.error,
+        })),
       })),
     };
     const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
@@ -976,6 +1525,7 @@ const Auto = (() => {
 
   /* ---------- 模式切换 ---------- */
   function switchMode(mode) {
+    cancelTaskModal();   /* 切走时丢弃未保存的编辑，杜绝「摘要与弹窗输入不一致」 */
     Array.from(els.modeSeg.querySelectorAll('.seg-btn')).forEach((b) => {
       const on = b.dataset.mode === mode;
       b.classList.toggle('active', on);
@@ -985,6 +1535,8 @@ const Auto = (() => {
     els.presetCard.hidden = mode === 'auto';
     els.mainGrid.hidden = mode === 'auto';
     if (els.apiSpec) els.apiSpec.hidden = mode === 'auto';
+    /* 引擎状态常驻顶栏，但它只对 auto 模式有意义 —— Demo 模式下收起，别当噪声 */
+    els.pill.hidden = mode !== 'auto';
     if (mode === 'auto') probeEngine();
   }
 
@@ -1000,18 +1552,28 @@ const Auto = (() => {
       toast(r.ok ? '浏览器已关闭' : '关闭失败：' + (r.error || ''));
     };
     els.addVar.onclick = () => addVarRow('', '');
+    els.editTask.onclick = openTaskModal;
+    els.taskModalClose.onclick = cancelTaskModal;
+    els.taskCancel.onclick = cancelTaskModal;
+    els.taskSave.onclick = saveTaskModal;
+    els.taskModal.addEventListener('click', (e) => { if (e.target === els.taskModal) cancelTaskModal(); });
+    /* 弹窗内：Esc 取消、Ctrl/⌘+Enter 保存、Tab 圈在弹窗里不外溢 */
+    els.taskModal.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { cancelTaskModal(); return; }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); saveTaskModal(); return; }
+      if (e.key !== 'Tab') return;
+      const nodes = Array.from(els.taskModal.querySelectorAll(
+        'button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      )).filter((n) => !n.disabled && n.offsetParent !== null);
+      if (!nodes.length) return;
+      const first = nodes[0]; const last = nodes[nodes.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    });
     els.exportBtn.onclick = exportRun;
-    els.demoPage.onclick = () => {
-      els.url.value = location.origin + '/demo/mailbox.html';
-      if (!els.goal.value.trim()) {
-        els.goal.value = '在收件箱里找到招商银行信用卡中心发来的 9 月电子对账单邮件，点击那一行的「归档」按钮';
-      }
-      if (!collectVars().length) addVarRow('回车', 'Enter');
-      toast('已填入内置演示页（离线可完整演示）');
-    };
-    /* 轮播键盘切换（输入控件聚焦时不抢按键） */
+    /* 轮播键盘切换（输入控件聚焦、或编辑弹窗打开时不抢按键） */
     document.addEventListener('keydown', (e) => {
-      if (els.panel.hidden || !steps.length) return;
+      if (els.panel.hidden || !steps.length || !els.taskModal.hidden) return;
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
       const t = e.target;
       if (t && /^(input|textarea|select)$/i.test(t.tagName)) return;
@@ -1022,6 +1584,12 @@ const Auto = (() => {
 
   function init() {
     renderVars();
+    primeScreenOptions();
+    /* 默认走一个场景：别让用户面对空白表单开场 */
+    if (!els.goal.value.trim() && !els.url.value.trim() && SCENARIOS.length) {
+      applyScenario(SCENARIOS[0].id, true);
+    }
+    renderSummary();
     bindEvents();
     probeEngine();
   }

@@ -13,6 +13,10 @@ const driver = require(path.join(ROOT, 'browser-driver.js'));
 const { parseSnapshotRefs } = require(path.join(ROOT, 'public', 'js', 'util.js'));
 
 const SESSION = 'jevsmoke' + Date.now().toString(36);
+/* 冒烟用哪个内核：默认跟随应用默认（chrome），JEVDEMO_BROWSER=msedge 可覆盖。
+ * 夹具（tests/fixtures/*.js）是 msedge 采的静态数据，与这里跑哪个内核无关；
+ * 原先在此写死 msedge，于是每次 npm test 都会弹一个 Edge 窗口。 */
+const BROWSER = process.env.JEVDEMO_BROWSER || 'chrome';
 let serverBase = null;
 let serverChild = null;
 let engineOk = false;
@@ -44,8 +48,11 @@ test.after(async () => {
 
 test('smoke：open / snapshot / pageInfo', async (t) => {
   if (!engineOk) return t.skip('playwright-cli 不可用，跳过真实浏览器冒烟');
-  const opened = await driver.open(SESSION, serverBase + '/demo/mailbox.html', { browser: 'msedge' });
+  const opened = await driver.open(SESSION, serverBase + '/demo/mailbox.html', { browser: BROWSER });
   assert.ok(opened.ok, 'open 失败：' + (opened.error || ''));
+  /* 打印实际内核：首选内核启动失败时 driver 会静默换另一个并丢掉原始错误，
+   * 只有这行输出能让人看出「要的是 A、跑的是 B」。 */
+  t.diagnostic('实际内核：' + opened.browser);
 
   const snap = await driver.snapshot(SESSION);
   assert.ok(snap.ok && snap.snapshot.includes('[ref='));
@@ -110,6 +117,30 @@ test('smoke：删除触发原生 confirm → dialog-accept 接受', async (t) =>
   assert.strictEqual(items, 3, '删除 1 封后应剩 3 封');
 });
 
+/* 回归：读元素位置必须是**只读**的，且位置与视口同一时刻读到。
+ * 早先的实现是往页面注入 overlay 画标记 —— 人盯着被驱动的浏览器窗口会看到环，
+ * 还多一份污染快照的风险。现在标注只画在图上，页面必须一尘不染：本用例把它钉死。
+ * 位置准不准另有一条：读数要落在元素自己身上（宽度/高度为正、在视口内）。 */
+test('smoke：读元素位置只读不改页面，且位置与视口同一时刻读到', async (t) => {
+  if (!engineOk) return t.skip('playwright-cli 不可用');
+  const before = await driver.snapshot(SESSION);
+  const refs = parseSnapshotRefs(before.snapshot);
+  const target = refs.find((r) => /button "归档"/.test(r.label)) || refs.find((r) => r.interactive);
+  assert.ok(target, '快照里找不到可点元素');
+
+  const r = await driver.rect(SESSION, target.ref);
+  assert.ok(r.ok, 'rect 失败：' + (r.error || ''));
+  assert.ok(r.rect.w > 0 && r.rect.h > 0, '元素尺寸应为正：' + JSON.stringify(r.rect));
+  assert.ok(r.viewport.w > 0 && r.viewport.h > 0, '视口尺寸应为正：' + JSON.stringify(r.viewport));
+  assert.ok(r.rect.x >= 0 && r.rect.y >= 0, '元素应落在视口内：' + JSON.stringify(r.rect));
+  assert.ok(r.rect.x + r.rect.w <= r.viewport.w + 2 && r.rect.y + r.rect.h <= r.viewport.h + 2,
+    '元素不该超出视口：rect=' + JSON.stringify(r.rect) + ' viewport=' + JSON.stringify(r.viewport));
+
+  /* 只读：读数前后快照必须逐字节一致（页面里不留任何节点） */
+  const after = await driver.snapshot(SESSION);
+  assert.strictEqual(after.snapshot, before.snapshot, '读位置不得改动页面');
+});
+
 test('smoke：screenshot 返回 dataURL；close 关闭会话', async (t) => {
   if (!engineOk) return t.skip('playwright-cli 不可用');
   const shot = await driver.screenshot(SESSION, 'smoke-final');
@@ -119,7 +150,6 @@ test('smoke：screenshot 返回 dataURL；close 关闭会话', async (t) => {
   const closed = await driver.close(SESSION);
   assert.ok(closed.ok);
 });
-
 test('smoke：白名单从 HTTP 层拒绝（act 直接拒绝 eval / close 命令）', async (t) => {
   if (!engineOk) return t.skip('playwright-cli 不可用');
   const bad1 = await driver.act(SESSION, 'eval', null, '1+1');

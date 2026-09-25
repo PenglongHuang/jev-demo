@@ -102,6 +102,14 @@ function startMocks() {
     const v = [];
     const q = body.questions || {};
     const names = Object.keys(q);
+    /* 单题补问是合法形态，两条路径各一种：
+     *   仅「参数」——候选裁剪展开下一批（Jev 选了「其他」）
+     *   仅「动作」——动作与元素角色不兼容，重问动作（Agent 侧 checkActionRole 拦下的） */
+    if (names.length === 1 && (names[0] === '参数' || names[0] === '动作')) {
+      const crit = Object.keys((q[names[0]] || {}).criteria || {});
+      if (!crit.length) v.push('单题补问的候选为空：' + names[0]);
+      return v;
+    }
     if (names.length !== 4 || !['动作', '参数', '文本', '未完成'].every((n) => names.includes(n))) {
       v.push('问题不是固定 4 道：' + names.join(','));
       return v;

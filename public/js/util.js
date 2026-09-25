@@ -73,7 +73,9 @@ function parseSnapshotRefs(snapshotText) {
     const interactive =
       /\[cursor=pointer\]/.test(line) || INTERACTIVE_ROLES.indexOf(role) !== -1;
 
-    refs.push({ ref, label, interactive });
+    /* role 也一并返回：动作 × 角色兼容性校验要用（auto-core.checkActionRole）。
+     * 只暴露事实，不做判断 —— 判断规则留在 auto-core，保证这里是纯解析。 */
+    refs.push({ ref, label, interactive, role });
   });
 
   return refs;

@@ -98,6 +98,108 @@ test('buildQuestions：固定 4 道，动作 29+2、参数来自快照、文本�
   [qs['动作'], qs['参数'], qs['文本']].forEach((q) => assert.strictEqual(q.type, 'choice'));
 });
 
+/* ---------- 措辞防混淆：select 事故回归（orders 场景，模型对 button "发货" 选了 select） ----------
+ * 事故链条：动作题与元素完全解耦 + `select` 与选择题的「选中」同形 → 模型把「选中这一行」
+ * 映射成了 select，打到浏览器上才被 `Element is not a <select> element` 拦下。
+ * 下面三条钉住的是「措辞必须承担排他义务」，不是具体字面 —— 改文案可以，改掉排他性不行。 */
+
+test('动作词表：select 限定为原生下拉框，并把其余场景指回 click', () => {
+  const tools = AutoCore.AUTO_TOOLS;
+  assert.match(tools.select, /仅|只/, 'select 必须写明适用范围是排他的');
+  assert.match(tools.select, /下拉框/);
+  assert.match(tools.select, /click/, 'select 必须把非下拉框场景指回 click');
+  assert.match(tools.click, /选中|点开/, 'click 必须承担「选中/点开某个元素」的语义，否则会被 select 抢走');
+});
+
+test('动作题 instructions：给出角色 → 动词对照', () => {
+  const qs = AutoCore.buildQuestions({ snapshot: SAMPLE_SNAPSHOT, variables: [] });
+  const acts = qs['动作'].instructions;
+  assert.match(acts, /角色/);
+  assert.match(acts, /click/);
+  assert.match(acts, /按钮/);
+  assert.match(acts, /下拉框/);
+});
+
+test('文本题 instructions：不再列举 select（避免二次抬高它的显著性）', () => {
+  const qs = AutoCore.buildQuestions({ snapshot: SAMPLE_SNAPSHOT, variables: [] });
+  assert.ok(!qs['文本'].instructions.includes('select'),
+    '「文本」题的举例里出现 select 会让它在动作题里更显眼');
+});
+
+/* ---------- 动作 × 元素角色兼容性：不兼容就不发命令，同一步内补问「动作」 ----------
+ * 只登记「物理上不可能」的组合（select 非下拉框、check 非勾选框），其余一律放行：
+ * 可编辑性判不了（contenteditable 的 div 在快照里是 generic），按角色拦会误报。 */
+
+test('refRoles：从快照解析出每个 ref 的角色', () => {
+  const roles = AutoCore.refRoles(SAMPLE_SNAPSHOT);
+  assert.strictEqual(roles.e10, 'button');
+  assert.strictEqual(roles.e3, 'searchbox');
+  assert.strictEqual(roles.e8, 'listitem');
+});
+
+test('checkActionRole：select 只能配下拉框，配 button 判冲突并给出兼容动作', () => {
+  const roles = { e10: 'button', e15: 'combobox' };
+  const bad = AutoCore.checkActionRole({ action: 'select', param: 'e10' }, roles);
+  assert.strictEqual(bad.conflict, true);
+  assert.strictEqual(bad.role, 'button');
+  assert.strictEqual(bad.action, 'select');
+  assert.match(bad.why, /下拉框/);
+  assert.ok(!bad.compatible.includes('select'));
+  assert.ok(bad.compatible.includes('click'));
+  assert.strictEqual(AutoCore.checkActionRole({ action: 'select', param: 'e15' }, roles).conflict, false);
+});
+
+test('checkActionRole：check / uncheck 只认勾选框类角色，click 不受限', () => {
+  const roles = { e10: 'button', e20: 'checkbox', e21: 'switch' };
+  assert.strictEqual(AutoCore.checkActionRole({ action: 'check', param: 'e10' }, roles).conflict, true);
+  assert.match(AutoCore.checkActionRole({ action: 'uncheck', param: 'e10' }, roles).why, /复选框|单选框/);
+  assert.strictEqual(AutoCore.checkActionRole({ action: 'check', param: 'e20' }, roles).conflict, false);
+  assert.strictEqual(AutoCore.checkActionRole({ action: 'uncheck', param: 'e21' }, roles).conflict, false);
+  assert.strictEqual(AutoCore.checkActionRole({ action: 'click', param: 'e10' }, roles).conflict, false);
+});
+
+test('checkActionRole：放行 fill / 未知角色 / 无需元素（宁可漏报，不误报白问一次）', () => {
+  const roles = { e10: 'button' };
+  assert.strictEqual(AutoCore.checkActionRole({ action: 'fill', param: 'e10' }, roles).conflict, false);
+  assert.strictEqual(AutoCore.checkActionRole({ action: 'type', param: 'e10' }, roles).conflict, false);
+  assert.strictEqual(AutoCore.checkActionRole({ action: '生成输入', param: 'e10' }, roles).conflict, false);
+  assert.strictEqual(AutoCore.checkActionRole({ action: 'select', param: 'e99' }, roles).conflict, false);
+  assert.strictEqual(AutoCore.checkActionRole({ action: 'select', param: '无需元素' }, roles).conflict, false);
+  assert.strictEqual(AutoCore.checkActionRole({ action: '任务已完成', param: '无需元素' }, roles).conflict, false);
+});
+
+test('buildActionFollowUp：只问「动作」，候选去掉该元素上不可能的动作，且不带终止态', () => {
+  const c = AutoCore.checkActionRole({ action: 'select', param: 'e10' }, { e10: 'button' });
+  const qs = AutoCore.buildActionFollowUp(c);
+  assert.deepStrictEqual(Object.keys(qs), ['动作']);
+  assert.strictEqual(qs['动作'].type, 'choice');
+  assert.ok(!qs['动作'].criteria.select);
+  assert.ok(!qs['动作'].criteria.check);
+  assert.ok(qs['动作'].criteria.click);
+  assert.ok(!qs['动作'].criteria['任务已完成'], '补问不带终止态：终止要走主循环那条通道');
+  assert.match(qs['动作'].instructions, /e10/);
+  assert.match(qs['动作'].instructions, /button/);
+  assert.match(qs['动作'].instructions, /select/);
+  assert.match(qs['动作'].instructions, /click/, '补问要顺带把该角色的常规动词指出来（fill 这类判不了可编辑性的动作拦不住）');
+});
+
+test('parseActionAnswer：取「动作」选项；缺失抛错', () => {
+  assert.strictEqual(AutoCore.parseActionAnswer({ 动作: { choice: 'click' } }), 'click');
+  assert.throws(() => AutoCore.parseActionAnswer({}), /动作/);
+});
+
+/* auto.js 只在浏览器里跑，Node 测试碰不到它 —— 少导出一个成员，报错要等到用户点开始才出现。
+ * 这条把「auto.js 提到的每个 AutoCore.xxx 都必须真的导出」变成可在 CI 里跑的断言。 */
+test('auto.js 里出现的 AutoCore.xxx 全部有导出', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'public', 'js', 'auto.js'), 'utf8');
+  const used = new Set();
+  const re = /AutoCore\.([A-Za-z_$][\w$]*)/g;
+  let m;
+  while ((m = re.exec(src))) used.add(m[1]);
+  const missing = [...used].filter((k) => !(k in AutoCore));
+  assert.deepStrictEqual(missing, [], 'auto.js 调了未导出的 AutoCore 成员：' + missing.join(','));
+});
+
 /* ---------- parseDecision ---------- */
 
 test('parseDecision：choice 三道 + score 归一化到 0~1', () => {
@@ -173,7 +275,7 @@ test('planExecution：矛盾决策抛错（需 ref 却选无需元素 / 需文�
 test('shouldTerminate：未完成度连续两轮 <0.2 判完成', () => {
   assert.deepStrictEqual(
     AutoCore.shouldTerminate({ steps: 3, maxSteps: 15, unfinishedHistory: [0.8, 0.19, 0.15], consecutiveFails: 0 }),
-    { done: true, reason: '任务完成（Jev 连续两轮判定未完成度 < 0.2）' });
+    { done: true, state: 'done', reason: '任务完成（Jev 连续两轮判定未完成度 < 0.2）' });
   assert.strictEqual(
     AutoCore.shouldTerminate({ steps: 3, maxSteps: 15, unfinishedHistory: [0.19, 0.25], consecutiveFails: 0 }), null);
   assert.strictEqual(
@@ -183,13 +285,13 @@ test('shouldTerminate：未完成度连续两轮 <0.2 判完成', () => {
 test('shouldTerminate：步数上限 / 连续失败 / 用户中止', () => {
   assert.deepStrictEqual(
     AutoCore.shouldTerminate({ steps: 15, maxSteps: 15, unfinishedHistory: [0.5], consecutiveFails: 0 }),
-    { done: false, reason: '达到步数上限（15）' });
+    { done: false, state: 'limit', reason: '达到步数上限（15）' });
   assert.deepStrictEqual(
     AutoCore.shouldTerminate({ steps: 5, maxSteps: 15, unfinishedHistory: [0.5], consecutiveFails: 3 }),
-    { done: false, reason: '连续 3 步执行失败' });
+    { done: false, state: 'fails', reason: '连续 3 步执行失败' });
   assert.deepStrictEqual(
     AutoCore.shouldTerminate({ steps: 2, maxSteps: 15, unfinishedHistory: [0.5], consecutiveFails: 0, aborted: true }),
-    { done: false, reason: '用户中止' });
+    { done: false, state: 'aborted', reason: '用户中止' });
 });
 
 /* ---------- LLM prompt ---------- */
@@ -247,4 +349,94 @@ test('describeDecision：时间线/历史用的短标签', () => {
   assert.strictEqual(AutoCore.describeDecision({ action: 'click', param: 'e10', text: '无' }, SAMPLE_REFS, VARS), 'click【e10 · 归档】');
   assert.strictEqual(AutoCore.describeDecision({ action: '生成输入', param: 'e3', text: '无' }, SAMPLE_REFS, VARS), '生成输入【e3 · 搜索邮件】');
   assert.strictEqual(AutoCore.describeDecision({ action: '任务已完成', param: '无需元素', text: '无' }, SAMPLE_REFS, VARS), '任务已完成');
+});
+
+/* ---------- 参数题候选裁剪（ref-funnel 接线） ---------- */
+
+/* resume.html 真实快照：393 个 ref，「参数」题不裁剪会得到 394 个选项 —— 接口硬上限 255 */
+const RESUME_SNAPSHOT = require(path.join(ROOT, 'tests', 'fixtures', 'resume-snapshot.js'));
+const RESUME_GOAL = '给符合条件的候选人（高级前端 + React 与 TypeScript + 期望薪资不超过 35K）发出面试邀请';
+const TRIM = { on: true, limit: 80, maxTranches: 3 };
+const refKeys = (criteria) => Object.keys(criteria).filter((k) => /^e\d+$/.test(k));
+
+test('超限时「参数」题被裁剪：选项不超上限、带兜底项、instructions 说明折叠', () => {
+  const pc = AutoCore.paramCriteria({ snapshot: RESUME_SNAPSHOT, goal: RESUME_GOAL, paramTrim: TRIM });
+  const qs = AutoCore.buildQuestions({ snapshot: RESUME_SNAPSHOT, variables: [], param: pc });
+
+  assert.strictEqual(pc.meta.trimmed, true);
+  assert.strictEqual(pc.meta.totalRefs, 393);
+  assert.strictEqual(Object.keys(qs['参数'].criteria).length, 82);   // 80 + 无需元素 + 其他
+  assert.ok(qs['参数'].criteria['其他'], '必须有兜底项');
+  assert.ok(refKeys(qs['参数'].criteria).indexOf('e172') !== -1, '合格候选人的按钮要在第一批里');
+  assert.match(qs['参数'].instructions, /折叠|批/);
+  assert.match(qs['参数'].instructions, /其他/);
+});
+
+test('未超限时零回归：「参数」题与旧行为逐字节一致，instructions 不提折叠', () => {
+  const pc = AutoCore.paramCriteria({ snapshot: SAMPLE_SNAPSHOT, goal: '归档对账单', paramTrim: TRIM });
+  const qs = AutoCore.buildQuestions({ snapshot: SAMPLE_SNAPSHOT, variables: [], param: pc });
+  assert.strictEqual(pc.meta.trimmed, false);
+  assert.strictEqual(JSON.stringify(qs['参数'].criteria), JSON.stringify(AutoCore.refCriteria(SAMPLE_SNAPSHOT)));
+  assert.strictEqual(qs['参数'].criteria['其他'], undefined);
+  assert.ok(!/折叠/.test(qs['参数'].instructions));
+});
+
+test('开关关掉时：即使超限也走全量（恢复裁剪功能上线前的行为）', () => {
+  const pc = AutoCore.paramCriteria({ snapshot: RESUME_SNAPSHOT, goal: RESUME_GOAL, paramTrim: { on: false, limit: 80, maxTranches: 3 } });
+  const qs = AutoCore.buildQuestions({ snapshot: RESUME_SNAPSHOT, variables: [], param: pc });
+  assert.strictEqual(pc.meta.trimmed, false);
+  assert.strictEqual(pc.meta.enabled, false);
+  assert.strictEqual(Object.keys(qs['参数'].criteria).length, 394);
+});
+
+test('缺省（没传 paramTrim）时按默认开着处理', () => {
+  const pc = AutoCore.paramCriteria({ snapshot: RESUME_SNAPSHOT, goal: RESUME_GOAL });
+  assert.strictEqual(pc.meta.trimmed, true);
+  assert.strictEqual(pc.meta.limit, 80);
+});
+
+test('buildParamFollowUp：只含「参数」一题，instructions 带已定动作与批次', () => {
+  const pc2 = AutoCore.paramCriteria({ snapshot: RESUME_SNAPSHOT, goal: RESUME_GOAL, paramTrim: TRIM, batch: 2 });
+  const q = AutoCore.buildParamFollowUp({
+    paramCriteria: pc2, action: 'click', batch: 2, totalRefs: 393, limit: 80, maxTranches: 3,
+  });
+  assert.deepStrictEqual(Object.keys(q), ['参数']);
+  assert.strictEqual(q['参数'].type, 'choice');
+  assert.match(q['参数'].instructions, /click/);
+  assert.match(q['参数'].instructions, /第 2 批/);
+  assert.match(q['参数'].instructions, /81/);
+  assert.ok(q['参数'].criteria['其他'], '第二批之后还有候选，仍要给兜底项');
+});
+
+test('buildParamFollowUp：最后一批不附兜底项，并提示在本批内做出选择', () => {
+  const pc3 = AutoCore.paramCriteria({ snapshot: RESUME_SNAPSHOT, goal: RESUME_GOAL, paramTrim: TRIM, batch: 3 });
+  const q = AutoCore.buildParamFollowUp({ paramCriteria: pc3, action: 'click', batch: 3, totalRefs: 393, limit: 80, maxTranches: 3 });
+  assert.strictEqual(q['参数'].criteria['其他'], undefined);
+  assert.match(q['参数'].instructions, /最后一批/);
+});
+
+test('isRefMore / describeDecision：认得兜底项', () => {
+  assert.strictEqual(AutoCore.isRefMore('其他'), true);
+  assert.strictEqual(AutoCore.isRefMore('e172'), false);
+  assert.strictEqual(AutoCore.isRefMore('无需元素'), false);
+  assert.match(AutoCore.describeDecision({ action: 'click', param: '其他', text: '无' }, {}, VARS), /展开下一批/);
+});
+
+test('normalizeParam：动作不需要元素时，「其他」归一为「无需元素」并给出说明', () => {
+  const noRef = AutoCore.normalizeParam({ action: 'press', param: '其他' });
+  assert.strictEqual(noRef.param, '无需元素');
+  assert.match(noRef.note, /不需要元素/);
+  const needRef = AutoCore.normalizeParam({ action: 'click', param: '其他' });
+  assert.strictEqual(needRef.param, '其他');
+  assert.strictEqual(needRef.note, '');
+  const normal = AutoCore.normalizeParam({ action: 'click', param: 'e12' });
+  assert.strictEqual(normal.param, 'e12');
+  assert.strictEqual(normal.note, '');
+});
+
+test('parseParamAnswer：补问只回「参数」一题，不要求「动作」「未完成」', () => {
+  assert.strictEqual(AutoCore.parseParamAnswer({ 参数: { type: 'choice', choice: 'e172' } }), 'e172');
+  assert.strictEqual(AutoCore.parseParamAnswer({ 参数: { type: 'choice', choice: '无需元素' } }), '无需元素');
+  assert.throws(() => AutoCore.parseParamAnswer({}), /参数/);
+  assert.throws(() => AutoCore.parseParamAnswer({ 参数: {} }), /参数/);
 });
