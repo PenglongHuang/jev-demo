@@ -3,8 +3,8 @@
  * 和纯透传代理。前端是 state/问题的唯一构造者 —— 步骤卡展示的请求体与真实
  * 发出的 payload 是同一个对象（可见性硬原则）。
  *
- * 展示层：步骤以轮播卡片呈现（‹ › 切换 / ←→ 键 / 时间线跳转 / 跟随最新），
- * 卡片内概率分布、输入 state、各道问题（首轮 3 道 + 按需补问）均为结构化渲染
+ * 展示层：左侧会话树（会话 → 步骤 → 模型调用）+ 右侧三视图详情（会话/步骤/行动，
+ * 跟随最新步骤），概率分布、输入 state、各道问题（首轮 3 道 + 按需补问）均为结构化渲染
  * （非 JSON 倾倒），原始报文折叠保留可复制。
  *
  * 依赖：util.js（escapeHtml/pct/toast/relaxedStringify）、auto-core.js（AutoCore）、app.js（Config）
@@ -507,6 +507,8 @@ const Auto = (() => {
     renderDetail();
     const t2 = document.getElementById('flowTree');
     if (t2) t2.scrollTop = keepTop;
+    const selNode = t2 && t2.querySelector('.tn.sel');
+    if (selNode) selNode.scrollIntoView({ block: 'nearest' });
     document.querySelectorAll('#fdBody details[data-dk]').forEach((d) => { if (openMap[d.dataset.dk] != null) d.open = openMap[d.dataset.dk]; });
   }
 
@@ -626,10 +628,10 @@ const Auto = (() => {
       : viewRecord.meta;
     const list = viewedSteps();
     const vars = (meta.variables || []).map((v) => '<span class="dec-chip"><i>' + escapeHtml(v.name) + '</i>' + escapeHtml(v.value) + '</span>').join('') || '<span class="muted">（无）</span>';
-    return '<div class="kv"><div class="kv-k">任务目标</div><div class="kv-v">' + escapeHtml(meta.goal || '') + '</div></div>'
-      + '<div class="kv"><div class="kv-k">起始 URL</div><div class="kv-v mono">' + escapeHtml(meta.startUrl || '') + '</div></div>'
-      + '<div class="kv"><div class="kv-k">输入变量</div><div class="kv-v">' + vars + '</div></div>'
-      + '<div class="kv"><div class="kv-k">模型</div><div class="kv-v mono">' + escapeHtml((meta.jevModel || '—') + (meta.llmModel ? ' · 生成 ' + meta.llmModel : '')) + '</div></div>'
+    return '<div class="fd-kv"><div class="fd-kv-k">任务目标</div><div class="fd-kv-v">' + escapeHtml(meta.goal || '') + '</div></div>'
+      + '<div class="fd-kv"><div class="fd-kv-k">起始 URL</div><div class="fd-kv-v mono">' + escapeHtml(meta.startUrl || '') + '</div></div>'
+      + '<div class="fd-kv"><div class="fd-kv-k">输入变量</div><div class="fd-kv-v">' + vars + '</div></div>'
+      + '<div class="fd-kv"><div class="fd-kv-k">模型</div><div class="fd-kv-v mono">' + escapeHtml((meta.jevModel || '—') + (meta.llmModel ? ' · 生成 ' + meta.llmModel : '')) + '</div></div>'
       + '<div class="sec-t" style="margin-top:6px">步骤总览（点击行查看详情）</div>'
       + '<table class="ov"><thead><tr><th>#</th><th>步骤</th><th>动作</th><th>状态</th><th>用时</th><th>行动</th></tr></thead><tbody>'
       + list.map((s) => {
@@ -647,7 +649,7 @@ const Auto = (() => {
   function stepViewHtml(st, list) {
     let html = execHtml(st);
     if (st.pageInfo) {
-      html += '<div class="kv"><div class="kv-k">页面环境</div><div class="kv-v">'
+      html += '<div class="fd-kv"><div class="fd-kv-k">页面环境</div><div class="fd-kv-v">'
         + '<span class="mono-chip">' + escapeHtml(st.pageInfo.url || '') + '</span>'
         + (st.pageInfo.title ? '<span class="page-title">' + escapeHtml(st.pageInfo.title) + '</span>' : '') + '</div></div>';
     }
@@ -833,15 +835,6 @@ const Auto = (() => {
     return html;
   }
 
-  function decisionHtml(step) {
-    /* 题数按 payload 实际内容算：首轮 3 道（弹窗步 1 道），补问每次 +1 */
-    const n = Object.keys((step.payload && step.payload.questions) || {}).length;
-    const fu = (step.followUps || []).filter((r) => r.kind !== 'text' || r.text || r.error).length;
-    return decisionSummaryHtml(step) +
-      '<details class="step-collapse prob-details"><summary>概率分布明细（' + n + ' 道问题' + (fu ? ' + ' + fu + ' 次补问' : '') + '）</summary>' +
-      decisionDetailsHtml(step) + '</details>';
-  }
-
   /* ============ 执行区 / LLM 区 ============ */
   function cmdDisplay(op, ref, text) {
     return 'playwright-cli ' + op + (ref ? ' ' + ref : '') + (text != null ? ' "' + text + '"' : '');
@@ -887,7 +880,7 @@ const Auto = (() => {
     const text = String(snap || '');
     const lines = text ? text.split('\n').length : 0;
     const refs = Object.keys(AutoCore.refCriteria(text)).length;
-    return '<details class="snap-details"><summary>accessibility 快照 · ' + lines + ' 行 · ' + refs + ' 个元素（点开查看）</summary>' +
+    return '<details class="snap-details" data-dk="snap"><summary>accessibility 快照 · ' + lines + ' 行 · ' + refs + ' 个元素（点开查看）</summary>' +
       '<pre class="step-pre tall">' + escapeHtml(text) + '</pre></details>';
   }
 
@@ -958,18 +951,6 @@ const Auto = (() => {
     return html;
   }
 
-  function rawDetailsHtml(step) {
-    const reqText = relaxedStringify(step.payload);
-    const respText = step.response ? JSON.stringify({
-      model: step.response.model, answers: step.response.answers,
-      usage: step.response.usage, _latency_ms: step.response._latency_ms,
-    }, null, 2) : '（调用失败，无响应）';
-    return '<details class="raw-details"><summary>原始报文（与真实请求同一对象，可复制）</summary>' +
-      '<div class="raw-label">① 请求体</div><pre class="step-pre tall">' + escapeHtml(reqText) + '</pre>' +
-      '<div class="raw-label">② Jev 响应</div><pre class="step-pre tall">' + escapeHtml(respText) + '</pre>' +
-      '</details>';
-  }
-
   /* ③ 请求信息：外层统一折叠（输入 state + 首轮问题 + 补问记录 + 原始报文） */
   /* 参数题候选裁剪的摘要：让人一眼看出「本来多少个、给了 Jev 多少个、为什么」 */
   function trimSummary(step) {
@@ -1006,7 +987,7 @@ const Auto = (() => {
    * 结果落定前默认展开（用户能看见"正在补问"），落定后收起。 */
   function followUpDetails(title, requestLabel, rec, hit, settled, dk) {
     return '<details class="req-details"' + (dk ? ' data-dk="' + dk + '"' : '') + (settled ? '' : ' open') + '>' +
-      '<summary>' + title + '（' + escapeHtml(hit) + '）</summary>' +
+      '<summary>' + escapeHtml(title) + '（' + escapeHtml(hit) + '）</summary>' +
       '<div class="req-inner">' +
       '<div class="raw-label">① 发送的请求体（仅「' + requestLabel + '」一题）</div>' +
       '<pre class="step-pre tall">' + escapeHtml(relaxedStringify(rec.payload)) + '</pre>' +
@@ -1035,11 +1016,11 @@ const Auto = (() => {
     document.body.appendChild(ov);
   }
 
-  /* ---------- 单步确认（挂在右侧详情面板底部） ---------- */
+  /* ---------- 单步确认（挂 #fdConfirm：autoFlow 的兄弟容器，树/详情重建不影响它） ---------- */
   function awaitConfirm(step) {
     return new Promise((resolve) => {
       if (view.sess !== 'current' || view.type !== 'step' || view.n !== step.n) select('step', step.n, null, false);
-      const host = document.getElementById('fdBody');
+      const host = document.getElementById('fdConfirm');
       if (!host) return resolve('run');   /* 视图异常时保守执行 */
       const bar = el('div', 'confirm-bar');
       const mk = (label, cls, val) => {
@@ -1384,6 +1365,7 @@ const Auto = (() => {
 
     abortFlag = false; finished = false;
     steps = []; history = []; consecutiveFails = 0; unfinishedHistory = [];
+    Object.assign(view, { sess: 'current', type: 'session', n: 0, i: 0, follow: true });
     failedRefs = Object.create(null); refPageUrl = '';
     const plan = windowPlan();
     runCfg = {
@@ -1528,12 +1510,13 @@ const Auto = (() => {
       const payload = { state, model: Config.current.model, questions };
 
       const step = {
-        n, label: '第 ' + n + ' 步', decision: null, payload, response: null, jevError: null,
+        n, label: null, decision: null, payload, response: null, jevError: null,
         exec: null, llm: null, screenshot: null, terminal: null, annotated: null,
         pageInfo, snapshot: snapText, refLabels, historyLine: null, generatedText: null,
         trim: param.meta, followUps: [], trimNote: null,
       };
       steps.push(step);
+      touch();   /* 主调用期间树即出现本步 'run' 脉冲骨架，与状态条同步 */
 
       const jev = await callJev(payload);
       if (!jev.ok) {
@@ -1555,6 +1538,7 @@ const Auto = (() => {
         }
       } catch (e) {
         step.exec = { ok: false, error: '决策解析失败：' + ((e && e.message) || String(e)), cmd: null };
+        step.label = '决策解析失败';   /* label 初始为 null，此路径不经过 ⑤b-⑤d 的赋值 */
       }
 
       if (step.decision) {
@@ -1650,7 +1634,6 @@ const Auto = (() => {
           history.push(step.historyLine);
           lastResult = '用户跳过（未执行）';
           touch();
-          saveRun(false);
           continue;
         }
       }
@@ -1702,7 +1685,6 @@ const Auto = (() => {
       consecutiveFails = (ok || noop || (step.exec && step.exec.skipped)) ? 0 : consecutiveFails + 1;
 
       touch();
-      saveRun(false);
 
       /* ⑪ 终止判断 */
       const t = AutoCore.shouldTerminate({

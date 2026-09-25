@@ -772,9 +772,9 @@ table.spec td code { font-size: 11px; }
 .stepnav button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .stepnav button:disabled { opacity: .4; cursor: default; }
 .fd-body { display: flex; flex-direction: column; gap: 14px; }
-.kv { display: flex; gap: 10px; font-size: 12.5px; line-height: 1.55; }
-.kv .kv-k { width: 76px; flex: none; color: var(--text-3); font-size: 11.5px; padding-top: 1px; }
-.kv .kv-v { color: var(--text-2); min-width: 0; }
+.fd-kv { display: flex; gap: 10px; font-size: 12.5px; line-height: 1.55; }
+.fd-kv .fd-kv-k { width: 76px; flex: none; color: var(--text-3); font-size: 11.5px; padding-top: 1px; }
+.fd-kv .fd-kv-v { color: var(--text-2); min-width: 0; }
 table.ov { width: 100%; border-collapse: collapse; font-size: 12.5px; }
 table.ov th { text-align: left; font-size: 11px; color: var(--text-3); font-weight: 700; padding: 6px 10px; border-bottom: 1px solid var(--border); }
 table.ov td { padding: 7px 10px; border-bottom: 1px solid #f3f4f6; color: var(--text-2); }
