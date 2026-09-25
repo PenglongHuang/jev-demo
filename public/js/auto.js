@@ -1788,50 +1788,22 @@ const Auto = (() => {
   }
 
   /* ---------- 导出 ---------- */
+  /* 与落盘同一格式（AutoCore.buildRunRecord → { meta, steps }），文件即会话记录 */
   function exportRun() {
-    if (!steps.length) return toast('还没有可导出的运行记录');
-    const record = {
-      exportedAt: new Date().toISOString(),
-      goal: runCfg && runCfg.goal,
-      startUrl: runCfg && runCfg.url,
-      browser: runCfg && runCfg.browserUsed,
-      window: runCfg ? runCfg.window : null,
-      variables: runCfg ? runCfg.variables : [],
-      maxSteps: runCfg && runCfg.maxSteps,
-      screenshotOn: runCfg && runCfg.screenshotOn,
-      paramTrim: runCfg ? AutoCore.normalizeTrim(runCfg.paramTrim) : null,
+    if (!steps.length || !runCfg || !runId) return toast('还没有可导出的运行记录');
+    const record = AutoCore.buildRunRecord({
+      id: runId, runCfg,
       jevModel: Config.current.model,
       llmModel: Config.llm.configured() ? Config.llm.get().model : null,
-      summary: endText,
-      steps: steps.map((s) => ({
-        n: s.n,
-        label: s.label,
-        pageInfo: s.pageInfo,
-        decision: s.decision,
-        request: s.payload,
-        response: s.response,
-        jevError: s.jevError,
-        exec: s.exec,
-        anno: s.anno || null,
-        llm: s.llm ? { messages: s.llm.messages, response: s.llm.raw, text: s.llm.text, error: s.llm.error } : null,
-        screenshot: s.screenshot || null,
-        historyLine: s.historyLine,
-        trim: s.trim || null,
-        trimNote: s.trimNote || null,
-        followUps: (s.followUps || []).map((r) => ({
-          kind: r.kind || 'param', request: r.payload, response: r.response,
-          batch: r.batch, param: r.param, action: r.action, text: r.text,
-          forAction: r.forAction,
-          from: r.from, role: r.role, ref: r.ref,
-          why: r.why, error: r.error,
-        })),
-      })),
-    };
-    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      startedAt: runStartedAt, endedAt: new Date().toISOString(),
+      endState: els.runPill.dataset.state || 'error', endReason: endReasonText,
+      exportedAt: new Date().toISOString(),
+      steps,
+    });
     const blob = new Blob([JSON.stringify(record, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = 'jev-auto-run-' + ts + '.json';
+    a.download = 'jev-auto-run-' + runId + '.json';
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
     toast('已导出运行记录（' + steps.length + ' 步）');
