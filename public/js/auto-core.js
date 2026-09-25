@@ -1,6 +1,6 @@
 /* ===================== playwright-jev-agent · 纯逻辑核心（无 DOM） =====================
- * 设计文档 §6/§7/§8/§11：state 组装、4 道固定问题组装、决策解析、执行规划、
- * 终止判断、历史压缩、LLM prompt 组装与文本清洗。
+ * 设计文档 §6/§7/§8/§11：state 组装、3 道固定问题组装与按需补问（参数批次 / 动作 / 文本）、
+ * 决策解析、执行规划、终止判断、历史压缩、LLM prompt 组装与文本清洗。
  * 浏览器：以全局 AutoCore 暴露（auto.js 使用）；Node：module.exports（node:test 使用）。
  * ref 解析复用 util.js（同一实现保证浏览器/测试行为一致）。
  */
@@ -14,33 +14,27 @@
     ? window.RefFunnel
     : require('./ref-funnel.js');
 
-  /* ---------------- 动作集（设计 §7：27 个浏览器操作 + 2 个工程动作） ----------------
-   * 描述带分组前缀，帮助 Jev 在 31 个候选里区分用途。 */
+  /* ---------------- 动作集（设计 §7：19 个浏览器操作 + 2 个工程动作） ----------------
+   * 描述带分组前缀，帮助 Jev 在 23 个候选里区分用途。
+   * 裁掉的 8 个（dblclick/drop/keydown/keyup/mousemove/mousedown/mouseup/mousewheel）：
+   * a11y 快照驱动下坐标鼠标类不可达（没有 x,y 概念），修饰键与拖拽在本项目场景里无入口，
+   * 纯属干扰项（实测事故里模型在 31 候选里摇摆）。 */
   var AUTO_TOOLS = {
-    /* 交互（13） */
+    /* 交互（9） */
     /* click 的描述里必须写明「选中 / 点开」也归它 —— 中文语境下「选中这一行 / 选中这一笔」
      * 是最高频的说法，而动作表里恰好有个叫 select 的选项，不划清归属它就会被抢走。 */
     'click': '【交互】点击按钮 / 链接 / 表格行 / 任意元素（要「选中」「点开」某个元素都用它；需配合「参数」选定 ref）',
-    'dblclick': '【交互】双击某个元素',
-    'fill': '【交互】清空并向输入框/文本域填入文本（文本取自「文本」变量）',
-    'type': '【交互】在元素上逐字输入文本（文本取自「文本」变量）',
+    'fill': '【交互】清空并向输入框/文本域填入文本（文本经动作确定后的「文本」补问选定）',
+    'type': '【交互】在元素上逐字输入文本（文本经动作确定后的「文本」补问选定）',
     /* select 只能作用于原生 <select>：快照里它是 combobox，它下面的 option 没有 ref，
      * 而 driver 打到 playwright 上时非 <select> 会硬抛 "Element is not a <select> element"。
      * 实测事故：模型对 button "发货" 选了 select，白烧一步才自纠 —— 所以描述写成排他式。 */
-    'select': '【交互】仅用于原生下拉框（快照里是 combobox "<名字>"，它下面的 option 没有 ref）：在其中选定某个选项（文本 = 选项名）。按钮 / 链接 / 表格行一律用 click，不要用 select',
+    'select': '【交互】仅用于原生下拉框（快照里是 combobox "<名字>"，它下面的 option 没有 ref）：在其中选定某个选项（选项名在「文本」补问的候选里，来自该下拉框的真实选项）。按钮 / 链接 / 表格行一律用 click，不要用 select',
     'check': '【交互】勾选复选框 / 单选框',
     'uncheck': '【交互】取消勾选',
     'hover': '【交互】鼠标悬停（展开菜单 / 触发浮层）',
-    'drop': '【交互】把拖拽中的内容放到某个元素上',
     'upload': '【交互】上传本地文件（文本 = 文件路径）',
-    'press': '【交互】按下按键（文本 = 键名：Enter、Escape、ArrowDown…）',
-    'keydown': '【交互】按住修饰键（文本 = Shift / Control / Alt）',
-    'keyup': '【交互】松开之前按住的修饰键',
-    /* 鼠标（4） */
-    'mousemove': '【鼠标】移动鼠标（文本 = "x,y" 坐标）',
-    'mousedown': '【鼠标】在当前位置按下鼠标',
-    'mouseup': '【鼠标】在当前位置松开鼠标',
-    'mousewheel': '【鼠标】滚动滚轮（文本 = "横向,纵向" 增量，如 0,-300 向下滚）',
+    'press': '【交互】按下按键（键名在动作确定后的「文本」补问里选，常用 PageDown / PageUp / Enter）',
     /* 导航（4） */
     'goto': '【导航】打开网址（文本 = http/https URL，取自变量）',
     'go-back': '【导航】后退到上一页',
@@ -67,13 +61,17 @@
 
   var REF_NONE = '无需元素';
   var TEXT_NONE = '无';
-  var SCORE_LEVELS = 5;
+  /* 「未完成」量表级数 —— 必须与 buildQuestions 里「未完成」criteria 的行数一致：
+   * API 的 score = 等级下标加权均值，范围 0 ~ 级数-1；归一化除以 (级数-1)。
+   * 图例缩到 2 级（0 已完成 / 1 进行中）后这里若还是 5，score 0.97 会被压成
+   * 未完成 24%（实测事故：模型明明判 97% 未完成，展示却贴近 20% 的完成线）。 */
+  var SCORE_LEVELS = 2;
 
-  var TEXT_ACTIONS = { fill: 1, type: 1, select: 1, press: 1, keydown: 1, keyup: 1, goto: 1, upload: 1, 'tab-select': 1, 'tab-close': 1, 'dialog-accept': 1, mousemove: 1, mousewheel: 1, 'tab-new': 1 };
+  var TEXT_ACTIONS = { fill: 1, type: 1, select: 1, press: 1, goto: 1, upload: 1, 'tab-select': 1, 'tab-close': 1, 'dialog-accept': 1, 'tab-new': 1 };
   /* 文本可省的动作（与 browser-driver 白名单的 optional 语义一致）：
    * tab-close 缺省关当前页 / tab-new 可不开 URL / dialog-accept 可不带 prompt 输入 */
   var TEXT_OPTIONAL_ACTIONS = { 'tab-close': 1, 'tab-new': 1, 'dialog-accept': 1 };
-  var REF_ACTIONS = { click: 1, dblclick: 1, fill: 1, type: 1, select: 1, check: 1, uncheck: 1, hover: 1, drop: 1, '生成输入': 1 };
+  var REF_ACTIONS = { click: 1, fill: 1, type: 1, select: 1, check: 1, uncheck: 1, hover: 1, '生成输入': 1 };
 
   function needText(action) { return Boolean(TEXT_ACTIONS[action]); }
   function needRef(action) { return Boolean(REF_ACTIONS[action]); }
@@ -96,7 +94,7 @@
     };
   }
 
-  /* ---------------- 问题组装（固定 4 道，动态值全部工程注入） ---------------- */
+  /* ---------------- 问题组装（固定 3 道，动态值全部工程注入） ---------------- */
   function refCriteria(snapshot) {
     return U.buildRefCriteria(snapshot);
   }
@@ -158,7 +156,7 @@
     return head + '候选已按与任务目标的相关性折叠：' + scope + '，已全部列出。' + tail;
   }
 
-  /* 第二批起的「参数」补问：只问这一题（动作已定，不重发 4 题以免连带动摇动作决策） */
+  /* 第二批起的「参数」补问：只问这一题（动作已定，不重发整组问题以免连带动摇动作决策） */
   function buildParamFollowUp(ctx) {
     var o = ctx || {};
     var meta = (o.paramCriteria && o.paramCriteria.meta) || {};
@@ -248,10 +246,58 @@
     };
   }
 
+  /* ---------------- select 选项预检 ----------------
+   * 动作 × 角色校验管住了「select 配 button」，但 select 配 combobox 也可能错在
+   * 选项层：Jev 想搜索「王小明」，却规划成「在“订单状态”下拉框里选“王小明”这个
+   * 选项」——选项不存在，命令打到浏览器必抛 option not found，且真实模型实测会
+   * 连续重复同一错误组合。快照里 combobox 子树自带 option 名单（option 无 ref 但
+   * 有名字），这里确定性预检：选项不在名单内就不发命令，报错直接给出可选清单与
+   * 纠偏提示（想输入文本请改用 fill + 搜索框），作为下一轮的强信号。
+   * 读不到选项名单（快照形态变化 / ref 不是下拉框）则放行 —— 宁可漏报。 */
+  function leadingSpaces(line) {
+    var m = String(line).match(/^ */);
+    return m ? m[0].length : 0;
+  }
+
+  function selectOptionNames(snapshot, ref) {
+    var lines = String(snapshot || '').split('\n');
+    var at = -1;
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].indexOf('[ref=' + ref + ']') !== -1) { at = i; break; }
+    }
+    if (at === -1) return null;
+    var headIndent = leadingSpaces(lines[at]);
+    var out = [];
+    for (var j = at + 1; j < lines.length; j++) {
+      if (leadingSpaces(lines[j]) <= headIndent) break;
+      var m = lines[j].match(/- option "([^"]*)"/);
+      if (m) out.push(m[1]);
+    }
+    return out.length ? out : null;
+  }
+
+  function checkSelectOption(snapshot, ref, text) {
+    if (!ref || text == null) return { conflict: false };
+    var options = selectOptionNames(snapshot, ref);
+    if (!options) return { conflict: false };
+    var t = String(text).trim();
+    for (var i = 0; i < options.length; i++) {
+      if (String(options[i]).trim() === t) return { conflict: false };
+    }
+    var line = String(snapshot || '').split('\n').filter(function (l) { return l.indexOf('[ref=' + ref + ']') !== -1; })[0] || '';
+    var name = (line.match(/"([^"]*)"/) || [])[1] || ref;
+    return {
+      conflict: true, ref: ref, text: t, options: options,
+      error: '下拉框「' + name + '」（' + ref + '）没有「' + t + '」这个选项，可选：' + options.join(' / ')
+        + '。若本意是切换该下拉框的选项，请在下一轮的「文本」补问里改选正确的选项名；'
+        + '若本意是把文本输入到输入框（如按买家搜索），动作应选 fill（或「生成输入」），并把「参数」改成对应的搜索框'
+    };
+  }
+
   /* 该角色的常规动词：补问时顺带指出来。fill / type / 生成输入 判不了可编辑性、
    * 拦不住（contenteditable 的 div 在快照里是 generic），只能靠这句把模型导向对的动作。 */
   var ROLE_VERB_HINT = {
-    'button': '按钮的常规动作是 click（其次 dblclick / hover）',
+    'button': '按钮的常规动作是 click（其次 hover）',
     'link': '链接的常规动作是 click',
     'row': '表格行本身通常不可点，真正的操作按钮在行内 —— 应 click 行内的那个按钮',
     'cell': '单元格本身通常不可点，操作按钮在同一个单元格或同一行内',
@@ -289,14 +335,122 @@
     return String(action);
   }
 
+  /* ---------------- 文本补问（动作确定后才问，候选按动作分型） ----------------
+   * 旧设计里「文本」与「动作」「参数」同请求作答：三题因子化各选各的，没有联合
+   * 一致性约束 —— 实测事故（订单场景第 ⑤ 步）里模型在「搜索王小明」与「切换
+   * 发货状态」两个子目标间摇摆，拼出 select e15 "王小明"（选项不存在）的嵌合
+   * 决策。现在文本题延后：动作 + 参数落定后，候选只服务这个已确定的动作 ——
+   * select 给下拉框的真实选项名（结构性消灭「选项不存在」这类错误），
+   * press 给变量池 ∪ 常用键名，其余文本动作给变量池。 */
+  var COMMON_KEY_NAMES = ['Enter', 'Escape', 'Tab', 'ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End', 'Space', 'Delete', 'Backspace'];
+  var KEY_HINTS = {
+    'Enter': '确认 / 提交 / 打开选中项',
+    'Escape': '关闭浮层 / 取消',
+    'Tab': '焦点移到下一个控件',
+    'ArrowDown': '下移一项（下拉 / 列表）',
+    'ArrowUp': '上移一项',
+    'PageDown': '向下翻一页（滚动页面）',
+    'PageUp': '向上翻一页',
+    'Home': '跳到开头',
+    'End': '跳到末尾',
+    'Space': '空格（勾选 / 滚动一屏）',
+    'Delete': '删除',
+    'Backspace': '退格删除'
+  };
+
+  /* 变量池 → criteria（「取值：xxx」与旧文本题同构，Jev 见过的形状不变） */
+  function variableTextCriteria(variables) {
+    var out = {};
+    (variables || []).forEach(function (v) {
+      if (v && v.name && v.value != null && !out[v.name]) out[v.name] = '取值：' + v.value;
+    });
+    return out;
+  }
+
+  /* 返回 { '文本': {…} } 单题；无需文本 / 必填动作零候选 → null（builder 不抛错，
+   * 调用方据此记确定性失败步，别把「构造不出来」当成运行时异常） */
+  function buildTextFollowUp(ctx) {
+    var o = ctx || {};
+    var action = o.action;
+    if (!needText(action)) return null;
+
+    var variables = (o.variables || []).filter(function (v) { return v && v.name; });
+    var criteria = {};
+    var optionListNote = '';
+    if (action === 'select') {
+      /* 选项名直出（不与变量池混选：两个来源的语义不同，混了就又回到旧题的摇摆面） */
+      var names = selectOptionNames(o.snapshot, o.param);
+      if (names) {
+        names.forEach(function (n) { criteria[n] = '该下拉框的选项'; });
+        optionListNote = '候选就是该下拉框当前的真实选项，必须从中选择。';
+      } else {
+        /* 读不到名单（快照形态变化 / ref 已失效）：退回变量池兜底，宁可漏拦不可拦死 */
+        criteria = variableTextCriteria(variables);
+        optionListNote = '未能从快照读出该下拉框的选项名单，候选退回变量池。';
+      }
+    } else if (action === 'press') {
+      criteria = variableTextCriteria(variables);
+      COMMON_KEY_NAMES.forEach(function (k) {
+        if (!criteria[k]) criteria[k] = '键名：' + (KEY_HINTS[k] || k);   // 变量与键名撞名时变量优先（用户显式意图）
+      });
+    } else {
+      criteria = variableTextCriteria(variables);
+    }
+    if (TEXT_OPTIONAL_ACTIONS[action]) criteria[TEXT_NONE] = '本动作不需要输入文本';
+
+    /* 零候选 → null：必填动作（fill/press…）无值可选、可选动作只剩「无」一项 ——
+     * 都无从问起，调用方据此记确定性失败步 */
+    var keys = Object.keys(criteria);
+    if (!keys.length || (TEXT_OPTIONAL_ACTIONS[action] && keys.length === 1 && keys[0] === TEXT_NONE)) return null;
+
+    var target = '';
+    if (o.refLabel) target = '，目标元素 ' + o.param + '「' + String(o.refLabel).replace(/^【[^】]*】\s*/, '') + '」';
+    else if (o.param && o.param !== REF_NONE) target = '，目标元素 ' + o.param;
+    var instructions = '已确定动作 ' + action + target + '。'
+      + (action === 'select'
+        ? '这个动作的文本就是要选定的选项名。' + optionListNote
+        : action === 'press'
+          ? '请选出要按下的键（变量优先，其次常用键名）。'
+          : '该动作需要输入文本，请选出应使用的值。')
+      + (TEXT_OPTIONAL_ACTIONS[action] ? '本动作也可以不带文本，不需要就选「无」。' : '');
+    return { '文本': { type: 'choice', instructions: instructions, criteria: criteria } };
+  }
+
+  /* 补问只回一道「文本」题（形状与 parseParamAnswer 一致，分工也一致） */
+  function parseTextAnswer(answers) {
+    var a = answers || {};
+    var text = a['文本'] && a['文本'].choice;
+    if (!text) throw new Error('Jev 未返回「文本」选项');
+    return String(text);
+  }
+
+  /* ---------------- 原生弹窗（modal state）----------------
+   * 页面触发 confirm/alert/prompt 后，playwright 的工具会拒绝执行并报
+   * "does not handle the modal state" —— 这不是故障，是页面被对话框阻塞。
+   * 主循环把这种快照失败转成「弹窗步」：快照换成一句说明文本，只问一道
+   * 「动作」题（形状与补问一致，单题形态合法），Jev 决定接受还是取消；
+   * 处理完弹窗，下一轮即恢复正常快照。修复前这里直接以 error 终止整个运行。 */
+  var DIALOG_SNAPSHOT_NOTE = '（页面正被浏览器原生对话框 confirm/alert/prompt 阻塞，快照不可用，页面冻结在弹窗出现前的状态；本轮只需决定如何处理弹窗）';
+
+  function isModalSnapshotError(errText) {
+    return /modal state/i.test(String(errText || ''));
+  }
+
+  function buildDialogQuestions() {
+    return {
+      '动作': {
+        type: 'choice',
+        instructions: '上一步操作触发了浏览器原生对话框（confirm 确认框 / alert 提示框 / prompt 输入框），页面被阻塞、快照不可用。'
+          + '请决定如何处理这个对话框：按任务目标对确认框选择「dialog-accept（接受）」或「dialog-dismiss（取消）」，alert 只能接受。'
+          + '处理完弹窗页面才会恢复，之后的步骤再继续操作页面本身。',
+        criteria: { 'dialog-accept': AUTO_TOOLS['dialog-accept'], 'dialog-dismiss': AUTO_TOOLS['dialog-dismiss'] }
+      }
+    };
+  }
+
   function buildQuestions(ctx) {
     var snapshot = ctx.snapshot || '';
-    var variables = (ctx.variables || []).filter(function (v) { return v && v.name; });
     var param = ctx.param || paramCriteria(ctx);
-
-    var textCriteria = {};
-    variables.forEach(function (v) { textCriteria[v.name] = '取值：' + v.value; });
-    textCriteria[TEXT_NONE] = '本动作不需要输入文本（点击 / 勾选 / 导航回退 / 生成输入等）';
 
     return {
       '动作': {
@@ -308,7 +462,7 @@
           + '先按目标元素的角色挑动词（选项描述里已标出角色，如 button "发货"、combobox "订单状态"）：'
           + '按钮 / 链接 / 表格行 / 任意可点元素 → click；输入框 / 文本域 → fill；'
           + '复选框 / 单选框 → check / uncheck；原生下拉框（combobox）→ select；文件 → upload；'
-          + '仅滚动 / 仅等待 → 无操作。'
+          + '滚动页面 → press（键名在动作确定后的「文本」补问里选，常用 PageDown / PageUp）；仅等待页面变化 → 无操作。'
           + '若目标已达成选「任务已完成」；当前页面无法完成任务选「放弃」。',
         criteria: Object.assign({}, AUTO_TOOLS, TERMINAL_TOOLS)
       },
@@ -317,21 +471,12 @@
         instructions: paramInstructions(param),
         criteria: param.criteria || refCriteria(snapshot)
       },
-      '文本': {
-        type: 'choice',
-        /* 举例里刻意不写 select：它会与「动作」题的 select 选项呼应，二次抬高那个词在模型眼里的显著度 */
-        instructions: '需要输入文本的动作（fill / type / 下拉框选择 / press / goto / upload 等）应使用哪个变量的值？不需要文本的动作选「无」。',
-        criteria: textCriteria
-      },
       '未完成': {
         type: 'score',
-        instructions: '对「任务目标的未完成程度」打分：0 = 已完成，1 = 尚未开始。以页面快照当前呈现的状态为准。',
+        instructions: '对「任务目标的未完成程度」打分：0 = 已完成，1 = 未完成。以页面快照和当前状态为准。',
         criteria: [
           '0 · 已完成：目标结果已体现在页面上',
-          '0.25 · 基本完成：只剩无关紧要的收尾',
-          '0.5 · 进行中：关键步骤完成了一半',
-          '0.75 · 刚开始：已定位目标但尚未操作',
-          '1 · 未开始或远未达成'
+          '1 · 进行中：关键步骤进行中，仍未完成'
         ]
       }
     };
@@ -353,7 +498,10 @@
     return {
       action: action,
       param: (a['参数'] && a['参数'].choice) || REF_NONE,
-      text: (a['文本'] && a['文本'].choice) || TEXT_NONE,
+      /* 文本不再随首轮作答（动作感知的候选没法提前构造）—— 需要文本的动作
+       * 在动作+参数落定后走 buildTextFollowUp 补问。容错：旧上游多回的「文本」
+       * 答案直接忽略，不在这里消费。 */
+      text: null,
       unfinished: rawScore / (SCORE_LEVELS - 1)
     };
   }
@@ -519,8 +667,17 @@
     paramInstructions: paramInstructions,
     refRoles: refRoles,
     checkActionRole: checkActionRole,
+    selectOptionNames: selectOptionNames,
+    checkSelectOption: checkSelectOption,
     buildActionFollowUp: buildActionFollowUp,
     parseActionAnswer: parseActionAnswer,
+    COMMON_KEY_NAMES: COMMON_KEY_NAMES,
+    KEY_HINTS: KEY_HINTS,
+    buildTextFollowUp: buildTextFollowUp,
+    parseTextAnswer: parseTextAnswer,
+    DIALOG_SNAPSHOT_NOTE: DIALOG_SNAPSHOT_NOTE,
+    isModalSnapshotError: isModalSnapshotError,
+    buildDialogQuestions: buildDialogQuestions,
     buildState: buildState,
     compressHistory: compressHistory,
     buildQuestions: buildQuestions,

@@ -10,6 +10,8 @@
  *   S2 连续模式 · 搜索邮件（生成输入 → LLM → fill 闭环）
  *   S3 单步确认 · 归档（逐轮人工代理点「执行本步」）
  *   S4 步数上限=2 · 不可完成任务 → 触发上限终止
+ *   S5 原生弹窗 · 删除邮件（click 触发 confirm → 快照被拒 → 弹窗步 dialog-accept）
+ *   S6 订单后台 · select 的「文本」补问（候选=下拉框真实选项，事故场景回归）
  * 运行：node tests/e2e/run.js   （或 npm run test:e2e）
  */
 'use strict';
@@ -27,6 +29,9 @@ const UPSTREAM = process.env.E2E_UPSTREAM || 'mock';
 /* E2E 跑哪个内核：默认跟随应用默认（chrome），JEVDEMO_BROWSER=msedge 可覆盖。
  * 原先写死 msedge，每次验收都会弹 Edge。 */
 const BROWSER = process.env.JEVDEMO_BROWSER || 'chrome';
+/* 只跑指定场景（E2E_ONLY=s5 / s1,s3）：调试或复核单个场景时避免整套弹窗打扰 */
+const ONLY = (process.env.E2E_ONLY || '').toLowerCase();
+const want = (id) => !ONLY || ONLY.split(',').map((s) => s.trim()).includes(id);
 const UI = 'e2eui';                       /* 我方驱动 playground 页的 playwright 会话 */
 const EVID_DIR = path.join(__dirname, '..', '..', 'docs', 'superpowers', 'evidence');
 
@@ -65,20 +70,32 @@ function findRefs(snapshotText, matcher) {
   return parseSnapshotRefs(snapshotText).filter((r) => matcher.test(r.label));
 }
 async function clickLabel(matcher, nth) {
-  const snap = await snapUI();
-  const refs = findRefs(snap, matcher);
-  const hit = refs[nth == null ? 0 : nth];
-  if (!hit) throw new Error('UI 上找不到控件：' + matcher + '（快照 ' + snap.length + ' 字符）');
+  let hit = await findLabel(matcher, nth);
+  if (!hit) throw new Error('UI 上找不到控件：' + matcher);
   const r = await driver.act(UI, 'click', hit.ref, null);
   if (!r.ok) throw new Error('click ' + hit.ref + ' 失败：' + r.error);
   await sleep(400);
   return hit;
 }
+/* AX 快照偶发取到 DOM 更新中的瞬间（实测：S5 setTask 时一次快照里没有
+ * 「✎ 编辑配置」）—— 找不到时重试一次再判缺失，两拍都空才算真没有。 */
+async function findLabel(matcher, nth) {
+  let snap = await snapUI();
+  let refs = findRefs(snap, matcher);
+  let hit = refs[nth == null ? 0 : nth];
+  if (hit) return hit;
+  await sleep(900);
+  snap = await snapUI();
+  refs = findRefs(snap, matcher);
+  hit = refs[nth == null ? 0 : nth];
+  if (!hit) {
+    fs.writeFileSync(path.join(EVID_DIR, 'findlabel-miss-flat.txt'), snap, 'utf8');
+    throw new Error('UI 上找不到控件：' + matcher + '（快照 ' + snap.length + ' 字符已存证）');
+  }
+  return hit;
+}
 async function fillLabel(matcher, text, nth) {
-  const snap = await snapUI();
-  const refs = findRefs(snap, matcher);
-  const hit = refs[nth == null ? 0 : nth];
-  if (!hit) throw new Error('UI 上找不到输入框：' + matcher);
+  const hit = await findLabel(matcher, nth);
   const r = await driver.act(UI, 'fill', hit.ref, text);
   if (!r.ok) throw new Error('fill ' + hit.ref + ' 失败：' + r.error);
   await sleep(300);
@@ -278,7 +295,7 @@ async function configureMock(sysonePort, llmPort) {
   }
 
   /* ---------- S1 连续 · 归档 9 月对账单 ---------- */
-  try {
+  if (want('s1')) try {
     await setTask({ goal: GOAL_ARCHIVE, url: DEMO_URL, cadence: '连续自动' });
     const t0 = Date.now();
     await clickLabel(/打开浏览器并开始/);
@@ -312,7 +329,7 @@ async function configureMock(sysonePort, llmPort) {
   } catch (e) { record('S1 连续模式 · 归档对账单', false, e.message); }
 
   /* ---------- S2 连续 · 搜索（生成输入 → LLM → fill 闭环） ---------- */
-  try {
+  if (want('s2')) try {
     await resetMailbox();
     await setTask({ goal: '在邮箱里搜索出所有招商银行相关的邮件', url: DEMO_URL, cadence: '连续自动' });
     await clickLabel(/打开浏览器并开始/);
@@ -330,7 +347,7 @@ async function configureMock(sysonePort, llmPort) {
   } catch (e) { record('S2 生成输入闭环', false, e.message); }
 
   /* ---------- S3 单步确认 · 逐轮点「执行本步」 ---------- */
-  try {
+  if (want('s3')) try {
     await resetMailbox();
     await setTask({ goal: GOAL_ARCHIVE, url: DEMO_URL, cadence: '单步确认' });
     await clickLabel(/打开浏览器并开始/);
@@ -359,7 +376,7 @@ async function configureMock(sysonePort, llmPort) {
   } catch (e) { record('S3 单步确认模式', false, e.message); }
 
   /* ---------- S4 步数上限=2 ---------- */
-  try {
+  if (want('s4')) try {
     await resetMailbox();
     await setTask({ goal: '把收件箱里的所有邮件都归档', url: DEMO_URL, maxSteps: 2, cadence: '连续自动' });
     await clickLabel(/打开浏览器并开始/);
@@ -371,11 +388,67 @@ async function configureMock(sysonePort, llmPort) {
     await saveShot('e2e-s4-maxsteps');
   } catch (e) { record('S4 步数上限终止', false, e.message); }
 
+  /* ---------- S5 原生弹窗 · 删除（click 删除 → confirm → 弹窗步 → dialog-accept） ----------
+   * 修复前的行为：confirm 打开后 snapshot 报 "does not handle the modal state"，
+   * 循环以 error 终止、邮件没删成。现在这一轮转为弹窗步（只问一道动作题），
+   * 处理完弹窗继续。断言三件事：邮件真删了（已删除 1 封 + 8 月不在列表 + 9 月保留）、
+   * 正常走完（state=done 而非 error）、UI 上能看到 dialog-accept 这步。 */
+  if (want('s5')) try {
+    await resetMailbox();
+    await setTask({ goal: '在收件箱里删除 8 月电子对账单那封邮件，浏览器弹出确认框时选择接受', url: DEMO_URL, maxSteps: 6, cadence: '连续自动' });
+    await clickLabel(/打开浏览器并开始/);
+    const { flat: flat5, state: state5 } = await waitEnd('s5-terminal');
+    await sleep(1500);
+    const box = await taskSnapshot();
+    const okMail = /已删除 1 封/.test(box)
+      && !/listitem "邮件[^"]*8 月电子对账单/.test(box)
+      && /listitem "邮件[^"]*9 月电子对账单/.test(box);
+    const sawDialog = /处理弹窗 · dialog-accept/.test(flat5) || /dialog-accept/.test(flat5);
+    record('S5 原生弹窗（confirm → 弹窗步 → dialog-accept → 恢复循环）',
+      okMail && state5 === 'done' && sawDialog,
+      '邮箱状态=' + (okMail ? '已删除 1 封、9 月保留' : '异常')
+      + '；终止 state=' + state5
+      + '；UI 可见弹窗步=' + sawDialog);
+    await saveShot('e2e-s5-dialog');
+  } catch (e) { record('S5 原生弹窗', false, e.message); }
+
+  /* ---------- S6 订单后台 · select 的「文本」补问（事故场景的结构性回归） ----------
+   * 旧 4 题制的事故路径：模型在「搜索买家王小明」与「切换发货状态」两个子目标间
+   * 摇摆，拼出 select e15 "王小明"（下拉框里根本没有这个选项）。现在「文本」延后
+   * 到动作+参数落定后单题补问，候选就是该下拉框当时的真实选项名 —— 本场景断言：
+   * 补问真的发生且 UI 可见、oracle 答案落在候选内（M1 的违规面）、select 执行后
+   * 目标选项真的 [selected]、循环正常收敛 done。 */
+  if (want('s6')) try {
+    await setTask({ goal: '在「订单状态」下拉框选择「已付款待发货」', url: ORIGIN + '/demo/orders.html', maxSteps: 5, cadence: '连续自动' });
+    await clickLabel(/打开浏览器并开始/);
+    const { state: state6 } = await waitEnd('s6-terminal');
+    await sleep(1500);
+    /* 补问记录渲染在步骤卡的 <details class="req-details"> 里，落定后是折叠态 ——
+     * aria 快照只收可见文本，先在页内展开全部请求信息再取一次平面快照 */
+    await rawExec(['eval',
+      "(function(){document.querySelectorAll('details.req-details').forEach(function(d){d.open=true});return 'ok'})()",
+      '--json']);
+    await sleep(500);
+    const flat6 = (await snapUI()).replace(/\s+/g, ' ');
+    fs.writeFileSync(path.join(EVID_DIR, 's6-terminal-flat.txt'), flat6, 'utf8');
+    const box = await taskSnapshot();
+    const okSelect = /option "已付款待发货"[^\n]*\[selected\]/.test(box);
+    const sawFollowUp = /文本补问/.test(flat6) && /已选定 已付款待发货/.test(flat6);
+    const sawCmd = /select【e\d+ · 订单状态】 "已付款待发货"/.test(flat6);
+    record('S6 select 文本补问（候选=真实选项 → 选中已付款待发货）',
+      okSelect && sawFollowUp && sawCmd && state6 === 'done',
+      '下拉框=' + (okSelect ? '已选中' : '未选中')
+      + '；UI 补问记录=' + sawFollowUp
+      + '；时间线命令=' + (sawCmd ? 'select 命中' : '未见')
+      + '；终止 state=' + state6);
+    await saveShot('e2e-s6-select');
+  } catch (e) { record('S6 select 文本补问', false, e.message); }
+
   /* ---------- 构造契约终审 + LLM prompt 可见性 ---------- */
   if (mocks) {
     try {
       const rep = await mocks.report();
-      record('M1 前端构造契约（每请求 4 问 / 31 动作候选 / 参数=快照全量 ref）',
+      record('M1 前端构造契约（每请求 3 问 / 23 动作候选 / 参数候选 ⊆ 快照 ref（密集页自动裁剪））',
         rep.violations.length === 0,
         rep.violations.length ? rep.violations.slice(0, 4).join(' | ') : '共 ' + rep.reqCount + ' 次请求零违规');
       /* oracle 每轮决策日志（排障证据） */
@@ -384,8 +457,11 @@ async function configureMock(sysonePort, llmPort) {
         && rep.llmCalls[0].prompt.some((m) => /在邮箱里搜索出所有招商银行相关的邮件/.test(m.content))
         && rep.llmCalls[0].prompt.some((m) => /搜索邮件/.test(m.content))
         && rep.llmCalls[0].auth === 'Bearer mock-llm-key';
-      record('M2 LLM prompt 工程（目标+字段上下文注入，key 经请求头透传）', llmOk,
-        'llm 调用 ' + rep.llmCalls.length + ' 次');
+      /* LLM 只在 S2 被调用：E2E_ONLY 过滤掉 S2 时这条没有断言面，不参与判定 */
+      if (want('s2')) {
+        record('M2 LLM prompt 工程（目标+字段上下文注入，key 经请求头透传）', llmOk,
+          'llm 调用 ' + rep.llmCalls.length + ' 次');
+      }
       mocks.close();
     } catch (e) { record('M1/M2 mock 终审', false, e.message); }
   }

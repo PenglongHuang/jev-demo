@@ -3,7 +3,7 @@
  *
  * 职责（设计文档 §5）：
  *  - 以子进程方式调用全局安装的 playwright-cli（Windows 下是 .cmd，必须 shell:true）
- *  - 命令白名单硬校验：Jev 只能触发设计 §7 的 27 个浏览器操作，其余一律拒绝
+ *  - 命令白名单硬校验：Jev 只能触发设计 §7 的 19 个浏览器操作，其余一律拒绝
  *  - 每条命令 30s 超时强杀；输出统一走 --json 包裹（成功 {result} / 失败 {isError,error}）
  *  - cwd 固定为 data/（由 server.js 注入 driver.dataDir），截图工件落在 data/ 下
  *
@@ -33,32 +33,25 @@ const IS_WIN = process.platform === 'win32';
 const CMD_TIMEOUT_MS = 30000;      // 每条命令 30s 超时（设计 §11）
 const VERSION_CACHE_MS = 60000;    // playwright-cli 安装探测缓存 60s（设计 §4）
 
-/* ---------------- 白名单 + 参数形状（设计 §7：27 个浏览器操作） ----------------
+/* ---------------- 白名单 + 参数形状（设计 §7：19 个浏览器操作） ----------------
  * ref:    需要 ref（元素定位，来自快照）
- * text:   需要文本参数（变量池 / LLM 生成）
+ * text:   需要文本参数（变量池 / 下拉框选项名 / 键名 / LLM 生成）
  * optional: 文本可省（tab-new 的 URL、dialog-accept 的 prompt、tab-close 的序号）
  * url:    文本必须是 http(s) URL
  * int:    文本必须是非负整数（标签页序号）
- * pair:   文本必须是 "x,y" 整数对（鼠标坐标 / 滚轮增量）
+ * 坐标鼠标 / 修饰键 / 双击 / 拖拽 8 个动作随 auto-core 裁剪同步移除
+ * （a11y 快照驱动下不可达或无场景），此处硬拒绝防回潮。
  * 读取 / 存储 / 网络 / 会话 / 调试类命令一律不在表内 = 硬拒绝。 */
 const OPS = {
   click: { ref: true },
-  dblclick: { ref: true },
   fill: { ref: true, text: true },
   type: { ref: true, text: true },
   select: { ref: true, text: true },
   check: { ref: true },
   uncheck: { ref: true },
   hover: { ref: true },
-  drop: { ref: true },
   upload: { text: true },
   press: { text: true },
-  keydown: { text: true },
-  keyup: { text: true },
-  mousemove: { text: true, pair: true },
-  mousedown: {},
-  mouseup: {},
-  mousewheel: { text: true, pair: true },
   goto: { text: true, url: true },
   'go-back': {},
   'go-forward': {},
@@ -106,7 +99,6 @@ function validateAct(command, ref, text) {
     if (/["%\r\n]/.test(t)) throw new Error('文本参数含有不允许的字符（双引号、百分号或换行）');
     if (shape.url && !/^https?:\/\//i.test(t)) throw new Error('命令 ' + command + ' 的文本必须是 http:// 或 https:// 开头的 URL');
     if (shape.int && !/^\d+$/.test(t)) throw new Error('命令 ' + command + ' 的文本必须是非负整数（标签页序号）');
-    if (shape.pair && !/^\s*-?\d+\s*,\s*-?\d+\s*$/.test(t)) throw new Error('命令 ' + command + ' 的文本必须是 "x,y" 整数坐标对');
     outText = t;
   }
   if (shape.text && !shape.optional && outText == null) {
@@ -119,7 +111,7 @@ function validateAct(command, ref, text) {
 function buildArgv(command, ref, text) {
   const v = validateAct(command, ref, text);
   if (v.ref != null && v.text != null) return [v.op, v.ref, v.text];   // fill/type/select
-  if (v.ref != null) return [v.op, v.ref];                             // click/dblclick/check/...
+  if (v.ref != null) return [v.op, v.ref];                             // click/check/hover/...
   if (v.text != null) return [v.op, v.text];                           // press/goto/tab-select/...
   return [v.op];                                                       // 无参动作
 }
@@ -168,18 +160,59 @@ function run(session, args, opts) {
 }
 
 /* --json 的输出形状不统一：多数命令是 {result: "..."}，失败是 {isError, error}，
- * 而 snapshot 直接输出 {snapshot: "..."} 对象（实测 v0.1.17）。
- * 这里把对象形结果解包成文本：优先 snapshot / result / text 字段。 */
+ * snapshot 在 v0.1.17 直接输出 {snapshot: "YAML 文本"}，0.1.18+ 变成
+ * {snapshot: […无障碍树…]}（转写见上）。click/open 返回的 {snapshot:{file}}
+ * 是工件路径不是树，不在此列。这里把对象形结果解包成文本：优先
+ * snapshot（字符串原样 / 数组转写）→ result → text 字段。 */
 function unwrapResult(r) {
   if (typeof r === 'string') return r;
   if (r && typeof r === 'object') {
     if (typeof r.snapshot === 'string') return r.snapshot;
+    if (Array.isArray(r.snapshot)) return treeToSnapshotYaml(r.snapshot);
     if (typeof r.result === 'string') return r.result;
     if (typeof r.text === 'string') return r.text;
     if (!Object.keys(r).length) return '';
     return JSON.stringify(r, null, 2);
   }
   return r == null ? '' : String(r);
+}
+
+/* ---------------- 0.1.18+ 结构化快照 → YAML 文本转写 ----------------
+ * @playwright/cli 0.1.18 起 snapshot --json 的输出从 {snapshot:"YAML 字符串"}
+ * 变成 {snapshot:[…无障碍树…]}（node 键：role/name/text/ref/children/cursor/
+ * level/active/selected/disabled…，输入框的值也走 text）。下游全部吃 YAML 行
+ * 格式（util.parseSnapshotRefs、auto-core state 组装、冒烟断言），这里按 0.1.17
+ * 对同一页面的实测行格式逐行转写回去：
+ *   <2×depth 空格>- role "name" [level=N] [flag…] [ref=eN] [cursor=pointer][: text]
+ * 有 children 的行以裸 ":" 结尾（text 与 children 并存时 YAML 无法同时表达，
+ * children 优先 —— 实测简历页 404 节点中 0 个并存）。name 用 JSON.stringify
+ * 加引号、text 折叠空白；不做 YAML 标量转义 —— 消费方是自家解析器与 Jev
+ * 提示词，不是 YAML 解析器（0.1.17 的单引号包裹反而会污染首词 role 提取）。 */
+const TREE_FLAG_KEYS = ['active', 'checked', 'disabled', 'expanded', 'selected'];   // 布尔标记，固定顺序输出保证确定性
+
+function renderTreeNode(node, depth, lines) {
+  if (!node || typeof node !== 'object') return;
+  let line = '- ' + String(node.role || 'generic');
+  if (node.name != null) line += ' ' + JSON.stringify(String(node.name));
+  if (node.level != null) line += ' [level=' + node.level + ']';
+  TREE_FLAG_KEYS.forEach((k) => { if (node[k] === true) line += ' [' + k + ']'; });
+  if (node.ref != null) line += ' [ref=' + node.ref + ']';
+  if (node.cursor != null) line += ' [cursor=' + node.cursor + ']';
+  const kids = Array.isArray(node.children) ? node.children : null;
+  if (kids && kids.length) {
+    lines.push('  '.repeat(depth) + line + ':');
+    kids.forEach((c) => renderTreeNode(c, depth + 1, lines));
+  } else {
+    const text = node.text != null ? String(node.text).replace(/\s+/g, ' ').trim() : '';
+    lines.push('  '.repeat(depth) + line + (text ? ': ' + text : ''));
+  }
+}
+
+function treeToSnapshotYaml(tree) {
+  if (!Array.isArray(tree) || !tree.length) return '';
+  const lines = [];
+  tree.forEach((n) => renderTreeNode(n, 0, lines));
+  return lines.join('\n');
 }
 
 /* --json 包裹解析：成功 {result} / 失败 {isError,error}。
@@ -451,5 +484,5 @@ module.exports = {
   close,
   set dataDir(v) { dataDir = v; },
   get dataDir() { return dataDir; },
-  _test: { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, parseEnvelope, unwrapResult, uploadPathAllowed, parseWindowSize, buildMaximizedConfig, FULLSCREEN_SNIPPET, RECT_SNIPPET },
+  _test: { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, parseEnvelope, unwrapResult, treeToSnapshotYaml, uploadPathAllowed, parseWindowSize, buildMaximizedConfig, FULLSCREEN_SNIPPET, RECT_SNIPPET },
 };

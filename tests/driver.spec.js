@@ -31,27 +31,28 @@ test('quoteArg 拒绝双引号、百分号与换行（注入面）', () => {
 
 /* ---------- 白名单与参数校验 ---------- */
 
-test('白名单恰好覆盖设计 §7 的 27 个浏览器操作', () => {
-  assert.strictEqual(Object.keys(OPS).length, 27);
-  ['click', 'dblclick', 'fill', 'type', 'select', 'check', 'uncheck', 'hover', 'drop',
-    'upload', 'press', 'keydown', 'keyup', 'mousemove', 'mousedown', 'mouseup', 'mousewheel',
+test('白名单恰好覆盖设计 §7 的 19 个浏览器操作（裁剪后）', () => {
+  assert.strictEqual(Object.keys(OPS).length, 19);
+  ['click', 'fill', 'type', 'select', 'check', 'uncheck', 'hover',
+    'upload', 'press',
     'goto', 'go-back', 'go-forward', 'reload',
     'tab-new', 'tab-select', 'tab-close', 'tab-list', 'dialog-accept', 'dialog-dismiss']
     .forEach((k) => assert.ok(OPS[k], '缺少动作 ' + k));
 });
 
-test('白名单外与硬排除的动作一律拒绝', () => {
+test('白名单外与硬排除的动作一律拒绝（含已裁剪的 8 个，防回潮）', () => {
   ['snapshot', 'screenshot', 'eval', 'console', 'requests', 'find', 'pdf', 'resize',
     'cookie-list', 'cookie-set', 'cookie-delete', 'localstorage-set', 'sessionstorage-list',
     'route', 'unroute', 'network-state-set', 'open', 'close', 'attach', 'detach', 'list',
     'close-all', 'kill-all', 'delete-data', 'install', 'install-browser', 'state-save',
     'state-load', 'show', 'pause-at', 'resume', 'step-over', 'tracing-start', 'video-start',
-    'highlight', 'generate-locator', 'run-code', 'request', '任务已完成', '生成输入', '无操作', '']
+    'highlight', 'generate-locator', 'run-code', 'request', '任务已完成', '生成输入', '无操作', '',
+    'dblclick', 'drop', 'keydown', 'keyup', 'mousemove', 'mousedown', 'mouseup', 'mousewheel']
     .forEach((k) => assert.throws(() => validateAct(k, null, null), /不允许|白名单|未知/, '应拒绝 ' + k));
 });
 
 test('需要 ref 的动作缺 ref 时拒绝', () => {
-  ['click', 'dblclick', 'fill', 'type', 'select', 'check', 'uncheck', 'hover', 'drop'].forEach((k) => {
+  ['click', 'fill', 'type', 'select', 'check', 'uncheck', 'hover'].forEach((k) => {
     assert.throws(() => validateAct(k, null, null), /ref/, k + ' 应要求 ref');
   });
 });
@@ -85,13 +86,6 @@ test('tab-select / tab-close 只接受非负整数', () => {
   assert.throws(() => validateAct('tab-select', null, '-1'), /整数/);
   assert.throws(() => validateAct('tab-select', null, null), /文本/);
   assert.deepStrictEqual(validateAct('tab-close', null, null), { op: 'tab-close', ref: null, text: null });
-});
-
-test('mousemove / mousewheel 接受 "x,y" 整数对', () => {
-  assert.deepStrictEqual(validateAct('mousewheel', null, '0,-120'), { op: 'mousewheel', ref: null, text: '0,-120' });
-  assert.deepStrictEqual(validateAct('mousemove', null, '100, 60'), { op: 'mousemove', ref: null, text: '100, 60' });
-  assert.throws(() => validateAct('mousemove', null, 'x,y'), /坐标/);
-  assert.throws(() => validateAct('mousewheel', null, '120'), /坐标/);
 });
 
 test('无参动作不接受多余参数', () => {

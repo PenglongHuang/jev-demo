@@ -69,17 +69,21 @@ test('buildState：首步无上一步结果时给出占位说明', () => {
 
 /* ---------- buildQuestions ---------- */
 
-test('buildQuestions：固定 4 道，动作 29+2、参数来自快照、文本来自变量池、未完成 5 级', () => {
+test('buildQuestions：固定 3 道，动作 19+2+2、参数来自快照、未完成 2 级（文本已移入补问）', () => {
   const qs = AutoCore.buildQuestions({
     snapshot: SAMPLE_SNAPSHOT,
     variables: [{ name: '关键词', value: '招商银行' }, { name: '回车', value: 'Enter' }],
   });
-  assert.deepStrictEqual(Object.keys(qs), ['动作', '参数', '文本', '未完成']);
+  assert.deepStrictEqual(Object.keys(qs), ['动作', '参数', '未完成']);
+  assert.ok(!qs['文本'], '「文本」不再随首轮作答：候选依赖已定动作，构造不出来');
 
   const tools = qs['动作'].criteria;
-  assert.strictEqual(Object.keys(tools).length, 31);   // 27 浏览器操作 + 2 工程 + 2 终止
+  assert.strictEqual(Object.keys(tools).length, 23);   // 19 浏览器操作 + 2 工程 + 2 终止
   ['click', 'fill', 'goto', 'tab-list', 'dialog-accept', '生成输入', '无操作', '任务已完成', '放弃']
     .forEach((k) => assert.ok(tools[k], '动作缺少 ' + k));
+  /* 裁掉的 8 个不得回潮 */
+  ['dblclick', 'drop', 'keydown', 'keyup', 'mousemove', 'mousedown', 'mouseup', 'mousewheel']
+    .forEach((k) => assert.ok(!tools[k], '动作不应再有 ' + k));
   assert.ok(tools['生成输入'].includes('生成'));
   assert.ok(!('snapshot' in tools) && !('eval' in tools) && !('cookie-set' in tools));
 
@@ -88,14 +92,13 @@ test('buildQuestions：固定 4 道，动作 29+2、参数来自快照、文本�
   assert.ok(params.e10.includes('归档'));
   assert.strictEqual(params['无需元素'].length > 0, true);
 
-  const texts = qs['文本'].criteria;
-  assert.strictEqual(texts['关键词'], '取值：招商银行');
-  assert.strictEqual(texts['回车'], '取值：Enter');
-  assert.ok(texts['无']);
-
   assert.strictEqual(qs['未完成'].type, 'score');
-  assert.strictEqual(qs['未完成'].criteria.length, 5);
-  [qs['动作'], qs['参数'], qs['文本']].forEach((q) => assert.strictEqual(q.type, 'choice'));
+  assert.strictEqual(AutoCore.SCORE_LEVELS, 2);
+  /* 漂移守卫：级数与图例行数一旦不一致，score 归一化的分母就错了
+   * （图例 2 行、分母还按 4 算 → score 0.97 被压成未完成 24%）。 */
+  assert.strictEqual(qs['未完成'].criteria.length, AutoCore.SCORE_LEVELS,
+    '未完成 criteria 行数必须与 SCORE_LEVELS 一致');
+  [qs['动作'], qs['参数']].forEach((q) => assert.strictEqual(q.type, 'choice'));
 });
 
 /* ---------- 措辞防混淆：select 事故回归（orders 场景，模型对 button "发货" 选了 select） ----------
@@ -120,10 +123,12 @@ test('动作题 instructions：给出角色 → 动词对照', () => {
   assert.match(acts, /下拉框/);
 });
 
-test('文本题 instructions：不再列举 select（避免二次抬高它的显著性）', () => {
+test('动作题 instructions：滚动指到 press + 键名补问，等待指到无操作', () => {
   const qs = AutoCore.buildQuestions({ snapshot: SAMPLE_SNAPSHOT, variables: [] });
-  assert.ok(!qs['文本'].instructions.includes('select'),
-    '「文本」题的举例里出现 select 会让它在动作题里更显眼');
+  const acts = qs['动作'].instructions;
+  assert.match(acts, /press/);
+  assert.match(acts, /PageDown/);
+  assert.match(acts, /无操作/);
 });
 
 /* ---------- 动作 × 元素角色兼容性：不兼容就不发命令，同一步内补问「动作」 ----------
@@ -202,17 +207,22 @@ test('auto.js 里出现的 AutoCore.xxx 全部有导出', () => {
 
 /* ---------- parseDecision ---------- */
 
-test('parseDecision：choice 三道 + score 归一化到 0~1', () => {
-  const d = AutoCore.parseDecision({
+test('parseDecision：首轮两道 choice + score 归一化，text 恒为 null（旧上游多回的文本答案被忽略）', () => {
+  const mk = (score) => ({
     动作: { type: 'choice', choice: 'fill', probabilities: { fill: 0.8 } },
     参数: { type: 'choice', choice: 'e3', probabilities: { e3: 0.7 } },
     文本: { type: 'choice', choice: '关键词', probabilities: { 关键词: 0.9 } },
-    未完成: { type: 'score', score: 3, probabilities: {} },
+    未完成: { type: 'score', score, probabilities: {} },
   });
+  const d = AutoCore.parseDecision(mk(1));
   assert.strictEqual(d.action, 'fill');
   assert.strictEqual(d.param, 'e3');
-  assert.strictEqual(d.text, '关键词');
-  assert.strictEqual(d.unfinished, 0.75);
+  assert.strictEqual(d.text, null, '文本改由动作落定后的补问写入，首轮答案一律不消费');
+  assert.strictEqual(d.unfinished, 1, '2 级量表归一化分母是 1：score 原样即未完成度');
+  /* 加权均值是连续值：0.97（97% 压在「进行中」）必须保持 0.97，
+   * 不得再被 4 除压扁成 0.2425（实测事故的展示失真来源） */
+  assert.strictEqual(AutoCore.parseDecision(mk(0.97)).unfinished, 0.97);
+  assert.strictEqual(AutoCore.parseDecision(mk(0)).unfinished, 0);
 });
 
 test('parseDecision：未知动作抛错（记失败步骤由上层处理）', () => {
@@ -227,7 +237,7 @@ test('parseDecision：缺失/非法「未完成」分值一律抛错（绝不默
   assert.throws(() => AutoCore.parseDecision(Object.assign({}, ok, { 未完成: {} })), /未完成/);            // score 缺失
   assert.throws(() => AutoCore.parseDecision(Object.assign({}, ok, { 未完成: { score: null } })), /未完成/); // null
   assert.throws(() => AutoCore.parseDecision(Object.assign({}, ok, { 未完成: { score: '2' } })), /未完成/);  // 字符串
-  assert.throws(() => AutoCore.parseDecision(Object.assign({}, ok, { 未完成: { score: 5 } })), /未完成/);   // 超出 0~4
+  assert.throws(() => AutoCore.parseDecision(Object.assign({}, ok, { 未完成: { score: 3 } })), /未完成/, '旧 5 级量表的分值在 2 级量表下非法');  // 超出 0~1
   assert.throws(() => AutoCore.parseDecision(Object.assign({}, ok, { 未完成: { score: -1 } })), /未完成/);
 });
 
@@ -439,4 +449,200 @@ test('parseParamAnswer：补问只回「参数」一题，不要求「动作」�
   assert.strictEqual(AutoCore.parseParamAnswer({ 参数: { type: 'choice', choice: '无需元素' } }), '无需元素');
   assert.throws(() => AutoCore.parseParamAnswer({}), /参数/);
   assert.throws(() => AutoCore.parseParamAnswer({ 参数: {} }), /参数/);
+});
+
+/* ---------- 原生弹窗（modal state）：快照被拒 → 弹窗步 ---------- */
+
+test('isModalSnapshotError：只认 modal state 拒绝，不误伤其它快照失败', () => {
+  assert.strictEqual(AutoCore.isModalSnapshotError('Tool "browser_snapshot" does not handle the modal state'), true);
+  assert.strictEqual(AutoCore.isModalSnapshotError('Error: page crashed'), false);
+  assert.strictEqual(AutoCore.isModalSnapshotError('获取快照超时'), false);
+  assert.strictEqual(AutoCore.isModalSnapshotError(''), false);
+  assert.strictEqual(AutoCore.isModalSnapshotError(null), false);
+});
+
+test('buildDialogQuestions：单道「动作」题，候选只有接受/取消弹窗（描述与 23 候选同源）', () => {
+  const qs = AutoCore.buildDialogQuestions();
+  assert.deepStrictEqual(Object.keys(qs), ['动作']);
+  assert.strictEqual(qs['动作'].type, 'choice');
+  assert.deepStrictEqual(Object.keys(qs['动作'].criteria), ['dialog-accept', 'dialog-dismiss']);
+  assert.match(qs['动作'].instructions, /对话框|弹窗/);
+  assert.strictEqual(qs['动作'].criteria['dialog-accept'], AutoCore.AUTO_TOOLS['dialog-accept']);
+  assert.strictEqual(qs['动作'].criteria['dialog-dismiss'], AutoCore.AUTO_TOOLS['dialog-dismiss']);
+});
+
+test('DIALOG_SNAPSHOT_NOTE：说明文本里不能混进 ref（弹窗步不该有可点元素候选）', () => {
+  assert.ok(!/\[ref=/.test(AutoCore.DIALOG_SNAPSHOT_NOTE));
+  assert.match(AutoCore.DIALOG_SNAPSHOT_NOTE, /对话框/);
+});
+
+test('planExecution：弹窗决策走 act、无 ref、文本可省（与 driver 白名单 optional 一致）', () => {
+  assert.deepStrictEqual(
+    AutoCore.planExecution({ action: 'dialog-accept', param: null, text: null }, []),
+    { kind: 'act', op: 'dialog-accept', ref: null, text: null });
+  assert.deepStrictEqual(
+    AutoCore.planExecution({ action: 'dialog-dismiss', param: null, text: '无' }, []),
+    { kind: 'act', op: 'dialog-dismiss', ref: null, text: null });
+});
+
+test('checkActionRole：弹窗动作不参与角色兼容校验（无元素可言）', () => {
+  assert.deepStrictEqual(
+    AutoCore.checkActionRole({ action: 'dialog-accept', param: null }, { e10: 'button' }),
+    { conflict: false });
+});
+
+test('parseActionAnswer 可解析弹窗步答案（形状与动作补问同一族）', () => {
+  assert.strictEqual(AutoCore.parseActionAnswer({ 动作: { type: 'choice', choice: 'dialog-accept' } }), 'dialog-accept');
+});
+
+/* ---------- select 选项预检：目标选项不在下拉框名单内 → 发命令前拦下 ---------- */
+
+const ORDERS_SNAPSHOT = require(path.join(ROOT, 'tests', 'fixtures', 'orders-snapshot.js'));
+const ORDERS = ORDERS_SNAPSHOT.SNAPSHOT || String(ORDERS_SNAPSHOT);
+
+test('selectOptionNames：读到 combobox 子树的全部选项名（真实订单页快照）', () => {
+  assert.deepStrictEqual(AutoCore.selectOptionNames(ORDERS, 'e15'),
+    ['全部状态', '已付款待发货', '待付款', '已发货', '已签收', '已取消']);
+});
+
+test('checkSelectOption：选项存在 → 放行；不存在 → 拦下并给可选清单与纠偏提示', () => {
+  assert.deepStrictEqual(AutoCore.checkSelectOption(ORDERS, 'e15', '已付款待发货'), { conflict: false });
+  const bad = AutoCore.checkSelectOption(ORDERS, 'e15', '王小明');
+  assert.strictEqual(bad.conflict, true);
+  assert.match(bad.error, /订单状态/);
+  assert.match(bad.error, /王小明/);
+  assert.match(bad.error, /已付款待发货/);
+  assert.match(bad.error, /fill|搜索框/);
+});
+
+test('checkSelectOption：读不到选项名单一律放行（宁可漏报，交回浏览器判定）', () => {
+  /* ref 不在快照里 */
+  assert.deepStrictEqual(AutoCore.checkSelectOption(ORDERS, 'e999', '随便什么'), { conflict: false });
+  /* ref 是按钮（无 option 子节点） */
+  const btn = AutoCore.checkSelectOption(SAMPLE_SNAPSHOT, 'e10', '王小明');
+  assert.deepStrictEqual(btn, { conflict: false });
+  /* 文本两侧空白不影响命中 */
+  assert.deepStrictEqual(AutoCore.checkSelectOption(ORDERS, 'e15', ' 已发货 '), { conflict: false });
+});
+
+/* ---------- 文本补问：动作落定后才问，候选按动作分型 ----------
+ * 结构性修复的锚点：旧 4 题制里「文本」与「动作」同请求作答，模型在「搜索王小明」
+ * 与「切换发货状态」两个子目标间摇摆，拼出 select e15 "王小明"（选项不存在）。
+ * 现在候选只在动作确定之后构造 —— select 直接给该下拉框的真实选项名，
+ * 「在订单状态下拉框选王小明」从候选层面就不可能出现。 */
+
+const ORDERS_VARS = [
+  { name: '买家', value: '王小明' },
+  { name: '待发货状态', value: '已付款待发货' },
+];
+
+test('buildTextFollowUp · select：候选 = 该下拉框的全部真实选项名，变量池不混入', () => {
+  const q = AutoCore.buildTextFollowUp({
+    action: 'select', param: 'e15', snapshot: ORDERS, variables: ORDERS_VARS,
+    refLabel: '【可交互】 combobox "订单状态"',
+  });
+  assert.deepStrictEqual(Object.keys(q), ['文本']);
+  assert.deepStrictEqual(Object.keys(q['文本'].criteria),
+    ['全部状态', '已付款待发货', '待付款', '已发货', '已签收', '已取消']);
+  /* 变量池里的「王小明」「已付款待发货」绝不作为变量混进 select 候选 ——
+   * 两个来源语义不同，混了就又回到旧题的摇摆面 */
+  assert.strictEqual(q['文本'].criteria['买家'], undefined);
+  assert.match(q['文本'].instructions, /select/);
+  assert.match(q['文本'].instructions, /e15/);
+  assert.match(q['文本'].instructions, /订单状态/);
+  assert.match(q['文本'].instructions, /真实选项|必须从中选择/);
+});
+
+test('buildTextFollowUp · select 读不到名单：退回变量池兜底，instructions 说明', () => {
+  const q = AutoCore.buildTextFollowUp({
+    action: 'select', param: 'e999', snapshot: ORDERS, variables: ORDERS_VARS, refLabel: '',
+  });
+  assert.deepStrictEqual(Object.keys(q['文本'].criteria), ['买家', '待发货状态']);
+  assert.strictEqual(q['文本'].criteria['买家'], '取值：王小明');
+  assert.match(q['文本'].instructions, /变量池/);
+});
+
+test('buildTextFollowUp · press：变量 ∪ 常用键名，撞名时变量优先', () => {
+  const vars = [{ name: 'Enter', value: 'Return' }, { name: '翻页键', value: 'PageDown' }];
+  const q = AutoCore.buildTextFollowUp({
+    action: 'press', param: '无需元素', snapshot: '', variables: vars, refLabel: '',
+  });
+  const keys = Object.keys(q['文本'].criteria);
+  assert.ok(keys.includes('Enter') && keys.includes('Escape') && keys.includes('PageDown'));
+  assert.ok(AutoCore.COMMON_KEY_NAMES.every((k) => keys.includes(k)), '常用键名全部在候选');
+  assert.strictEqual(keys.filter((k) => AutoCore.COMMON_KEY_NAMES.includes(k)).length,
+    AutoCore.COMMON_KEY_NAMES.length, 'Enter 撞名只出现一次（变量版，键名版让位）');
+  assert.strictEqual(q['文本'].criteria['Enter'], '取值：Return', '撞名时变量优先（用户显式意图）');
+  assert.strictEqual(q['文本'].criteria['翻页键'], '取值：PageDown');
+  assert.strictEqual(q['文本'].criteria['Escape'].startsWith('键名：'), true);
+});
+
+test('buildTextFollowUp · fill：候选 = 变量池，instructions 带已定动作与目标元素', () => {
+  const q = AutoCore.buildTextFollowUp({
+    action: 'fill', param: 'e14', snapshot: ORDERS, variables: ORDERS_VARS,
+    refLabel: '【可交互】 searchbox "搜索订单号 / 买家昵称 / 收件人手机号"',
+  });
+  assert.deepStrictEqual(Object.keys(q['文本'].criteria), ['买家', '待发货状态']);
+  assert.strictEqual(q['文本'].criteria['买家'], '取值：王小明');
+  assert.match(q['文本'].instructions, /fill/);
+  assert.match(q['文本'].instructions, /e14/);
+  assert.match(q['文本'].instructions, /搜索订单号/);
+  assert.strictEqual(q['文本'].criteria['无'], undefined, 'fill 必填文本，不给「无」');
+});
+
+test('buildTextFollowUp · 可选文本动作附「无」，必填动作不附', () => {
+  const opt = AutoCore.buildTextFollowUp({
+    action: 'tab-close', param: '无需元素', snapshot: '', variables: ORDERS_VARS, refLabel: '',
+  });
+  assert.strictEqual(opt['文本'].criteria['无'], '本动作不需要输入文本');
+  const req = AutoCore.buildTextFollowUp({
+    action: 'fill', param: 'e14', snapshot: ORDERS, variables: ORDERS_VARS, refLabel: '',
+  });
+  assert.strictEqual(req['文本'].criteria['无'], undefined);
+});
+
+test('buildTextFollowUp · 零候选与无需文本：返回 null（builder 不抛错，调用方记失败步）', () => {
+  /* 必填动作 + 空变量池 → 无从问起 */
+  assert.strictEqual(AutoCore.buildTextFollowUp({
+    action: 'fill', param: 'e3', snapshot: SAMPLE_SNAPSHOT, variables: [], refLabel: '',
+  }), null);
+  /* select + 读不到名单 + 空变量池 → 同上 */
+  assert.strictEqual(AutoCore.buildTextFollowUp({
+    action: 'select', param: 'e999', snapshot: ORDERS, variables: [], refLabel: '',
+  }), null);
+  /* 可选动作只剩「无」一项 → 没有可问的，也不问 */
+  assert.strictEqual(AutoCore.buildTextFollowUp({
+    action: 'tab-close', param: '无需元素', snapshot: '', variables: [], refLabel: '',
+  }), null);
+  /* 不需要文本的动作 → null（主循环用它当门闩） */
+  assert.strictEqual(AutoCore.buildTextFollowUp({
+    action: 'click', param: 'e10', snapshot: SAMPLE_SNAPSHOT, variables: ORDERS_VARS, refLabel: '',
+  }), null);
+  assert.strictEqual(AutoCore.buildTextFollowUp({ action: '任务已完成', param: '无需元素', snapshot: '', variables: [], refLabel: '' }), null);
+});
+
+test('parseTextAnswer：取「文本」选项；缺失抛错', () => {
+  assert.strictEqual(AutoCore.parseTextAnswer({ 文本: { type: 'choice', choice: '已付款待发货' } }), '已付款待发货');
+  assert.strictEqual(AutoCore.parseTextAnswer({ 文本: { type: 'choice', choice: '无' } }), '无');
+  assert.throws(() => AutoCore.parseTextAnswer({}), /文本/);
+  assert.throws(() => AutoCore.parseTextAnswer({ 文本: {} }), /文本/);
+});
+
+test('文本补问 → 执行规划衔接：选项名 / 键名不在变量池时按字面值直传', () => {
+  /* select 补问选中的选项名（非变量） → resolveText 字面值兜底 → 命令文本即选项名 */
+  assert.deepStrictEqual(
+    AutoCore.planExecution({ action: 'select', param: 'e15', text: '已付款待发货' }, ORDERS_VARS),
+    { kind: 'act', op: 'select', ref: 'e15', text: '已付款待发货' });
+  /* press 补问选中的纯键名（非变量） → 字面值直传 */
+  assert.deepStrictEqual(
+    AutoCore.planExecution({ action: 'press', param: '无需元素', text: 'PageDown' }, []),
+    { kind: 'act', op: 'press', ref: null, text: 'PageDown' });
+  /* 变量名被选中 → 取变量的值 */
+  assert.deepStrictEqual(
+    AutoCore.planExecution({ action: 'fill', param: 'e14', text: '买家' }, ORDERS_VARS),
+    { kind: 'act', op: 'fill', ref: 'e14', text: '王小明' });
+  /* 可选动作选「无」→ 无参形态合法 */
+  assert.deepStrictEqual(
+    AutoCore.planExecution({ action: 'tab-close', param: '无需元素', text: '无' }, []),
+    { kind: 'act', op: 'tab-close', ref: null, text: null });
 });

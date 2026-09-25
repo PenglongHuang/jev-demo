@@ -48,30 +48,60 @@ function startMocks() {
     const snapshot = String(state['页面快照'] || '');
     const archived = /已归档 (\d+) 封/.exec(snapshot);
 
+    /* 弹窗步：快照被换成阻塞说明文本（auto-core DIALOG_SNAPSHOT_NOTE），只剩一道动作题 */
+    if (snapshot.includes('原生对话框')) return { action: 'dialog-accept', unfinished: 0 };
+
+    if (goal.includes('删除')) {
+      const gone = !/listitem "邮件[^"]*8 月电子对账单/.test(snapshot);
+      if (gone && /已删除 1 封/.test(snapshot)) return { action: '任务已完成', unfinished: 0 };
+      const r = findRefAfterLine(snapshot, /8 月电子对账单/, '删除');
+      if (r) return { action: 'click', ref: r, unfinished: 1 };
+      return { action: '无操作', unfinished: 1 };
+    }
+
     if (goal.includes('搜索')) {
       const val = searchValue(snapshot);
       const n = listitemCount(snapshot);
       if (val && n <= 5) return { action: '任务已完成', unfinished: 0 };
       const sb = searchRef(snapshot);
-      if (sb) return { action: '生成输入', ref: sb, unfinished: 3 };
-      return { action: '无操作', unfinished: 3 };
+      if (sb) return { action: '生成输入', ref: sb, unfinished: 1 };
+      return { action: '无操作', unfinished: 1 };
     }
 
     if (goal.includes('所有邮件')) {
       const r = findRefAfterLine(snapshot, /- listitem "邮件/, '归档');
-      if (r) return { action: 'click', ref: r, unfinished: 4 };
+      if (r) return { action: 'click', ref: r, unfinished: 1 };
       return { action: '任务已完成', unfinished: 0 };
+    }
+
+    /* 订单后台（S6）：目标选项已选中 → 完成；否则 select 订单状态下拉框。
+     * 文本取值不走这里 —— select 落定后前端会发单道「文本」补问，见 decideText。 */
+    if (goal.includes('订单状态')) {
+      if (/option "已付款待发货"[^\n]*\[selected\]/.test(snapshot)) return { action: '任务已完成', unfinished: 0 };
+      const m = snapshot.match(/- combobox "订单状态" (?:\[[^\]]+\] )*\[ref=([A-Za-z0-9_-]+)\]/);
+      if (m) return { action: 'select', ref: m[1], unfinished: 1 };
+      return { action: '无操作', unfinished: 1 };
     }
 
     /* 默认：归档 9 月对账单场景 */
     const gone = !/listitem "邮件[^"]*9 月电子对账单/.test(snapshot);
     if (gone && archived && Number(archived[1]) >= 1) return { action: '任务已完成', unfinished: 0 };
     const r = findRefAfterLine(snapshot, /9 月电子对账单/, '归档');
-    if (r) return { action: 'click', ref: r, unfinished: 3 };
-    return { action: '无操作', unfinished: 3 };
+    if (r) return { action: 'click', ref: r, unfinished: 1 };
+    return { action: '无操作', unfinished: 1 };
   }
 
-  /* ---- System One 响应组装（严格按 output.js 消费的形状） ---- */
+  /* 文本补问 oracle：目标里的「选择「xxx」」即应选定的取值（S6 → 已付款待发货）。
+   * 候选是前端从下拉框真实选项构造的 —— 答案不在候选内会被 checkContract 记违规，
+   * 这就是「候选构造正确性」的 E2E 断言面。 */
+  function decideText(state) {
+    const m = String(state['任务目标'] || '').match(/选择「([^」]+)」/);
+    return m ? m[1] : null;
+  }
+
+  /* ---- System One 响应组装（严格按 output.js 消费的形状） ----
+   * 按请求实际携带的题名作答：首轮 3 道（动作/参数/未完成），补问 1 道
+   * （参数批次 / 动作冲突 / 文本）—— 前端问什么答什么，不硬塞不存在的题。 */
   function sysoneRes(body, d) {
     const q = body.questions || {};
     const probs = (hit, others) => {
@@ -79,21 +109,27 @@ function startMocks() {
       (others || []).forEach((k, i) => { o[k] = 0.04 + i * 0.01; });
       return o;
     };
-    const answers = {
-      动作: { type: 'choice', choice: d.action, probabilities: probs(d.action, ['无操作', 'click', 'fill']), confidence: 0.82 },
-      参数: { type: 'choice', choice: d.ref || '无需元素', probabilities: probs(d.ref || '无需元素', ['无需元素']), confidence: 0.78 },
-      文本: { type: 'choice', choice: '无', probabilities: { 无: 0.95, 招商银行: 0.05 }, confidence: 0.9 },
-      未完成: (() => {
-        const crit = q['未完成'] && q['未完成'].criteria || [];
-        const legend = {};
-        crit.forEach((c, i) => { legend[i] = c; });
-        const probabilities = {};
-        probabilities[d.unfinished] = 0.85;
-        probabilities[d.unfinished === 0 ? 1 : 0] = 0.1;
-        probabilities[2] = 0.05;
-        return { type: 'score', score: d.unfinished, probabilities, legend };
-      })(),
-    };
+    const answers = {};
+    if (q['动作']) {
+      answers['动作'] = { type: 'choice', choice: d.action, probabilities: probs(d.action, ['无操作', 'click', 'fill']), confidence: 0.82 };
+    }
+    if (q['参数']) {
+      answers['参数'] = { type: 'choice', choice: d.ref || '无需元素', probabilities: probs(d.ref || '无需元素', ['无需元素']), confidence: 0.78 };
+    }
+    if (q['文本']) {
+      const others = Object.keys(q['文本'].criteria || {}).filter((k) => k !== d.text).slice(0, 2);
+      answers['文本'] = { type: 'choice', choice: d.text, probabilities: probs(d.text, others), confidence: 0.9 };
+    }
+    if (q['未完成']) {
+      const crit = q['未完成'].criteria || [];
+      const legend = {};
+      crit.forEach((c, i) => { legend[i] = c; });
+      /* 2 级量表：概率只落在 0/1 上，score 就是加权均值（0~1 连续） */
+      const probabilities = {};
+      probabilities[d.unfinished] = 0.85;
+      probabilities[d.unfinished === 0 ? 1 : 0] = 0.15;
+      answers['未完成'] = { type: 'score', score: d.unfinished, probabilities, legend };
+    }
     return { model: 'mock-jev', answers, usage: { input_tokens: 4200, output_tokens: 96 } };
   }
 
@@ -102,26 +138,26 @@ function startMocks() {
     const v = [];
     const q = body.questions || {};
     const names = Object.keys(q);
-    /* 单题补问是合法形态，两条路径各一种：
+    /* 单题补问是合法形态，三条路径各一种：
      *   仅「参数」——候选裁剪展开下一批（Jev 选了「其他」）
-     *   仅「动作」——动作与元素角色不兼容，重问动作（Agent 侧 checkActionRole 拦下的） */
-    if (names.length === 1 && (names[0] === '参数' || names[0] === '动作')) {
+     *   仅「动作」——动作与元素角色不兼容，重问动作（Agent 侧 checkActionRole 拦下的）
+     *   仅「文本」——动作+参数落定后的取值补问（select 选项名 / press 键名 / 变量池） */
+    if (names.length === 1 && ['参数', '动作', '文本'].includes(names[0])) {
       const crit = Object.keys((q[names[0]] || {}).criteria || {});
       if (!crit.length) v.push('单题补问的候选为空：' + names[0]);
       return v;
     }
-    if (names.length !== 4 || !['动作', '参数', '文本', '未完成'].every((n) => names.includes(n))) {
-      v.push('问题不是固定 4 道：' + names.join(','));
+    if (names.length !== 3 || !['动作', '参数', '未完成'].every((n) => names.includes(n))) {
+      v.push('问题不是固定 3 道：' + names.join(','));
       return v;
     }
     const acts = Object.keys(q['动作'].criteria || {});
-    if (acts.length !== 31) v.push('动作候选数=' + acts.length + '（应为 31：27 浏览器 + 2 工程 + 2 终止）');
+    if (acts.length !== 23) v.push('动作候选数=' + acts.length + '（应为 23：19 浏览器 + 2 工程 + 2 终止）');
     ['生成输入', '无操作', '任务已完成', '放弃'].forEach((k) => {
       if (!acts.includes(k)) v.push('动作缺少 ' + k);
     });
     if (q['参数'].type !== 'choice') v.push('参数不是 choice');
-    if (q['未完成'].type !== 'score' || (q['未完成'].criteria || []).length !== 5) v.push('未完成应为 5 级 score');
-    if (!(q['文本'].criteria || {})['无']) v.push('文本缺少「无」兜底项');
+    if (q['未完成'].type !== 'score' || (q['未完成'].criteria || []).length !== 2) v.push('未完成应为 2 级 score');
 
     const state = body.state || {};
     const snapshot = String(state['页面快照'] || '');
@@ -130,17 +166,20 @@ function startMocks() {
     if (!Array.isArray(state['已完成步骤'])) v.push('state.已完成步骤 不是数组');
     if (state['上一步结果'] == null) v.push('state.上一步结果 缺失');
 
+    /* 参数覆盖按是否裁剪分档：候选被折叠（含「其他」或数量少于快照 ref 总数）时
+     * 只查「给出的候选都真实存在」，反向全覆盖只在未裁剪时成立 ——
+     * 订单页 392 refs 会被裁到首批 80，双向断言必爆假违规 */
     const params = Object.keys(q['参数'].criteria || {});
     const snapRefs = new Set((snapshot.match(/\[ref=([A-Za-z0-9_-]+)\]/g) || []).map((s) => s.slice(5, -1)));
+    const trimmed = params.includes('其他') || params.length < snapRefs.size;
     params.forEach((k) => {
-      if (k === '无需元素') return;
+      if (k === '无需元素' || k === '其他') return;
       if (!snapRefs.has(k)) v.push('参数候选 ' + k + ' 不在快照 ref 集合内');
     });
-    snapRefs.forEach((r) => {
-      if (!params.includes(r)) v.push('快照 ref ' + r + ' 未出现在参数候选中');
-    });
-    if (v.length && v.length <= 3) {
-      /* 快照很大时 ref 校验可能噪声多，只记前 3 条样本 */
+    if (!trimmed) {
+      snapRefs.forEach((r) => {
+        if (!params.includes(r)) v.push('快照 ref ' + r + ' 未出现在参数候选中');
+      });
     }
     return v.slice(0, 6);
   }
@@ -164,13 +203,25 @@ function startMocks() {
       checkContract(payload).forEach((x) => violations.push('#' + reqCount + ' ' + x));
       const state = typeof payload.state === 'string' ? JSON.parse(payload.state) : payload.state;
       const d = decide(state);
+      const qnames = Object.keys(payload.questions || {});
+      /* 单道「文本」补问：oracle 从任务目标取应选值，并校验它确实在候选里 ——
+       * 候选是前端从下拉框选项/键名/变量池构造的，答案落不进去就是构造 bug */
+      if (qnames.length === 1 && qnames[0] === '文本') {
+        d.text = decideText(state);
+        const crit = Object.keys((payload.questions['文本'] || {}).criteria || {});
+        if (d.text == null) {
+          violations.push('#' + reqCount + ' 文本补问 oracle 未从任务目标解析出取值');
+        } else if (!crit.includes(d.text)) {
+          violations.push('#' + reqCount + ' 文本答案「' + d.text + '」不在候选内（候选构造错误）：' + crit.slice(0, 8).join(','));
+        }
+      }
       decisions.push({
         n: reqCount,
         goal: String(state['任务目标'] || '').slice(0, 24),
         val: searchValue(String(state['页面快照'] || '')),
         items: listitemCount(String(state['页面快照'] || '')),
         archived: (/已归档 (\d+) 封/.exec(String(state['页面快照'] || '')) || [])[1] || '0',
-        action: d.action, ref: d.ref || null,
+        action: d.action, ref: d.ref || null, text: d.text || null,
       });
       const out = sysoneRes(payload, d);
       out._oracle = d;

@@ -865,7 +865,7 @@ table.spec td code { font-size: 11px; }
 .snap-details summary:hover { color: var(--accent); }
 .snap-details[open] summary { margin-bottom: 6px; }
 
-/* 4 道问题结构化展示 */
+/* 首轮 3 道问题（+ 按需补问）结构化展示 */
 .qlist { display: flex; flex-direction: column; gap: 10px; }
 .qblock { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .qblock-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -899,7 +899,8 @@ table.spec td code { font-size: 11px; }
   font-size: 12px; line-height: 1.5; color: var(--text-2); background: var(--accent-soft);
   border: 1px solid #dbeafe; border-radius: 8px; padding: 7px 10px; margin-bottom: 8px;
 }
-.scale-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+/* 等级数随 SCORE_LEVELS 变（现在 2 级），列数不能写死 5 */
+.scale-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 6px; }
 .scale-cell {
   border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; min-width: 0;
   display: flex; flex-direction: column; gap: 3px; background: #fff;

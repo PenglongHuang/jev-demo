@@ -8,7 +8,7 @@ A zero-dependency local web demo for TypeSafe's **Jev (System One)** decision mo
 
 ## 内置场景
 
-- **playwright-jev-agent**（Beta）—— 只输入任务目标：工程自动构造 state 与 4 道问题，Jev 每轮决策（选动作 / 选 ref / 选文本 / 判完成度），playwright-cli 操作真实浏览器，循环直到完成；每一步的请求体、概率、执行与截图在前端完整可见
+- **playwright-jev-agent**（Beta）—— 只输入任务目标：工程自动构造 state 与 3 道固定问题（选动作 / 选 ref / 判完成度），Jev 每轮决策后按需补问（参数批次 / 动作冲突 / 文本取值），playwright-cli 操作真实浏览器，循环直到完成；每一步的请求体、概率、执行与截图在前端完整可见
 - **浏览器操作（离线预设）** —— 把可访问性快照交给 Jev，直接选出「下一步调用哪个工具、作用于哪个 ref、任务是否完成」，答案落到具体 ref 而不是按钮文字
 - **意图识别** —— 工单分派 / 内容审核 / 意图路由，choice · score · noul 三种题型混用
 - **Agent 上下文裁剪** —— 逐条判断哪些工具调用和结果还值得留在上下文里
@@ -31,7 +31,7 @@ Demo 模式零依赖即可用；**playwright-jev-agent** 需要驱动本机浏�
 | 依赖 | 安装 | 说明 |
 |---|---|---|
 | Node.js 18+ | — | 启动时自动检查 |
-| playwright-cli | `npm i -g @playwright/cli` | 全局安装 CLI 即可，无需下载浏览器 |
+| playwright-cli | `npm i -g @playwright/cli` | 全局安装 CLI 即可，无需下载浏览器。需 ≥ 0.1.17（0.1.18+ 的结构化快照已内置转写适配；0.1.1 等老版不支持 `--json`，health 会显示就绪但 open 报错） |
 | Chrome 或 Edge | 本机已装即可 | 在「编辑配置 → 浏览器内核」里选（默认 Chrome）；选定的内核启动失败时自动换另一个重试一次 |
 
 右上角 `browserPill` 实时显示引擎状态（✅ 引擎就绪 vX.Y.Z / ⚠ 未安装）。内置演示页（`📦 内置演示页` 按钮，`public/demo/mailbox.html`）离线即可完整演示「归档对账单 / 搜索邮件」等任务。
@@ -54,7 +54,7 @@ PORT=8080 TYPESAFE_API_KEY=xxx ALLOW_ORIGIN=https://your-domain.com node server.
 
 - 建议挂在反向代理（nginx / caddy）后面做 HTTPS；代理层记得传 `X-Forwarded-For`，场景保存与浏览器会话都按它的首段隔离租户（SHA-1 哈希后写入 `data/`，备份该目录即备份全部数据）
 - 接口由 `server.js` 代理转发到 `https://api.typesafe.ai/v1/systemone`，规避浏览器 CORS 限制；生成模型接口 `/api/llm` 同为纯透传（Base 仅允许 https 或 localhost）；静态资源带 `Cache-Control: no-cache`，发版即生效
-- Auto 模式的安全边界：driver 层 27 个浏览器操作白名单硬校验（读取 / 存储 / 网络 / 会话类命令一律拒绝）、`goto` 仅 http/https、每命令 30s 超时、单步确认模式可随时人工把关
+- Auto 模式的安全边界：driver 层 19 个浏览器操作白名单硬校验（读取 / 存储 / 网络 / 会话 / 坐标鼠标类命令一律拒绝）、`goto` 仅 http/https、每命令 30s 超时、单步确认模式可随时人工把关
 
 ### 密集页面下的候选裁剪（高级参数）
 
@@ -76,11 +76,23 @@ PORT=8080 TYPESAFE_API_KEY=xxx ALLOW_ORIGIN=https://your-domain.com node server.
 
 现在发命令之前先校验一次**动作 × 元素角色**，且只登记物理上不可能的组合（`select` 配非下拉框、`check`/`uncheck` 配非勾选框；角色白名单取自 playwright 注入脚本本身）。不兼容就在**同一步内补问一题「动作」**：候选已去掉该元素上不可能的动作，并附上该角色的常规动词；补不回来才记失败步。两种情况都**不会把命令发给浏览器**，元素也不会被记入「已失败降权」（它本身没问题，降权会把真正的目标挤出候选首批）。可编辑性判不了的 `fill` / `type` / `生成输入` 故意不拦 —— contenteditable 的 div 在快照里是 `generic`，按角色拦会误报，宁可漏报交给浏览器报错。
 
+### 原生弹窗（confirm / alert / prompt）
+
+页面触发原生对话框期间，playwright 的其余工具会被拒绝（`does not handle the modal state`），循环拿不到快照 —— 修复前这里直接以「出错」终止整个运行。现在这一轮自动转为**弹窗步**：快照换成一句阻塞说明，只问 Jev 一道「动作」题（`dialog-accept` / `dialog-dismiss`），弹窗处理完，下一轮即恢复正常快照。内置邮箱场景的「删除邮件（确认框选接受）」走的正是这条路径。
+
+### select 的选项预检
+
+「动作 × 角色」校验之外，`select` 还可能错在**选项层**：把「搜索王小明」误规划成「在“订单状态”下拉框里选“王小明”这个选项」—— 选项不存在，浏览器必报 option not found，且模型可能连续重复同一错误组合。快照里下拉框子树自带选项名单（option 无 ref 但有名字），发命令前做确定性预检：选项不在名单内就**不发命令**，报错直接列出全部可选选项，并按两种可能的本意给纠偏提示（想切下拉框 → 「文本」补问里改选正确的选项名；想输入文本 → 改用 fill + 搜索框），作为下一轮的信号；读不到选项名单时放行（宁可漏报，交回浏览器判定）。
+
+### 「文本」补问：候选跟着动作走
+
+需要输入文本的动作（fill / type / select / press / goto / upload / tab-select / tab-close / dialog-accept / tab-new），其取值在**动作与参数落定之后**才以单题补问发出，候选按动作分型：`select` 给该下拉框当时的**真实选项名**（「在订单状态下拉框选王小明」这类错误从候选层面就构造不出来）；`press` 给变量池 ∪ 常用键名（Enter / PageDown / PageUp 等，与变量撞名时变量优先）；其余动作给**变量池**（动态值全部工程注入）；可选文本的动作（tab-close / tab-new / dialog-accept）额外附「无」。选中的候选不在变量池时按字面值直传，所以选项名与键名无需配变量。必填动作零候选（如 fill 但变量池为空）会记一个不打 Jev、不发命令的确定性失败步。
+
 ## 测试 / Tests
 
 ```bash
 npm test          # 单元 + 真实 playwright-cli 冒烟（引擎不可用自动跳过）
-npm run test:e2e  # Auto 模式端到端：归档 / 生成输入 / 单步 / 步数上限（默认本地 oracle，可切真实 Jev）
+npm run test:e2e  # Auto 模式端到端：归档 / 生成输入 / 单步 / 步数上限 / 弹窗 / select 补问（默认本地 oracle，可切真实 Jev）
 ```
 
 ## 项目结构 / Project Structure

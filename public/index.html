@@ -95,7 +95,7 @@
           <div class="out-empty">
             <div class="big" aria-hidden="true">▶</div>
             点右上「✎ 编辑配置」填好任务后，回到这里点「▶ 打开浏览器并开始」。<br />
-            每一步是一张可切换的卡片：Jev 决策概率、执行的命令与截图、本轮输入的 state 与 4 道问题全部结构化展示；<br />
+            每一步是一张可切换的卡片：Jev 决策概率、执行的命令与截图、本轮输入的 state 与 3 道问题（及按需补问）全部结构化展示；<br />
             用 ‹ › 按钮或键盘 ← → 切换步骤，点击顶部时间线任意节点直达对应卡片。
           </div>
         </div>
@@ -122,7 +122,7 @@
               <input type="text" id="autoUrl" placeholder="http://localhost:3000/demo/mailbox.html" spellcheck="false" />
             </div>
             <div class="field">
-              <label>输入变量 <span class="hint">fill / press / goto 等动作的文本来源，Jev 用选择题从中挑选</span></label>
+              <label>输入变量 <span class="hint">fill / press / goto 等动作的文本来源，动作确定后经「文本」补问挑选（select 的选项名与 press 的常用键名自动加入候选）</span></label>
               <div id="autoVars" class="vars-box"></div>
               <button class="chip" id="autoAddVar" type="button">＋ 添加变量</button>
             </div>
