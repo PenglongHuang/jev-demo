@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Jev 体验台 · System One 决策模型</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Ctext x='16' y='22' font-size='17' fill='white' text-anchor='middle'%3E%E2%97%87%3C/text%3E%3C/svg%3E" />
-<link rel="stylesheet" href="styles.css?v=20260924k" />
+<link rel="stylesheet" href="styles.css?v=20260925a" />
 </head>
 <body>
 
@@ -81,6 +81,10 @@
       <div class="auto-flow-wrap">
         <div class="flow-head">
           <h2>运行流水</h2>
+          <div class="sess-dd" id="autoSessDd">
+            <button class="sess-btn" id="autoSessBtn" type="button" aria-haspopup="listbox" title="切换当前/历史会话">会话 —</button>
+            <div class="sess-list" id="autoSessList" hidden></div>
+          </div>
           <span class="spacer"></span>
           <button class="chip" id="autoExport" type="button" hidden
                   title="下载本次运行的完整 JSON 记录（每一步的请求体、响应、执行与截图）">⬇ 导出运行记录</button>
@@ -90,13 +94,12 @@
           <span class="auto-progress" id="autoProgress">第 0 / 15 步</span>
           <span class="auto-elapsed" id="autoElapsed">0s</span>
         </div>
-        <div class="auto-timeline" id="autoTimeline" hidden role="list" aria-label="运行轨迹时间线"></div>
         <div id="autoFlow" class="auto-flow" aria-live="polite">
           <div class="out-empty">
             <div class="big" aria-hidden="true">▶</div>
             点右上「✎ 编辑配置」填好任务后，回到这里点「▶ 打开浏览器并开始」。<br />
-            每一步是一张可切换的卡片：Jev 决策概率、执行的命令与截图、本轮输入的 state 与 3 道问题（及按需补问）全部结构化展示；<br />
-            用 ‹ › 按钮或键盘 ← → 切换步骤，点击顶部时间线任意节点直达对应卡片。
+            左侧是本会话的树：会话 → 步骤 → 每次模型调用（首轮 / 补问 / 生成输入）；
+            右侧随选中节点展示环境、截图、决策与完整请求响应。
           </div>
         </div>
       </div>
@@ -422,12 +425,12 @@
 <script src="presets.js?v=20260924a"></script>
 <script src="js/util.js?v=20260924l"></script>
 <script src="js/ref-funnel.js?v=20260924j"></script>
-<script src="js/auto-core.js?v=20260924l"></script>
+<script src="js/auto-core.js?v=20260925a"></script>
 <script src="js/anno.js?v=20260924m"></script>
 <script src="js/state-editor.js?v=20260924a"></script>
 <script src="js/questions.js?v=20260924a"></script>
 <script src="js/output.js?v=20260924a"></script>
 <script src="js/app.js?v=20260924j"></script>
-<script src="js/auto.js?v=20260924m"></script>
+<script src="js/auto.js?v=20260925a"></script>
 </body>
 </html>

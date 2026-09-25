@@ -35,7 +35,9 @@ const Auto = (() => {
     runPill: document.getElementById('autoRunPill'),
     progress: document.getElementById('autoProgress'),
     elapsed: document.getElementById('autoElapsed'),
-    timeline: document.getElementById('autoTimeline'),
+    sessDd: document.getElementById('autoSessDd'),
+    sessBtn: document.getElementById('autoSessBtn'),
+    sessList: document.getElementById('autoSessList'),
     presetCard: document.getElementById('presetCard'),
     mainGrid: document.getElementById('mainGrid'),
     apiSpec: document.getElementById('apiSpec'),
@@ -109,9 +111,10 @@ const Auto = (() => {
 
   async function refreshRunsList() { /* Task 5 实装（拉 GET /api/runs） */ }
 
-  /* 轮播状态 */
-  const view = { idx: 0, follow: true };
-  const stage = {};          // wrap/track/counter/prev/next/follow
+  /* 树视图状态：sess='current' 看本页运行，否则为历史会话 id；type= session|step|action */
+  const view = { sess: 'current', type: 'session', n: 0, i: 0, follow: true };
+  let viewRecord = null;     // 历史会话记录（已 hydrate 成运行时形状）
+  let runsList = [];         // GET /api/runs 列表（下拉数据源）
 
   const STEP_GAP_MS = 800;   // 步间间隔（设计 §11）
 
@@ -128,6 +131,25 @@ const Auto = (() => {
     return c ? c.value : 'single';
   }
   function shortUrl(u) { return String(u || '').replace(/^https?:\/\//, '').slice(0, 40); }
+
+  /* ---------- 树视图数据访问器 ---------- */
+  function viewedSteps() { return view.sess === 'current' ? steps : (viewRecord ? viewRecord.steps : []); }
+  function viewedVars() {
+    if (view.sess === 'current') return (runCfg && runCfg.variables) || [];
+    return (viewRecord && viewRecord.meta && viewRecord.meta.variables) || [];
+  }
+  function hydrateRecord(rec) {
+    /* 落盘形状（request / llm.response）→ 运行时形状（payload / llm.raw），
+     * 让全部现有渲染函数（decisionSummaryHtml 等）对历史会话零改动可用 */
+    return {
+      meta: rec.meta,
+      steps: (rec.steps || []).map((s) => Object.assign({}, s, {
+        payload: s.payload || s.request || null,
+        followUps: (s.followUps || []).map((r) => Object.assign({}, r, { payload: r.payload || r.request || null })),
+        llm: s.llm ? { messages: s.llm.messages, raw: s.llm.response, text: s.llm.text, error: s.llm.error } : null,
+      })),
+    };
+  }
 
   /* ---------- 环境探测（设计 §4） ---------- */
   /* 状态用顶栏胶囊的圆点表达（颜色跟着 .ok / .error 走），文案里不再带 ✅⚠ */
@@ -446,101 +468,252 @@ const Auto = (() => {
     }));
   }
 
-  /* ---------- 时间线 ---------- */
-  function addChip(label, cls, id) {
-    const chip = el('button', 'tl-chip' + (cls ? ' ' + cls : ''), label);
-    chip.type = 'button';
-    chip.setAttribute('role', 'listitem');
-    if (id != null) {
-      chip.title = '查看第 ' + id + ' 步卡片';
-      chip.onclick = () => gotoStep(id - 1, true);
+  /* ---------- 选择与主渲染（会话树 + 右侧详情） ---------- */
+  function select(type, n, i, user) {
+    view.type = type;
+    if (n != null) view.n = n;
+    if (i != null) view.i = i;
+    if (user) view.follow = false;
+    renderFlow();
+  }
+
+  /* 主入口：树 + 详情一次重建（≤50 步 × ≤6 行动 ≈ 300 节点，innerHTML 重建可接受） */
+  function renderFlow() {
+    const list = viewedSteps();
+    if (!list.length) {
+      els.flow.innerHTML = '<div class="out-empty"><div class="big" aria-hidden="true">▶</div>'
+        + '还没有步骤。配置好任务后点「▶ 打开浏览器并开始」。</div>';
+      return;
     }
-    els.timeline.appendChild(chip);
-    return chip;
-  }
-  function markChip(id, cls) {
-    const chip = els.timeline.querySelector('[data-chip="' + id + '"]');
-    if (chip) chip.className = 'tl-chip' + (cls ? ' ' + cls : '');
-  }
-
-  /* ---------- 轮播 ---------- */
-  function buildStage() {
-    els.flow.innerHTML = '';
-    view.idx = 0; view.follow = true;
-    stage.wrap = el('div', 'stage-wrap');
-    stage.wrap.tabIndex = 0;
-    const nav = el('div', 'stage-nav');
-    stage.prev = el('button', 'stage-btn', '‹');
-    stage.prev.type = 'button'; stage.prev.title = '上一步（←）'; stage.prev.setAttribute('aria-label', '上一步');
-    stage.prev.onclick = () => gotoStep(view.idx - 1, true);
-    stage.counter = el('div', 'stage-counter', '暂无步骤');
-    stage.follow = el('button', 'stage-follow', '→ 最新');
-    stage.follow.type = 'button'; stage.follow.title = '跳到最新步骤';
-    stage.follow.onclick = () => { view.follow = true; gotoStep(steps.length - 1, false); };
-    stage.next = el('button', 'stage-btn', '›');
-    stage.next.type = 'button'; stage.next.title = '下一步（→）'; stage.next.setAttribute('aria-label', '下一步');
-    stage.next.onclick = () => gotoStep(view.idx + 1, true);
-    nav.appendChild(stage.prev); nav.appendChild(stage.counter); nav.appendChild(stage.follow); nav.appendChild(stage.next);
-    stage.viewport = el('div', 'stage-viewport');
-    stage.track = el('div', 'stage-track');
-    stage.viewport.appendChild(stage.track);
-    stage.wrap.appendChild(nav); stage.wrap.appendChild(stage.viewport);
-    els.flow.appendChild(stage.wrap);
-    updateNav();
-  }
-  function gotoStep(i, user) {
-    const n = steps.length;
-    if (!n || !stage.track) return;
-    i = Math.max(0, Math.min(n - 1, i));
-    view.idx = i;
-    if (user) view.follow = i === n - 1;
-    stage.track.style.transform = 'translateX(' + (-i * 100) + '%)';
-    updateNav();
-  }
-  function updateNav() {
-    const n = steps.length;
-    stage.prev.disabled = view.idx <= 0;
-    stage.next.disabled = n === 0 || view.idx >= n - 1;
-    stage.follow.classList.toggle('show', n > 0 && view.idx < n - 1);
-    /* 只报位置；步骤名由卡片头承担，避免同一句话在导航行与卡片头各说一遍 */
-    stage.counter.textContent = n ? '步骤 ' + (view.idx + 1) + ' / ' + n : '暂无步骤';
-    stage.counter.title = stage.counter.textContent;
+    if (view.follow && view.sess === 'current') {
+      view.type = 'step';
+      view.n = list[list.length - 1].n;
+    }
+    if (!list.some((s) => s.n === view.n)) { view.type = 'session'; }
+    if (view.type === 'action') {
+      const st = list.find((s) => s.n === view.n);
+      const acts = st ? AutoCore.actionsOf(st) : [];
+      if (view.i >= acts.length) view.type = 'step';
+    }
+    const treeScroll = document.getElementById('flowTree');
+    const keepTop = treeScroll ? treeScroll.scrollTop : 0;
+    const openMap = {};
+    document.querySelectorAll('#fdBody details[data-dk]').forEach((d) => { openMap[d.dataset.dk] = d.open; });
+    els.flow.innerHTML = '<div class="flow-main">'
+      + '<div class="flow-tree" id="flowTree" role="tree" aria-label="会话结构"></div>'
+      + '<div class="flow-detail"><div class="fd-head" id="fdHead"></div>'
+      + '<div class="fd-body" id="fdBody"></div></div></div>';
+    buildTree();
+    renderDetail();
+    const t2 = document.getElementById('flowTree');
+    if (t2) t2.scrollTop = keepTop;
+    document.querySelectorAll('#fdBody details[data-dk]').forEach((d) => { if (openMap[d.dataset.dk] != null) d.open = openMap[d.dataset.dk]; });
   }
 
-  /* ---------- 步骤卡 ----------
-   * 信息分层（用户关注主体优先）：
-   *  ① 页面实时情况：执行后截图，卡片主体、通栏展示、点击放大
-   *  ② Jev 决策：摘要行常显（动作/参数/文本 + 复合置信度 + 未完成量表 + 执行命令），
-   *     概率分布明细默认折叠
-   *  ③ Jev 请求信息（输入 state + 首轮 3 道问题 + 补问 + 输出）：默认折叠 */
-  function newStepCard(step) {
-    const card = el('article', 'step-card');
-    card.id = 'stepcard-' + step.n;
-    const head = el('div', 'step-head');
-    head.appendChild(el('span', 'step-no', '第 ' + step.n + ' 步'));
-    const title = el('span', 'step-title', 'Jev 决策中…');
-    head.appendChild(title);
-    const state = el('span', 'step-state', '');
-    head.appendChild(state);
-    card.appendChild(head);
+  function stepDot(st) {
+    if (st.terminal) return 'term';
+    const e = st.exec;
+    if (!e) return (view.sess === 'current' && running && steps.length && steps[steps.length - 1] === st) ? 'run' : 'mute';
+    if (e.skipped) return 'mute';
+    return e.ok ? 'ok' : 'err';
+  }
 
-    const body = el('div', 'step-body');
-    const shotSlot = el('div', 'shot-slot');          // ① 截图主体
-    body.appendChild(shotSlot);
-    const decision = el('div', 'step-decision');      // ② 决策摘要 + 折叠明细
-    decision.innerHTML = '<div class="skel-wrap"><div class="skel" style="width:34%"></div><div class="skel" style="width:58%"></div></div>';
-    body.appendChild(decision);
-    const execZone = el('div', 'step-exec-slot');     // ②执行命令行 / LLM 区
-    body.appendChild(execZone);
-    const ctx = el('div', 'ctx-slot');                // ③ 请求信息（折叠）
-    ctx.innerHTML = contextHtml(step);                // payload 在建卡前已就绪，一次性渲染
-    body.appendChild(ctx);
-    card.appendChild(body);
+  function buildTree() {
+    const tree = document.getElementById('flowTree');
+    const meta = view.sess === 'current'
+      ? { id: runId, goal: runCfg && runCfg.goal }
+      : (viewRecord && viewRecord.meta);
+    const list = viewedSteps();
+    const mk = (key, cls, html) => {
+      const b = el('button', 'tn' + (cls ? ' ' + cls : ''));
+      b.type = 'button'; b.setAttribute('role', 'treeitem'); b.dataset.key = key;
+      b.innerHTML = html;
+      b.onclick = () => {
+        if (key === 'sess') select('session', null, null, true);
+        else if (key[0] === 's') select('step', Number(key.slice(2)), null, true);
+        else { const p = key.slice(2).split(':'); select('action', Number(p[0]), Number(p[1]), true); }
+      };
+      return b;
+    };
+    const sel = (on) => (on ? ' sel' : '');   /* 选中态只进 class，key 保持纯净可解析 */
+    tree.appendChild(mk('sess', sel(view.type === 'session'),
+      '<span class="dot ok"></span><span class="lb">会话 ' + escapeHtml(meta && meta.id || '—') + ' · ' + escapeHtml(shortStr((meta && meta.goal) || '', 14)) + '</span>'));
+    list.forEach((st) => {
+      tree.appendChild(mk('s:' + st.n, 'kid' + sel(view.type === 'step' && view.n === st.n),
+        '<span class="dot ' + stepDot(st) + '"></span><span class="lb">步骤 ' + st.n + ' · ' + escapeHtml(st.label || '决策中…') + '</span>'
+        + (st.exec && st.exec.elapsedMs != null ? '<span class="dur">' + st.exec.elapsedMs + 'ms</span>' : '')));
+      AutoCore.actionsOf(st).forEach((a, i) => {
+        tree.appendChild(mk('a:' + st.n + ':' + i, 'act-kid' + sel(view.type === 'action' && view.n === st.n && view.i === i),
+          '<span class="k ' + (a.kind === 'llm' ? 'llm' : 'jev') + '">' + (a.kind === 'llm' ? 'LLM' : 'JEV') + '</span>'
+          + '<span class="lb">' + escapeHtml(a.title) + '</span>'
+          + '<span class="dot ' + AutoCore.actionStatus(a) + '"></span>'));
+      });
+    });
+    if (view.sess === 'current' && !view.follow && steps.length > 1) {
+      const f = el('button', 'tn follow-btn');
+      f.type = 'button'; f.textContent = '→ 跟随最新';
+      f.onclick = () => { view.follow = true; renderFlow(); };
+      tree.appendChild(f);
+    }
+  }
+  function shortStr(s, n) { s = String(s || ''); return s.length > n ? s.slice(0, n) + '…' : s; }
 
-    stage.track.appendChild(card);
-    if (view.follow) gotoStep(steps.length - 1, false);
-    else updateNav();
-    return { card, head, title, state, body, shotSlot, decision, execZone, ctx, ctxRev: ctxRevision(step) };
+  /* ---------- 右侧详情：会话 / 步骤 / 行动 三视图 ---------- */
+  function renderDetail() {
+    const head = document.getElementById('fdHead');
+    const body = document.getElementById('fdBody');
+    const list = viewedSteps();
+    if (view.type === 'session') {
+      head.innerHTML = sessionHeadHtml();
+      body.innerHTML = sessionViewHtml();
+      body.querySelectorAll('tr[data-go]').forEach((tr) => { tr.onclick = () => select('step', Number(tr.dataset.go.slice(2)), null, true); });
+      return;
+    }
+    const st = list.find((s) => s.n === view.n);
+    if (!st) { view.type = 'session'; renderDetail(); return; }
+    if (view.type === 'step') {
+      head.innerHTML = '<span class="crumb">会话 ▸ 步骤</span><h2>步骤 ' + st.n + ' · ' + escapeHtml(st.label || '决策中…') + '</h2>' + stepBadgeHtml(st)
+        + '<span class="stepnav" style="margin-left:auto">'
+        + '<button type="button" id="fdPrev"' + (st.n <= 1 ? ' disabled' : '') + '>‹ 上一步</button>'
+        + '<button type="button" id="fdNext"' + (st.n >= list.length ? ' disabled' : '') + '>下一步 ›</button></span>';
+      body.innerHTML = stepViewHtml(st, list);
+      const p = document.getElementById('fdPrev'), nx = document.getElementById('fdNext');
+      if (p) p.onclick = () => select('step', st.n - 1, null, true);
+      if (nx) nx.onclick = () => select('step', st.n + 1, null, true);
+      /* 本步行动卡片跳转 */
+      body.querySelectorAll('.acard').forEach((b) => {
+        const p2 = b.dataset.go.slice(2).split(':');
+        b.onclick = () => select('action', Number(p2[0]), Number(p2[1]), true);
+      });
+      const shot = body.querySelector('.step-shot');
+      if (shot) shot.onclick = () => openLightbox(shot.src, shot.alt);   /* E2E 契约：.step-shot + data-anno 原样 */
+    } else {
+      const acts = AutoCore.actionsOf(st);
+      const a = acts[view.i] || acts[0];
+      view.i = acts.indexOf(a);
+      head.innerHTML = '<span class="crumb">会话 ▸ 步骤 ' + st.n + ' ▸ 行动 ' + (view.i + 1) + '/' + acts.length + '</span>'
+        + '<h2>' + escapeHtml(a.title) + '</h2>'
+        + '<span class="fd-tag ' + (a.kind === 'llm' ? 'llm' : 'jev') + '">' + (a.kind === 'llm' ? '生成模型' : 'Jev') + '</span>';
+      body.innerHTML = actionViewHtml(st, a);
+      animateBars(body);
+    }
+  }
+
+  function stepBadgeHtml(st) {
+    const e = st.exec;
+    if (st.terminal) return '<span class="fd-state term">终止 · ' + escapeHtml(st.terminal) + '</span>';
+    if (!e) return '<span class="fd-state run">进行中…</span>';
+    if (e.skipped) return '<span class="fd-state warn">已跳过</span>';
+    return '<span class="fd-state ' + (e.ok ? 'ok' : 'err') + '">' + (e.ok ? '✓ 成功' : '✗ 失败') + (e.elapsedMs != null ? ' · ' + e.elapsedMs + 'ms' : '') + '</span>';
+  }
+
+  function sessionHeadHtml() {
+    const meta = view.sess === 'current'
+      ? { id: runId, goal: runCfg && runCfg.goal, endState: running ? 'running' : (els.runPill.dataset.state || '') }
+      : (viewRecord && viewRecord.meta);
+    const st = meta.endState === 'running' ? { label: '运行中', tone: 'run' }
+      : ((END_STATES[meta.endState] || END_STATES.error));
+    return '<span class="crumb">会话</span><h2>' + escapeHtml(meta.id || '—') + ' · ' + escapeHtml(shortStr(meta.goal || '', 18)) + '</h2>'
+      + '<span class="fd-state ' + (st.tone === 'done' ? 'ok' : st.tone === 'error' ? 'err' : 'warn') + '">' + st.label + '</span>';
+  }
+
+  function sessionViewHtml() {
+    const meta = view.sess === 'current'
+      ? { goal: runCfg.goal, startUrl: runCfg.url, variables: runCfg.variables, maxSteps: runCfg.maxSteps,
+          browser: runCfg.browserUsed || runCfg.browser, screenshotOn: runCfg.screenshotOn,
+          jevModel: Config.current.model,
+          llmModel: Config.llm.configured() ? Config.llm.get().model : null }
+      : viewRecord.meta;
+    const list = viewedSteps();
+    const vars = (meta.variables || []).map((v) => '<span class="dec-chip"><i>' + escapeHtml(v.name) + '</i>' + escapeHtml(v.value) + '</span>').join('') || '<span class="muted">（无）</span>';
+    return '<div class="kv"><div class="kv-k">任务目标</div><div class="kv-v">' + escapeHtml(meta.goal || '') + '</div></div>'
+      + '<div class="kv"><div class="kv-k">起始 URL</div><div class="kv-v mono">' + escapeHtml(meta.startUrl || '') + '</div></div>'
+      + '<div class="kv"><div class="kv-k">输入变量</div><div class="kv-v">' + vars + '</div></div>'
+      + '<div class="kv"><div class="kv-k">模型</div><div class="kv-v mono">' + escapeHtml((meta.jevModel || '—') + (meta.llmModel ? ' · 生成 ' + meta.llmModel : '')) + '</div></div>'
+      + '<div class="sec-t" style="margin-top:6px">步骤总览（点击行查看详情）</div>'
+      + '<table class="ov"><thead><tr><th>#</th><th>步骤</th><th>动作</th><th>状态</th><th>用时</th><th>行动</th></tr></thead><tbody>'
+      + list.map((s) => {
+        const d = s.decision || {};
+        const nAct = AutoCore.actionsOf(s).length;
+        return '<tr data-go="s:' + s.n + '"><td class="mono">' + s.n + '</td><td>' + escapeHtml(s.label || '…') + '</td>'
+          + '<td class="mono">' + escapeHtml(d.action || '—') + (d.param ? ' ' + escapeHtml(d.param) : '') + '</td>'
+          + '<td>' + (s.exec ? (s.exec.skipped ? '跳过' : (s.exec.ok ? '成功' : '失败')) : (s.terminal ? '终止' : '…')) + '</td>'
+          + '<td class="mono">' + (s.exec && s.exec.elapsedMs != null ? s.exec.elapsedMs + 'ms' : '—') + '</td>'
+          + '<td class="mono">' + nAct + '</td></tr>';
+      }).join('')
+      + '</tbody></table>';
+  }
+
+  function stepViewHtml(st, list) {
+    let html = execHtml(st);
+    if (st.pageInfo) {
+      html += '<div class="kv"><div class="kv-k">页面环境</div><div class="kv-v">'
+        + '<span class="mono-chip">' + escapeHtml(st.pageInfo.url || '') + '</span>'
+        + (st.pageInfo.title ? '<span class="page-title">' + escapeHtml(st.pageInfo.title) + '</span>' : '') + '</div></div>';
+    }
+    if (st.annoError) html += '<div class="exec-line"><span class="exec-url">未标注：' + escapeHtml(st.annoError) + '</span></div>';
+    html += shotHtml(st);
+    if (st.decision && st.response && !st.jevError) html += decisionSummaryHtml(st);
+    /* 行动列表 */
+    const acts = AutoCore.actionsOf(st);
+    html += '<div class="sec-t">本步行动 · ' + acts.length + ' 次模型调用</div><div class="alist">'
+      + acts.map((a, i) => '<button type="button" class="acard" data-go="a:' + st.n + ':' + i + '">'
+        + '<span class="k ' + (a.kind === 'llm' ? 'llm' : 'jev') + '">' + (a.kind === 'llm' ? 'LLM' : 'JEV') + '</span>'
+        + '<span class="t">' + escapeHtml(a.title) + '</span>'
+        + '<span class="m">' + escapeHtml(actionBrief(a)) + ' ›</span></button>').join('')
+      + '</div>';
+    return html;
+  }
+
+  function actionBrief(a) {
+    if (a.error) return '失败';
+    if (a.kind === 'main') return a.response ? '已响应' : '请求中…';
+    if (a.kind === 'llm') return a.text ? '生成 ' + shortStr(a.text, 12) : '…';
+    return (a.param || a.action || a.text) ? '命中 ' + shortStr(a.param || a.action || a.text, 14) : '请求中…';
+  }
+
+  function shotHtml(st) {
+    if (!st.screenshot) {
+      const dialog = st.payload && st.payload.questions && st.payload.questions['动作'] && !st.payload.questions['参数'];
+      return dialog ? '<div class="muted" style="font-size:12px">弹窗步不截图（modal state 下 screenshot 被拒，且没有可标注元素）</div>' : '';
+    }
+    const a = st.anno && st.anno.box;
+    return '<div class="shot-slot"><img class="step-shot" src="' + st.screenshot + '" alt="第 ' + st.n + ' 步操作前的页面'
+      + (a ? '（已标注被操作元素）' : '') + '"'
+      + (a ? ' data-anno="' + [a.x, a.y, a.w, a.h, st.anno.badge.x, st.anno.badge.y].join(',') + '"' : '') + ' /></div>';
+  }
+
+  function actionViewHtml(st, a) {
+    if (a.kind === 'llm') return llmHtml(st);
+    if (a.kind === 'main') {
+      let html = '';
+      if (st.trim && st.trim.trimmed && st.payload && st.payload.questions && st.payload.questions['参数']) {
+        html += '<div class="trim-note">' + escapeHtml(trimSummary(st)) + '</div>';
+      }
+      if (st.decision && st.response && !st.jevError) html += decisionDetailsHtml(st);
+      if (a.error) html += '<div class="step-err">' + escapeHtml(a.error) + '</div>';
+      html += stateSectionHtml(a.payload.state);
+      html += questionsSectionHtml(st);
+      html += trimDetailHtml(st);
+      html += rawBlock('① 发送的请求体（与真实请求同一对象）', relaxedStringify(a.payload))
+        + (a.response
+          ? rawBlock('② Jev 响应', JSON.stringify({ model: a.response.model, answers: a.response.answers, usage: a.response.usage, _latency_ms: a.response._latency_ms }, null, 2))
+          : rawBlock('② Jev 响应', '（调用失败，无响应）'));
+      return html;
+    }
+    /* 补问行动 */
+    const rec = { payload: a.payload, response: a.response };
+    const settled = Boolean(a.param || a.action || a.text || a.error);
+    const hit = a.kind === 'action'
+      ? (a.action ? '已改为 ' + a.action : (a.error ? '失败：' + a.error : '未返回'))
+      : a.kind === 'text'
+        ? (a.text ? '已选定 ' + a.text : (a.error ? '失败：' + a.error : '未返回'))
+        : (a.param ? '命中 ' + a.param : (a.error ? '失败：' + a.error : '未命中'));
+    return followUpDetails(a.title, a.kind === 'param' ? '参数' : a.kind === 'action' ? '动作' : '文本', rec, hit, settled, 'fu:' + st.n + ':' + view.i);
+  }
+
+  function rawBlock(label, text) {
+    return '<div class="raw-label">' + escapeHtml(label) + '</div><pre class="step-pre tall">' + escapeHtml(text) + '</pre>';
   }
 
   /* ============ 决策区：摘要常显 + 明细折叠 ============ */
@@ -564,7 +737,7 @@ const Auto = (() => {
     const d = step.decision || {};
     const refLabels = step.refLabels || {};
     const varOf = (name) => {
-      const v = (runCfg && runCfg.variables || []).find((x) => x.name === name);
+      const v = viewedVars().find((x) => x.name === name);
       return v ? v.value : name;
     };
     /* 短标签：剥掉「【可交互】」前缀并截断（「无需元素」的说明很长，只显示裸键） */
@@ -607,7 +780,7 @@ const Auto = (() => {
     const d = step.decision || {};
     const refLabels = step.refLabels || {};
     const varOf = (name) => {
-      const v = (runCfg && runCfg.variables || []).find((x) => x.name === name);
+      const v = viewedVars().find((x) => x.name === name);
       return v ? v.value : name;
     };
     const color = { 动作: 'var(--violet)', 参数: '#7c3aed', 文本: '#0d9268' };
@@ -701,9 +874,9 @@ const Auto = (() => {
     let html = '<div class="llm-block"><div class="sec-head violet">生成输入 · LLM</div>';
     if (L.error) return html + '<div class="step-err">' + escapeHtml(L.error) + '</div></div>';
     if (L.text) html += '<div class="llm-gen">生成文本 → ' + escapeHtml(L.text) + '</div>';
-    html += '<details class="step-collapse"><summary>Prompt（工程组装，前端可见）</summary>' +
+    html += '<details class="step-collapse" data-dk="llm-p"><summary>Prompt（工程组装，前端可见）</summary>' +
       '<pre class="step-pre">' + escapeHtml(L.messages.map((m) => '[' + m.role + ']\n' + m.content).join('\n\n')) + '</pre></details>';
-    html += '<details class="step-collapse"><summary>模型原始响应</summary>' +
+    html += '<details class="step-collapse" data-dk="llm-r"><summary>模型原始响应</summary>' +
       '<pre class="step-pre">' + escapeHtml(JSON.stringify(L.raw, null, 2)) + '</pre></details>';
     html += '</div>';
     return html;
@@ -831,8 +1004,8 @@ const Auto = (() => {
    *   kind='param'  候选裁剪展开下一批（「其他」）
    *   kind='action' 动作与元素角色不兼容，重新问「动作」
    * 结果落定前默认展开（用户能看见"正在补问"），落定后收起。 */
-  function followUpDetails(title, requestLabel, rec, hit, settled) {
-    return '<details class="req-details"' + (settled ? '' : ' open') + '>' +
+  function followUpDetails(title, requestLabel, rec, hit, settled, dk) {
+    return '<details class="req-details"' + (dk ? ' data-dk="' + dk + '"' : '') + (settled ? '' : ' open') + '>' +
       '<summary>' + title + '（' + escapeHtml(hit) + '）</summary>' +
       '<div class="req-inner">' +
       '<div class="raw-label">① 发送的请求体（仅「' + requestLabel + '」一题）</div>' +
@@ -842,107 +1015,10 @@ const Auto = (() => {
       '</div></details>';
   }
 
-  /* 补问记录：三类共用同一张卡 ——
-   *   kind='param'  候选裁剪展开下一批（「其他」）
-   *   kind='action' 动作与元素角色不兼容，重新问「动作」
-   *   kind='text'   动作落定后的「文本」（select 给真实选项名 / press 给键名） */
-  function followUpsHtml(step) {
-    const list = step.followUps || [];
-    if (!list.length && !step.trimNote) return '';
-    let html = '';
-    if (step.trimNote) {
-      html += '<div class="sec"><div class="sec-head">候选兜底项</div><div class="qblock-inst">' +
-        escapeHtml(step.trimNote) + '</div></div>';
-    }
-    list.forEach((r) => {
-      if (r.kind === 'action') {
-        const hit = r.action ? ('已改为 ' + r.action) : (r.error ? '失败：' + r.error : '未返回');
-        html += followUpDetails(
-          '动作补问 · 「' + escapeHtml(String(r.from || '')) + '」与元素角色 '
-            + escapeHtml(String(r.role || '')) + ' 不兼容',
-          '动作', r, hit, Boolean(r.action || r.error));
-        return;
-      }
-      if (r.kind === 'text') {
-        const hit = r.text ? ('已选定 ' + r.text) : (r.error ? '失败：' + r.error : '未返回');
-        html += followUpDetails(
-          '文本补问 · 动作「' + escapeHtml(String(r.forAction || '')) + '」确定后的取值',
-          '文本', r, hit, Boolean(r.text || r.error));
-        return;
-      }
-      const hit = r.param ? ('命中 ' + r.param) : (r.error ? '失败：' + r.error : '未命中');
-      html += followUpDetails('参数补问 · 第 ' + r.batch + ' 批', '参数', r, hit, Boolean(r.param || r.error));
-    });
-    return html;
-  }
-
-  function contextHtml(step) {
-    if (!step.payload) return '';
-    return '<details class="req-details"><summary>Jev 请求信息（输入 state · 首轮问题 · 补问 · 输出答案）</summary>' +
-      '<div class="req-inner">' +
-      (trimSummary(step) ? '<div class="trim-note">' + escapeHtml(trimSummary(step)) + '</div>' : '') +
-      stateSectionHtml(step.payload.state) +
-      questionsSectionHtml(step) +
-      trimDetailHtml(step) +
-      followUpsHtml(step) +
-      rawDetailsHtml(step) +
-      '</div></details>';
-  }
-
-  /* 请求信息区的「版本号」：补问/兜底说明是建卡之后才产生的，
-   * 靠它决定要不要重渲染（否则步骤卡里承诺的补问记录永远不显示）。
-   * 必须把「已落定的记录数」也算进来：补问记录在发请求前就 push 了，
-   * 只看 length 的话，拿到响应后不会重渲染，屏幕上永远停在「未命中、无响应」。 */
-  function ctxRevision(step) {
-    const list = step.followUps || [];
-    const settled = list.filter((r) => r.param || r.action || r.text || r.error).length;
-    return list.length + '.' + settled + '|' + (step.trimNote ? '1' : '0') + '|' + (step.exhausted ? '1' : '0');
-  }
-
-  function updateStepCard(step, nodes) {
-    nodes.title.textContent = step.label || '第 ' + step.n + ' 步';
-    const rev = ctxRevision(step);
-    if (nodes.ctx && nodes.ctxRev !== rev) {
-      const prev = nodes.ctx.querySelector('details.req-details');
-      const wasOpen = prev ? prev.open : false;
-      nodes.ctx.innerHTML = contextHtml(step);
-      nodes.ctxRev = rev;
-      const now = nodes.ctx.querySelector('details.req-details');
-      if (now) now.open = wasOpen;      // 重渲染不打断用户已展开的阅读状态
-    }
-    const e = step.exec;
-    if (step.jevError) {
-      nodes.state.textContent = 'Jev 调用失败';
-      nodes.state.className = 'step-state error';
-      nodes.decision.innerHTML = '<div class="step-err">' + escapeHtml(step.jevError) + '</div>';
-    } else if (step.decision) {
-      nodes.decision.innerHTML = decisionHtml(step);
-      animateBars(nodes.decision);
-    }
-    nodes.execZone.innerHTML = llmHtml(step) + execHtml(step);
-    /* ① 截图主体：通栏大图，到达即挂载 */
-    if (step.screenshot && !nodes.shotSlot.querySelector('.step-shot')) {
-      const img = document.createElement('img');
-      img.src = step.screenshot;
-      img.className = 'step-shot';
-      img.alt = '第 ' + step.n + ' 步操作前的页面' + (step.anno && step.anno.box ? '（已标注被操作元素）' : '');
-      /* 标注几何落在 data-* 上：E2E 直接采这些坐标的像素，证明「标注真的在人看到的那张图上」 */
-      if (step.anno && step.anno.box) {
-        img.dataset.anno = [step.anno.box.x, step.anno.box.y, step.anno.box.w, step.anno.box.h,
-          step.anno.badge.x, step.anno.badge.y].join(',');
-      }
-      img.onclick = () => openLightbox(step.screenshot, img.alt);
-      nodes.shotSlot.appendChild(img);
-    }
-    if (e) {
-      nodes.state.textContent = e.skipped ? '已跳过' : (e.ok ? '成功' + (e.elapsedMs != null ? ' · ' + e.elapsedMs + 'ms' : '') : '失败');
-      nodes.state.className = 'step-state ' + (e.skipped ? 'warn' : e.ok ? 'ok' : 'error');
-    } else if (step.terminal) {
-      /* 标题已写明 Jev 判定的动作（如「任务已完成」），状态位只需说明「这是终止帧」 */
-      nodes.state.textContent = '终止';
-      nodes.state.className = 'step-state ' + (step.terminal === '任务已完成' ? 'ok' : 'warn');
-    }
-    updateNav();
+  /* 每次步骤对象变化后调用：重渲染树+详情，并节流落盘 */
+  function touch() {
+    renderFlow();
+    saveRun(false);
   }
 
   /* ---------- 灯箱 ---------- */
@@ -959,9 +1035,12 @@ const Auto = (() => {
     document.body.appendChild(ov);
   }
 
-  /* ---------- 单步确认 ---------- */
-  function awaitConfirm(card) {
+  /* ---------- 单步确认（挂在右侧详情面板底部） ---------- */
+  function awaitConfirm(step) {
     return new Promise((resolve) => {
+      if (view.sess !== 'current' || view.type !== 'step' || view.n !== step.n) select('step', step.n, null, false);
+      const host = document.getElementById('fdBody');
+      if (!host) return resolve('run');   /* 视图异常时保守执行 */
       const bar = el('div', 'confirm-bar');
       const mk = (label, cls, val) => {
         const b = el('button', cls, label);
@@ -972,7 +1051,7 @@ const Auto = (() => {
       bar.appendChild(mk('▶ 执行本步', 'btn-ghost', 'run'));
       bar.appendChild(mk('⏭ 跳过', 'btn-ghost', 'skip'));
       bar.appendChild(mk('■ 中止循环', 'btn-ghost danger', 'abort'));
-      card.querySelector('.step-body').appendChild(bar);
+      host.appendChild(bar);
       bar.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
   }
@@ -1031,7 +1110,7 @@ const Auto = (() => {
   /* ---------- 候选裁剪：Jev 选了「其他」时补问下一批 ----------
    * 只补问「参数」一题（动作已定，不重发整组问题以免连带动摇动作决策），
    * 每一步最多展开 maxTranches 批；每批的请求/响应都留在步骤卡里。 */
-  async function resolveMoreBatches(step, nodes, chip) {
+  async function resolveMoreBatches(step) {
     const trim = AutoCore.normalizeTrim(runCfg.paramTrim);
     for (let batch = 2; batch <= trim.maxTranches; batch++) {
       const pc = AutoCore.paramCriteria({
@@ -1045,8 +1124,7 @@ const Auto = (() => {
       const payload = { state: step.payload.state, model: Config.current.model, questions };
       const rec = { kind: 'param', batch, payload, response: null, error: null, param: null };
       step.followUps.push(rec);
-      chip.textContent = step.n + ' · 展开第 ' + batch + ' 批候选';
-      updateStepCard(step, nodes);
+      touch();
 
       const jev = await callJev(payload);
       if (!jev.ok) { rec.error = jev.error; return false; }
@@ -1073,7 +1151,7 @@ const Auto = (() => {
    * 在发命令前就被拦下，只补问「动作」一题（候选已去掉该元素上不可能的动作，且不带终止态 ——
    * 终止只能走主循环那条通道）。补问的请求/响应同样留在步骤卡里。
    * 与 resolveMoreBatches 的分工：那个改「参数」，这个改「动作」。 */
-  async function resolveActionConflict(step, nodes, chip, conflict, refRoles) {
+  async function resolveActionConflict(step, conflict, refRoles) {
     const questions = AutoCore.buildActionFollowUp(conflict);
     const payload = { state: step.payload.state, model: Config.current.model, questions };
     const rec = {
@@ -1081,8 +1159,7 @@ const Auto = (() => {
       from: conflict.action, role: conflict.role, ref: conflict.ref, why: conflict.why,
     };
     step.followUps.push(rec);
-    chip.textContent = step.n + ' · 动作与元素（' + conflict.role + '）不兼容，补问动作';
-    updateStepCard(step, nodes);
+    touch();
 
     const jev = await callJev(payload);
     if (!jev.ok) { rec.error = jev.error; return false; }
@@ -1108,7 +1185,7 @@ const Auto = (() => {
    * 其余给变量池，可选文本动作附「无」。builder 返回 null（无需文本 / 零候选）
    * 时不发请求，调用方据此记确定性失败步。
    * 与前两个补问的分工：param 改「参数」、action 改「动作」、这个补「文本」。 */
-  async function resolveTextFollowUp(step, nodes, chip, refLabels) {
+  async function resolveTextFollowUp(step, refLabels) {
     const questions = AutoCore.buildTextFollowUp({
       action: step.decision.action, param: step.decision.param,
       snapshot: step.snapshot, variables: runCfg.variables,
@@ -1117,13 +1194,12 @@ const Auto = (() => {
     if (!questions) return false;   // 无需文本不会进来；零候选 = 配置性缺失，由调用方记失败步
 
     const payload = { state: step.payload.state, model: Config.current.model, questions };
-    /* 注意字段名：ctxRevision 用 r.action 判断「动作补问已落定」，text 记录的动作只是
-     * 上下文 —— 建记录时就填 action 会让卡片在补问飞行中渲染一次「未返回」后
-     * 再也不刷新（revision 不再变化）。上下文用独立的 forAction。 */
+    /* 注意字段名：补问渲染用 r.action 判断「动作补问已落定」，text 记录的动作只是
+     * 上下文 —— 建记录时就填 action 会让详情在补问飞行中渲染一次「未返回」后
+     * 再也不刷新。上下文用独立的 forAction。 */
     const rec = { kind: 'text', payload, response: null, error: null, text: null, forAction: step.decision.action };
     step.followUps.push(rec);
-    chip.textContent = step.n + ' · 补问文本（动作 ' + step.decision.action + ' 已定）';
-    updateStepCard(step, nodes);
+    touch();
 
     const jev = await callJev(payload);
     if (!jev.ok) { rec.error = jev.error; return false; }
@@ -1324,9 +1400,7 @@ const Auto = (() => {
     els.runPill.className = 'status-pill busy';
     els.runPill.textContent = '运行中';
     els.runPill.dataset.state = 'running';
-    els.timeline.hidden = false;
-    els.timeline.innerHTML = '';
-    buildStage();
+    renderFlow();
     els.exportBtn.hidden = true;
     setProgress(0);
     startTimer();
@@ -1383,10 +1457,8 @@ const Auto = (() => {
      * 先静默关闭残留会话：上轮结束后浏览器可能还开着，已开会话上再 open 会报错；
      * 顺带保证每轮拿到全新的内存态页面（如演示邮箱）。 */
     await apiJson('/api/browser/close', {});
-    addChip('open · ' + shortUrl(runCfg.url), 'current', null).dataset.chip = 'open';
     const opened = await apiJson('/api/browser/open', Object.assign(
       { url: runCfg.url, browser: runCfg.browser }, runCfg.window));
-    markChip('open', opened.ok ? 'ok' : 'error');
     if (!opened.ok) {
       finishRun({ done: false, state: 'error', reason: '打开浏览器失败：' + opened.error });
       return;
@@ -1462,16 +1534,11 @@ const Auto = (() => {
         trim: param.meta, followUps: [], trimNote: null,
       };
       steps.push(step);
-      const nodes = newStepCard(step);
-      const chip = addChip(n + ' · …', 'current', n);
-      chip.dataset.chip = String(n);
-      chip.textContent = n + ' · 决策中';
 
       const jev = await callJev(payload);
       if (!jev.ok) {
         step.jevError = jev.error;
-        chip.textContent = n + ' · Jev 失败'; markChip(n, 'error');
-        updateStepCard(step, nodes);
+        touch();
         finishRun({ done: false, state: 'error', reason: jev.error });
         return;
       }
@@ -1496,11 +1563,8 @@ const Auto = (() => {
           : AutoCore.describeDecision(step.decision, refLabels, runCfg.variables);
         /* 弹窗步没有「未完成」题，不参与完成度收敛（两连 <0.2 提前终止的判定） */
         if (step.decision.unfinished != null) unfinishedHistory.push(step.decision.unfinished);
-        chip.textContent = n + ' · ' + step.label;
-      } else {
-        chip.textContent = n + ' · 决策异常';
       }
-      updateStepCard(step, nodes);
+      touch();
 
       /* ⑤b 候选裁剪的兜底项「其他」：同一步内补问下一批（最多 maxTranches 批） */
       if (step.decision) {
@@ -1514,20 +1578,17 @@ const Auto = (() => {
             step.exhausted = true;
             step.exec = { ok: false, error: 'Jev 选了候选里没有的「其他」（当前页面未触发候选裁剪）', cmd: null };
             step.label = step.decision.action + '【' + AutoCore.REF_MORE + ' · 无效选项】';
-            chip.textContent = n + ' · ' + step.label;
-          } else if (await resolveMoreBatches(step, nodes, chip)) {
+          } else if (await resolveMoreBatches(step)) {
             step.label = AutoCore.describeDecision(step.decision, refLabels, runCfg.variables);
-            chip.textContent = n + ' · ' + step.label;
           } else {
             /* 失败原因取补问记录里的真实原因（Jev 调用失败 / 解析失败 / 答案不在候选里…） */
             const last = step.followUps[step.followUps.length - 1] || {};
             step.exhausted = true;
             step.exec = { ok: false, error: last.error || '候选已展开到最后一批仍未命中目标元素', cmd: null };
             step.label = step.decision.action + '【' + AutoCore.REF_MORE + ' · 补问未命中】';
-            chip.textContent = n + ' · ' + step.label;
           }
         }
-        updateStepCard(step, nodes);
+        touch();
       }
 
       /* ⑤c 动作 × 元素角色不兼容（如 select 配 button）：同一步内补问「动作」，
@@ -1535,10 +1596,9 @@ const Auto = (() => {
       if (step.decision && !step.exhausted) {
         const conflict = AutoCore.checkActionRole(step.decision, refRoles);
         if (conflict.conflict) {
-          const fixed = await resolveActionConflict(step, nodes, chip, conflict, refRoles);
+          const fixed = await resolveActionConflict(step, conflict, refRoles);
           if (fixed) {
             step.label = AutoCore.describeDecision(step.decision, refLabels, runCfg.variables);
-            chip.textContent = n + ' · ' + step.label;
           } else {
             const last = step.followUps[step.followUps.length - 1] || {};
             step.exhausted = true;
@@ -1550,9 +1610,8 @@ const Auto = (() => {
              * （那会把真正的目标挤出候选首批，逼出多余的补问） */
             step.refNotTried = true;
             step.label = step.decision.action + '【与元素角色不兼容】';
-            chip.textContent = n + ' · ' + step.label;
           }
-          updateStepCard(step, nodes);
+          touch();
         }
       }
 
@@ -1563,10 +1622,9 @@ const Auto = (() => {
       if (step.decision && !step.exhausted && !dialogMode
         && AutoCore.needText(step.decision.action)
         && !AutoCore.TERMINAL_TOOLS[step.decision.action]) {
-        const textOk = await resolveTextFollowUp(step, nodes, chip, refLabels);
+        const textOk = await resolveTextFollowUp(step, refLabels);
         if (textOk) {
           step.label = AutoCore.describeDecision(step.decision, refLabels, runCfg.variables);
-          chip.textContent = n + ' · ' + step.label;
         } else {
           const last = step.followUps.length ? step.followUps[step.followUps.length - 1] : null;
           step.exhausted = true;
@@ -1578,22 +1636,20 @@ const Auto = (() => {
           /* 命令从未发出，元素本身没问题 —— 与 ⑤c 同理不背 failedRefs 的降权 */
           step.refNotTried = true;
           step.label = step.decision.action + '【缺少文本取值】';
-          chip.textContent = n + ' · ' + step.label;
         }
-        updateStepCard(step, nodes);
+        touch();
       }
 
       /* ⑦ 单步确认（设计 §10/§11：单步确认是安全阀，终止判定同样要过门） */
       if (cadence() === 'single') {
-        const choice = await awaitConfirm(nodes.card);
-        if (choice === 'abort') { abortFlag = true; markChip(n, 'pending'); step.exec = { skipped: true }; updateStepCard(step, nodes); finishRun({ done: false, state: 'aborted', reason: '用户中止' }); return; }
+        const choice = await awaitConfirm(step);
+        if (choice === 'abort') { abortFlag = true; step.exec = { skipped: true }; touch(); finishRun({ done: false, state: 'aborted', reason: '用户中止' }); return; }
         if (choice === 'skip') {
           step.exec = { skipped: true };
           step.historyLine = n + '. ' + step.label + ' · 用户跳过';
           history.push(step.historyLine);
           lastResult = '用户跳过（未执行）';
-          markChip(n, 'pending');
-          updateStepCard(step, nodes);
+          touch();
           saveRun(false);
           continue;
         }
@@ -1607,8 +1663,7 @@ const Auto = (() => {
         step.terminal = step.decision.action;
         step.label = step.decision.action;
         if (runCfg.screenshotOn) { await takeShot(step, 'step-' + n + '-final'); }
-        updateStepCard(step, nodes);
-        chip.remove();
+        touch();
         history.push(AutoCore.formatHistoryStep(n, step.label, doneTerminal, null));
         finishRun({
           done: doneTerminal,
@@ -1646,8 +1701,7 @@ const Auto = (() => {
         : '失败：' + String((step.exec && step.exec.error) || '未知错误').slice(0, 120);
       consecutiveFails = (ok || noop || (step.exec && step.exec.skipped)) ? 0 : consecutiveFails + 1;
 
-      markChip(n, ok ? 'ok' : 'error');
-      updateStepCard(step, nodes);
+      touch();
       saveRun(false);
 
       /* ⑪ 终止判断 */
@@ -1760,13 +1814,15 @@ const Auto = (() => {
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
     });
     els.exportBtn.onclick = exportRun;
-    /* 轮播键盘切换（输入控件聚焦、或编辑弹窗打开时不抢按键） */
+    /* 键盘 ←→ 在当前视图的步骤列表间移动（历史会话视图同样生效；
+     * 输入控件聚焦、或编辑弹窗打开时不抢按键） */
     document.addEventListener('keydown', (e) => {
       if (els.panel.hidden || !steps.length || !els.taskModal.hidden) return;
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
       const t = e.target;
       if (t && /^(input|textarea|select)$/i.test(t.tagName)) return;
-      gotoStep(view.idx + (e.key === 'ArrowRight' ? 1 : -1), true);
+      const list = viewedSteps(); if (!list.length) return;
+      select('step', Math.max(1, Math.min(list.length, view.n + (e.key === 'ArrowRight' ? 1 : -1))), null, true);
       e.preventDefault();
     });
   }

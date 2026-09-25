@@ -706,7 +706,7 @@ table.spec td code { font-size: 11px; }
 .task-modal .auto-config textarea:focus { outline: none; }
 .task-modal .modal-body .task-error { color: var(--red); }
 
-/* ---------- 运行流水：头部 / 状态 / 时间线 ---------- */
+/* ---------- 运行流水：头部 / 状态 ---------- */
 .auto-flow-wrap { border-top: 1px dashed var(--border); padding-top: 16px; }
 .flow-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding-bottom: 12px; }
 .flow-head h2 { font-size: 14px; margin: 0; font-weight: 700; }
@@ -719,67 +719,112 @@ table.spec td code { font-size: 11px; }
 .auto-progress { font-family: var(--mono); font-size: 12px; color: var(--text-2); }
 .auto-elapsed { font-family: var(--mono); font-size: 12px; color: var(--text-3); }
 
-.auto-timeline { display: flex; gap: 6px; flex-wrap: wrap; padding-bottom: 2px; }
-.tl-chip {
-  font-size: 11.5px; font-family: var(--mono); font-weight: 600;
-  padding: 4px 11px; border-radius: 100px; cursor: pointer;
-  border: 1px solid var(--border-strong); background: #fff; color: var(--text-3);
-  transition: all .15s; max-width: 230px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.tl-chip:hover { border-color: var(--accent); color: var(--accent); }
-.tl-chip.ok { color: #15803d; background: #ecfdf5; border-color: #bbf7d0; }
-.tl-chip.error { color: #b91c1c; background: #fef2f2; border-color: #fecaca; }
-.tl-chip.pending { opacity: .55; }
-.tl-chip.current {
-  color: var(--accent); background: var(--accent-soft); border-color: #dcdffc;
-  animation: tlPulse 1.6s ease-in-out infinite;
-}
+/* tlPulse 动画保留：会话树里 .dot.run / .dot.pending 圆点仍在引用 */
 @keyframes tlPulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(79, 70, 229, .28); }
   50% { box-shadow: 0 0 0 5px rgba(79, 70, 229, .08); }
 }
 
-/* ---------- 步骤轮播 ---------- */
-.stage-wrap { display: flex; flex-direction: column; gap: 10px; outline: none; }
-.stage-nav { display: flex; align-items: center; gap: 10px; }
-.stage-btn {
-  width: 30px; height: 30px; flex: none; border: 1px solid var(--border-strong); border-radius: 8px;
-  background: #fff; color: var(--text-2); font-size: 17px; line-height: 1; cursor: pointer;
-  transition: all .15s; display: flex; align-items: center; justify-content: center;
-  font-family: var(--mono);
+/* ---------- 会话树 + 右侧详情 ---------- */
+.flow-main { display: flex; gap: 14px; align-items: flex-start; }
+.flow-tree {
+  width: 300px; flex: none; background: #fafbfd; border: 1px solid var(--border);
+  border-radius: 12px; padding: 8px; max-height: 70vh; overflow-y: auto;
 }
-.stage-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
-.stage-btn:disabled { opacity: .35; cursor: default; }
-/* counter 不再撑满整行：让 ‹ 步骤 N / M › 聚成一簇靠左，横向留白交给 follow 按钮 */
-.stage-counter {
-  flex: none; min-width: 0; font-size: 12.5px; font-family: var(--mono); color: var(--text-2);
+.tn {
+  display: flex; align-items: center; gap: 7px; width: 100%; text-align: left;
+  padding: 6px 9px; border: none; background: none; border-radius: 8px;
+  cursor: pointer; color: var(--text-2); font-size: 12.5px; line-height: 1.45; font-family: inherit;
+}
+.tn:hover { background: #f0f2fa; }
+.tn.sel { background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+.tn .lb { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tn .dur { font-size: 10.5px; color: var(--text-3); font-family: var(--mono); }
+.tn.kid { margin-left: 20px; }
+.tn.act-kid { margin-left: 40px; font-size: 12px; color: var(--text-3); }
+.tn.follow-btn { justify-content: center; color: var(--accent); font-weight: 600; }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.dot.ok { background: #22c55e; } .dot.err { background: #ef4444; }
+.dot.run { background: #f59e0b; animation: tlPulse 1.6s ease-in-out infinite; }
+.dot.mute { background: #cbd0da; } .dot.term { background: var(--accent); }
+/* AutoCore.actionStatus 的实际返回值是 error/pending（非 err/run），补两个别名圆点 */
+.dot.error { background: #ef4444; }
+.dot.pending { background: #f59e0b; animation: tlPulse 1.6s ease-in-out infinite; }
+.tn .k { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 4px; flex: none; }
+.tn .k.jev { background: #f5f1fe; color: #6d28d9; border: 1px solid #e4dcfa; }
+.tn .k.llm { background: #ecfdf5; color: #047857; border: 1px solid #bbf7d0; }
+
+.flow-detail { flex: 1; min-width: 0; }
+.fd-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 12px;
+}
+.fd-head .crumb { font-size: 11px; color: var(--text-3); }
+.fd-head h2 { font-size: 14px; margin: 0; font-weight: 700; }
+.fd-state { font-size: 11.5px; font-weight: 700; }
+.fd-state.ok { color: #15803d; } .fd-state.err { color: #b91c1c; }
+.fd-state.warn { color: #b45309; } .fd-state.run { color: var(--accent); }
+.fd-state.term { color: var(--accent); }
+.stepnav button {
+  font-size: 12px; border: 1px solid var(--border-strong); background: #fff;
+  border-radius: 8px; padding: 4px 12px; cursor: pointer; color: var(--text-2);
+}
+.stepnav button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.stepnav button:disabled { opacity: .4; cursor: default; }
+.fd-body { display: flex; flex-direction: column; gap: 14px; }
+.kv { display: flex; gap: 10px; font-size: 12.5px; line-height: 1.55; }
+.kv .kv-k { width: 76px; flex: none; color: var(--text-3); font-size: 11.5px; padding-top: 1px; }
+.kv .kv-v { color: var(--text-2); min-width: 0; }
+table.ov { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.ov th { text-align: left; font-size: 11px; color: var(--text-3); font-weight: 700; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+table.ov td { padding: 7px 10px; border-bottom: 1px solid #f3f4f6; color: var(--text-2); }
+table.ov tbody tr { cursor: pointer; }
+table.ov tbody tr:hover { background: #f7f8ff; }
+.alist { display: flex; flex-direction: column; gap: 8px; }
+.acard {
+  display: flex; align-items: center; gap: 10px; border: 1px solid var(--border);
+  border-radius: 10px; padding: 10px 13px; cursor: pointer; background: #fff;
+  font-family: inherit; text-align: left; transition: border-color .15s;
+}
+.acard:hover { border-color: #a5b4fc; }
+.acard .t { flex: 1; font-size: 12.5px; color: var(--text-2); font-weight: 600; }
+.acard .m { font-size: 11px; color: var(--text-3); font-family: var(--mono); }
+.fd-tag { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 5px; }
+.fd-tag.jev { background: #f5f1fe; color: #6d28d9; }
+.fd-tag.llm { background: #ecfdf5; color: #047857; }
+/* 分节小标题（会话总览 / 本步行动）：旧轮播没有这个类，随树视图一并补上 */
+.sec-t { font-size: 12px; font-weight: 700; color: var(--text-3); letter-spacing: .05em; }
+
+/* 会话下拉 */
+.sess-dd { position: relative; }
+.sess-btn {
+  font-size: 12px; font-family: var(--mono); padding: 5px 12px;
+  border: 1px solid #dcdffc; background: var(--accent-soft); color: var(--accent);
+  border-radius: 8px; cursor: pointer; max-width: 320px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.stage-follow {
-  display: none; flex: none; font-size: 12px; font-weight: 600; padding: 5px 12px; border-radius: 100px;
-  border: 1px solid #dcdffc; background: var(--accent-soft); color: var(--accent); cursor: pointer;
+.sess-btn:hover { border-color: var(--accent); }
+.sess-list {
+  position: absolute; top: 110%; left: 0; z-index: 40; background: #fff;
+  border: 1px solid var(--border-strong); border-radius: 10px;
+  box-shadow: var(--shadow-lift); min-width: 360px; max-width: 480px; overflow: hidden;
 }
-.stage-follow.show { display: inline-flex; }
-.stage-viewport { overflow: hidden; }
-.stage-track { display: flex; align-items: flex-start; transition: transform .28s ease; }
+.sess-item { padding: 9px 13px; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid #f3f4f6; }
+.sess-item:last-child { border-bottom: none; }
+.sess-item .pick { flex: 1; min-width: 0; background: none; border: none; cursor: pointer; text-align: left; font-family: inherit; display: flex; gap: 8px; align-items: center; }
+.sess-item:hover { background: #f7f8ff; }
+.sess-item.cur { background: var(--accent-soft); }
+.sess-item .sid { font-family: var(--mono); font-size: 11.5px; color: var(--accent); flex: none; }
+.sess-item .sg { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font-size: 12px; }
+.sess-item .st { font-size: 11px; color: var(--text-3); flex: none; }
+.sess-del { background: none; border: none; color: var(--text-3); cursor: pointer; font-size: 13px; padding: 2px 6px; border-radius: 5px; flex: none; }
+.sess-del:hover { color: #b91c1c; background: #fef2f2; }
 
-/* ---------- 步骤卡 ---------- */
-.step-card {
-  flex: 0 0 100%; min-width: 100%;
-  border: 1px solid var(--border); border-radius: 12px; background: #fff; overflow: hidden;
+@media (max-width: 1080px) { .flow-tree { width: 240px; } }
+@media (max-width: 900px) {
+  .flow-main { flex-direction: column; }
+  .flow-tree { width: 100%; max-height: 40vh; }
 }
-.step-head {
-  display: flex; align-items: center; gap: 12px; padding: 11px 16px;
-  background: #f7f8fa; border-bottom: 1px solid var(--border); font-size: 13px;
-}
-.step-no { font-weight: 700; color: var(--accent); white-space: nowrap; }
-.step-title { flex: 1; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.step-state { font-size: 12px; color: var(--text-3); white-space: nowrap; }
-.step-state.ok { color: #15803d; font-weight: 600; }
-.step-state.error { color: #b91c1c; font-weight: 600; }
-.step-state.warn { color: #b45309; font-weight: 600; }
-.step-body { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 14px; }
 
 /* 卡内分区 */
 .sec { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
