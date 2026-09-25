@@ -71,6 +71,7 @@ const Auto = (() => {
   let runId = null;            // 本轮会话 id（start 时生成）
   let runStartedAt = null;
   let saveTimer = null;
+  let saveChain = Promise.resolve();  // 保存串行链：final PUT 严格晚于在途的节流保存
   let saveFailedOnce = false;
   let endReasonText = '';
 
@@ -97,12 +98,13 @@ const Auto = (() => {
         saveFailedOnce = false;
         if (final) refreshRunsList();
       } catch (e) {
+        console.warn('[auto] saveRun failed:', e);
         if (!saveFailedOnce) { toast('运行记录保存失败（不影响运行）：' + (e && e.message ? e.message : e)); saveFailedOnce = true; }
       }
     };
-    if (final) { if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; } return doSave(); }
+    if (final) { if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; } saveChain = saveChain.then(doSave); return saveChain; }
     if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => { saveTimer = null; doSave(); }, 500);
+    saveTimer = setTimeout(() => { saveTimer = null; saveChain = saveChain.then(doSave); }, 500);
   }
 
   async function refreshRunsList() { /* Task 5 实装（拉 GET /api/runs） */ }
