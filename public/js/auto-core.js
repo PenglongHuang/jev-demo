@@ -648,6 +648,99 @@
     return n + '. ' + label + (ok ? '成功' : '失败：' + String(err || '').slice(0, 80));
   }
 
+  /* ===================== 运行记录归一（会话树 / 落盘共用） =====================
+   * live 步骤与落盘步骤字段名不同（payload/request、llm.raw/llm.response），
+   * actionsOf 两头兼容，是「树 = 模型调用流水」的唯一权威来源。 */
+  function actionsOf(step) {
+    const s = step || {};
+    const out = [];
+    const mainPayload = s.payload || s.request || null;
+    if (mainPayload) {
+      const n = Object.keys(mainPayload.questions || {}).length;
+      const dialog = n === 1 && mainPayload.questions['动作'] && !mainPayload.questions['参数'];
+      out.push({
+        kind: 'main', title: dialog ? 'Jev 弹窗步 · 1 题' : 'Jev 首轮 · ' + n + ' 题',
+        payload: mainPayload, response: s.response || null, error: s.jevError || null,
+      });
+    }
+    (s.followUps || []).forEach((r) => {
+      const p = r.payload || r.request || null;
+      const titles = {
+        param: '参数补问 · 第 ' + r.batch + ' 批',
+        action: '动作补问 · 「' + (r.from || '') + '」与角色 ' + (r.role || '') + ' 冲突',
+        text: '文本补问 · ' + (r.forAction || ''),
+      };
+      out.push({
+        kind: r.kind || 'param', title: titles[r.kind] || '补问',
+        payload: p, response: r.response || null, error: r.error || null,
+        batch: r.batch != null ? r.batch : null, param: r.param || null, action: r.action || null,
+        text: r.text || null, forAction: r.forAction || null, from: r.from || null,
+        role: r.role || null, ref: r.ref || null, why: r.why || null,
+      });
+    });
+    const L = s.llm;
+    if (L) {
+      out.push({
+        kind: 'llm', title: 'LLM 生成输入',
+        payload: null, messages: L.messages || null, response: L.raw || L.response || null,
+        text: L.text || null, error: L.error || null,
+      });
+    }
+    return out;
+  }
+
+  /* 行动状态：落定（param/action/text/生成文本 或 main 拿到响应）=ok；error=error；其余=pending */
+  function actionStatus(a) {
+    if (a.error) return 'error';
+    if (a.kind === 'main') return a.response ? 'ok' : 'pending';
+    if (a.kind === 'llm') return a.text ? 'ok' : 'pending';
+    return (a.param || a.action || a.text) ? 'ok' : 'pending';
+  }
+
+  /* 会话 id：r-MMDD-HHmm-xxxx（与 server 端 RUN_ID_RE 严格一致，防路径穿越校验同一份规则） */
+  function newRunId(d) {
+    const t = d || new Date();
+    const p2 = (x) => String(x).padStart(2, '0');
+    return 'r-' + p2(t.getMonth() + 1) + p2(t.getDate()) + '-' + p2(t.getHours()) + p2(t.getMinutes())
+      + '-' + Math.random().toString(36).slice(2, 6);
+  }
+
+  /* 落盘/导出统一格式：{ meta, steps }。meta 永远排在 JSON 前部（插入序），
+   * 截图 base64 都在 steps 里，列表接口只读索引、不碰这里。 */
+  function buildRunRecord(o) {
+    const steps = (o.steps || []).map((s) => ({
+      n: s.n, label: s.label, pageInfo: s.pageInfo, snapshot: s.snapshot || null,
+      refLabels: s.refLabels || null, decision: s.decision || null,
+      request: s.payload || null, response: s.response || null, jevError: s.jevError || null,
+      exec: s.exec || null, anno: s.anno || null, annoError: s.annoError || null,
+      llm: s.llm ? { messages: s.llm.messages, response: s.llm.raw, text: s.llm.text, error: s.llm.error } : null,
+      screenshot: s.screenshot || null, historyLine: s.historyLine || null,
+      trim: s.trim || null, trimNote: s.trimNote || null,
+      followUps: (s.followUps || []).map((r) => ({
+        kind: r.kind || 'param', request: r.payload, response: r.response,
+        batch: r.batch != null ? r.batch : null, param: r.param || null, action: r.action || null,
+        text: r.text || null, forAction: r.forAction || null, from: r.from || null,
+        role: r.role || null, ref: r.ref || null, why: r.why || null, error: r.error || null,
+      })),
+    }));
+    const c = o.runCfg || {};
+    const jevCalls = steps.reduce((a, s) => a + (s.request ? 1 : 0) + (s.followUps || []).length, 0);
+    const llmCalls = steps.filter((s) => s.llm).length;
+    return {
+      meta: {
+        id: o.id, goal: c.goal, startUrl: c.url,
+        browser: c.browserUsed || c.browser, window: c.window || null,
+        variables: c.variables || [], maxSteps: c.maxSteps,
+        screenshotOn: !!c.screenshotOn, paramTrim: c.paramTrim || null,
+        jevModel: o.jevModel, llmModel: o.llmModel,
+        startedAt: o.startedAt, endedAt: o.endedAt || null,
+        endState: o.endState || 'running', endReason: o.endReason || null,
+        stepCount: steps.length, jevCalls, llmCalls, exportedAt: o.exportedAt || null,
+      },
+      steps,
+    };
+  }
+
   var AutoCore = {
     AUTO_TOOLS: AUTO_TOOLS,
     TERMINAL_TOOLS: TERMINAL_TOOLS,
@@ -688,7 +781,11 @@
     extractRefContext: extractRefContext,
     sanitizeLlmText: sanitizeLlmText,
     describeDecision: describeDecision,
-    formatHistoryStep: formatHistoryStep
+    formatHistoryStep: formatHistoryStep,
+    actionsOf: actionsOf,
+    actionStatus: actionStatus,
+    newRunId: newRunId,
+    buildRunRecord: buildRunRecord
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = AutoCore;

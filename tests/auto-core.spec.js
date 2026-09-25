@@ -646,3 +646,100 @@ test('文本补问 → 执行规划衔接：选项名 / 键名不在变量池时
     AutoCore.planExecution({ action: 'tab-close', param: '无需元素', text: '无' }, []),
     { kind: 'act', op: 'tab-close', ref: null, text: null });
 });
+
+/* ===================== actionsOf / buildRunRecord / newRunId ===================== */
+
+test('actionsOf：首轮 + 三类补问 + LLM 的顺序、标题与字段归一', () => {
+  const step = {
+    n: 4, payload: { state: {}, model: 'jev-latest', questions: { 动作: {}, 参数: {}, 未完成: {} } },
+    response: { answers: {} },
+    followUps: [
+      { kind: 'param', batch: 2, payload: { questions: { 参数: {} } }, response: { answers: {} }, param: 'e14' },
+      { kind: 'action', payload: { questions: { 动作: {} } }, response: null, error: null, action: null, from: 'select', role: 'button', ref: 'e31' },
+      { kind: 'text', payload: { questions: { 文本: {} } }, response: { answers: {} }, text: '招商银行', forAction: 'fill' },
+    ],
+    llm: { messages: [{ role: 'user', content: 'p' }], raw: { choices: [] }, text: '招商银行', error: null },
+  };
+  const acts = AutoCore.actionsOf(step);
+  assert.strictEqual(acts.length, 5);
+  assert.deepStrictEqual(
+    acts.map((a) => a.kind),
+    ['main', 'param', 'action', 'text', 'llm']
+  );
+  assert.strictEqual(acts[0].title, 'Jev 首轮 · 3 题');
+  assert.strictEqual(acts[1].title, '参数补问 · 第 2 批');
+  assert.ok(/动作补问/.test(acts[2].title) && acts[2].from === 'select');
+  assert.ok(/文本补问/.test(acts[3].title) && acts[3].forAction === 'fill');
+  assert.strictEqual(acts[4].title, 'LLM 生成输入');
+  assert.strictEqual(acts[4].text, '招商银行');
+  assert.strictEqual(acts[4].payload, null);          // LLM 的输入在 messages，不在 payload
+});
+
+test('actionsOf：弹窗步 1 题标题；序列化形状（request 字段）同样可读', () => {
+  const dialogStep = {
+    payload: { state: {}, questions: { 动作: { type: 'choice', criteria: { 'dialog-accept': '' } } } },
+    response: { answers: {} },
+  };
+  assert.strictEqual(AutoCore.actionsOf(dialogStep)[0].title, 'Jev 弹窗步 · 1 题');
+
+  /* 落盘记录的字段名是 request；actionsOf 必须两头兼容（live: payload / 落盘: request） */
+  const diskStep = {
+    request: { state: {}, questions: { 动作: {}, 参数: {}, 未完成: {} } },
+    response: { answers: {} },
+    followUps: [{ kind: 'param', batch: 2, request: { questions: { 参数: {} } }, response: { answers: {} }, param: 'e9' }],
+    llm: { messages: [], response: { choices: [] }, text: 'x' },
+  };
+  const acts = AutoCore.actionsOf(diskStep);
+  assert.strictEqual(acts.length, 3);
+  assert.strictEqual(acts[0].payload, diskStep.request);
+  assert.strictEqual(acts[1].payload, diskStep.followUps[0].request);
+  assert.strictEqual(acts[2].response, diskStep.llm.response);
+});
+
+test('actionStatus：落定=ok、出错=error、在途=pending', () => {
+  assert.strictEqual(AutoCore.actionStatus({ kind: 'main', response: {} }), 'ok');
+  assert.strictEqual(AutoCore.actionStatus({ kind: 'main', response: null, error: null }), 'pending');
+  assert.strictEqual(AutoCore.actionStatus({ kind: 'param', param: 'e9' }), 'ok');
+  assert.strictEqual(AutoCore.actionStatus({ kind: 'action', action: 'click' }), 'ok');
+  assert.strictEqual(AutoCore.actionStatus({ kind: 'text', text: 'x' }), 'ok');
+  assert.strictEqual(AutoCore.actionStatus({ kind: 'param', error: 'x' }), 'error');
+  assert.strictEqual(AutoCore.actionStatus({ kind: 'llm', text: '招商银行' }), 'ok');
+  assert.strictEqual(AutoCore.actionStatus({ kind: 'llm', error: 'no cfg' }), 'error');
+});
+
+test('newRunId：形状 r-MMDD-HHmm-xxxx，与 server 端 RUN_ID_RE 一致', () => {
+  const id = AutoCore.newRunId(new Date(2026, 8, 25, 19, 12));
+  assert.match(id, /^r-[0-9]{4}-[0-9]{4}-[a-z0-9]{4}$/);
+  assert.ok(id.startsWith('r-0925-1912-'));
+});
+
+test('buildRunRecord：meta 汇总正确、steps 序列化含 request/followUps/anno', () => {
+  const runCfg = {
+    goal: 'g', url: 'http://x/', variables: [{ name: 'k', value: 'v' }], maxSteps: 15,
+    screenshotOn: true, browser: 'chrome', browserUsed: 'chrome', window: { windowMode: 'max' },
+    paramTrim: { on: true },
+  };
+  const steps = [
+    { n: 1, label: 'l1', pageInfo: { url: 'u', title: 't' }, snapshot: 'S', refLabels: { e1: 'x' },
+      decision: { action: 'click', param: 'e1' }, payload: { state: {}, questions: {} }, response: { answers: {} },
+      exec: { ok: true, cmd: 'playwright-cli click e1', elapsedMs: 5 }, anno: null, screenshot: 'data:image/png;base64,AAA',
+      historyLine: '1. l1', trim: null, trimNote: null, followUps: [] },
+    { n: 2, label: 'l2', pageInfo: { url: 'u', title: 't' }, snapshot: '', refLabels: {},
+      decision: { action: '生成输入', param: 'e2' }, payload: { state: {}, questions: {} }, response: { answers: {} },
+      exec: { ok: true }, anno: null, screenshot: null, historyLine: '2. l2', trim: null, trimNote: null,
+      followUps: [{ kind: 'param', batch: 2, payload: { questions: {} }, response: { answers: {} }, param: 'e9' }],
+      llm: { messages: [{ role: 'user', content: 'p' }], raw: { id: 'x' }, text: 'v', error: null } },
+  ];
+  const rec = AutoCore.buildRunRecord({
+    id: 'r-0925-1912-ab12', runCfg, jevModel: 'jev-latest', llmModel: 'm-llm',
+    startedAt: '2026-09-25T11:12:00.000Z', endState: 'done', endReason: 'Jev 判定：任务已完成', steps,
+  });
+  assert.strictEqual(rec.meta.id, 'r-0925-1912-ab12');
+  assert.strictEqual(rec.meta.stepCount, 2);
+  assert.strictEqual(rec.meta.jevCalls, 3);   /* 2 次首轮 + 1 次参数补问 */
+  assert.strictEqual(rec.meta.llmCalls, 1);
+  assert.strictEqual(rec.meta.endState, 'done');
+  assert.strictEqual(rec.steps[1].request.state, steps[1].payload.state);   /* payload → request */
+  assert.strictEqual(rec.steps[1].llm.response, steps[1].llm.raw);
+  assert.strictEqual(rec.steps[1].followUps[0].request, steps[1].followUps[0].payload);
+});
