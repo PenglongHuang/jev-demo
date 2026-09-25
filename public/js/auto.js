@@ -497,6 +497,8 @@ const Auto = (() => {
     }
     const treeScroll = document.getElementById('flowTree');
     const keepTop = treeScroll ? treeScroll.scrollTop : 0;
+    const bodyScroll = document.getElementById('fdBody');
+    const keepBody = bodyScroll ? bodyScroll.scrollTop : 0;
     const openMap = {};
     document.querySelectorAll('#fdBody details[data-dk]').forEach((d) => { openMap[d.dataset.dk] = d.open; });
     els.flow.innerHTML = '<div class="flow-main">'
@@ -507,8 +509,20 @@ const Auto = (() => {
     renderDetail();
     const t2 = document.getElementById('flowTree');
     if (t2) t2.scrollTop = keepTop;
-    const selNode = t2 && t2.querySelector('.tn.sel');
-    if (selNode) selNode.scrollIntoView({ block: 'nearest' });
+    const b2 = document.getElementById('fdBody');
+    if (b2) b2.scrollTop = keepBody;
+    /* 跟随模式才把选中节点夹回树视口：纯纵向（只写 scrollTop，绝不动横向，也不滚页面）；
+     * 用户手动翻树（follow=false）时永不打扰 */
+    if (view.follow && view.sess === 'current' && t2) {
+      const selNode = t2.querySelector('.tn.sel');
+      if (selNode) {
+        const top = selNode.getBoundingClientRect().top - t2.getBoundingClientRect().top + t2.scrollTop;
+        const above = top - 8;
+        const below = top + selNode.offsetHeight + 8 - t2.clientHeight;
+        if (above < t2.scrollTop) t2.scrollTop = Math.max(0, above);
+        else if (below > t2.scrollTop) t2.scrollTop = below;
+      }
+    }
     document.querySelectorAll('#fdBody details[data-dk]').forEach((d) => { if (openMap[d.dataset.dk] != null) d.open = openMap[d.dataset.dk]; });
   }
 
@@ -996,10 +1010,14 @@ const Auto = (() => {
       '</div></details>';
   }
 
-  /* 每次步骤对象变化后调用：重渲染树+详情，并节流落盘 */
+  /* 每次步骤对象变化后调用：渲染合并到下一帧（同一帧多次 touch 只重建一次），并节流落盘。
+   * 用户交互路径（select / 跟随按钮 / 会话切换）仍走同步 renderFlow，不经过此合并。 */
+  let renderQueued = false;
   function touch() {
-    renderFlow();
     saveRun(false);
+    if (renderQueued) return;
+    renderQueued = true;
+    requestAnimationFrame(() => { renderQueued = false; renderFlow(); });
   }
 
   /* ---------- 灯箱 ---------- */
@@ -1521,6 +1539,7 @@ const Auto = (() => {
       const jev = await callJev(payload);
       if (!jev.ok) {
         step.jevError = jev.error;
+        step.label = 'Jev 调用失败';   /* 错误终步在树里不能永远显示「决策中…」 */
         touch();
         finishRun({ done: false, state: 'error', reason: jev.error });
         return;

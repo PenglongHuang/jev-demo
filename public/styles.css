@@ -729,7 +729,7 @@ table.spec td code { font-size: 11px; }
 .flow-main { display: flex; gap: 14px; align-items: flex-start; }
 .flow-tree {
   width: 300px; flex: none; background: #fafbfd; border: 1px solid var(--border);
-  border-radius: 12px; padding: 8px; max-height: 70vh; overflow-y: auto;
+  border-radius: 12px; padding: 8px; max-height: 70vh; overflow-y: auto; overflow-x: hidden;
 }
 .tn {
   display: flex; align-items: center; gap: 7px; width: 100%; text-align: left;
