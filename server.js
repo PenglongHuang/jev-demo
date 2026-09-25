@@ -177,6 +177,7 @@ const RUNS_INDEX = path.join(RUNS_DIR, 'index.json');
 const RUN_ID_RE = /^r-[0-9]{4}-[0-9]{4}-[a-z0-9]{4}$/;
 
 let runsIndexCache = null;
+let tmpSeq = 0; /* 原子写中间文件的自增序号：并发写不共用同一个 tmp 名 */
 
 function runIndexEntry(meta) {
   return {
@@ -188,14 +189,20 @@ function runIndexEntry(meta) {
 function runsIndexSave() {
   try {
     fs.mkdirSync(RUNS_DIR, { recursive: true });
-    const tmp = RUNS_INDEX + '.tmp';
+    /* tmp 名带唯一后缀（.json 之后）：并发 PUT 同时维护索引时不互相覆盖中间文件 */
+    const tmp = RUNS_INDEX + '.' + Date.now() + '-' + (tmpSeq++) + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(runsIndexCache));
     fs.renameSync(tmp, RUNS_INDEX);
   } catch (_) { /* 索引写失败不阻断主流程，下次重建 */ }
 }
 function runsIndexLoad() {
   if (runsIndexCache) return runsIndexCache;
-  try { runsIndexCache = JSON.parse(fs.readFileSync(RUNS_INDEX, 'utf8')); }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(RUNS_INDEX, 'utf8'));
+    /* 形状校验：合法 JSON 但非数组（如 {}）会让下面 .sort 同步 throw 打崩整个进程，坏形状按损坏处理 */
+    if (!Array.isArray(parsed)) throw new Error('index.json 内容不是数组');
+    runsIndexCache = parsed;
+  }
   catch (_) {
     runsIndexCache = [];
     let names = [];
@@ -224,7 +231,15 @@ function handleRuns(req, res, pathname) {
 
   if (req.method === 'GET') {
     fs.readFile(file, (e, data) => {
-      if (e) return err(404, '会话不存在：' + id);
+      if (e) {
+        /* 惰性自愈：索引里有但文件被手删（绕过 API）→ 顺手剔除幽灵条目再 404 */
+        const idx = runsIndexLoad();
+        if (idx.some((x) => x.id === id)) {
+          runsIndexCache = idx.filter((x) => x.id !== id);
+          runsIndexSave();
+        }
+        return err(404, '会话不存在：' + id);
+      }
       try { sendJson(res, 200, JSON.parse(data)); }
       catch (_) { err(500, '会话文件损坏：' + id); }
     });
@@ -240,7 +255,9 @@ function handleRuns(req, res, pathname) {
       if (!obj || !obj.meta || obj.meta.id !== id) return err(400, '记录 meta.id 与路径不一致');
       fs.mkdir(RUNS_DIR, { recursive: true }, (e1) => {
         if (e1) return err(500, '目录创建失败：' + e1.message);
-        const tmp = file + '.tmp';
+        /* 唯一 tmp 名，后缀必须落在 .json 之后（r-x.json.<ts>-<seq>.tmp）：
+         * 同 id 并发 PUT 不撞名，且目录重建扫描的 /^r-.*\.json$/ 不会误收残留 tmp */
+        const tmp = file + '.' + Date.now() + '-' + (tmpSeq++) + '.tmp';
         fs.writeFile(tmp, JSON.stringify(obj), (e2) => {
           if (e2) return err(500, '写入失败：' + e2.message);
           fs.rename(tmp, file, (e3) => {

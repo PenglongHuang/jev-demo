@@ -73,6 +73,12 @@ test('PUT → GET 列表 → GET 全量 → DELETE 全链路；非法 id 拒绝'
     assert.ok(!(await req(srv.base, 'GET', '/api/runs')).data.runs.some((x) => x.id === id));
     /* 幂等删除 */
     assert.strictEqual((await req(srv.base, 'DELETE', '/api/runs/' + id)).status, 200);
+
+    /* 幽灵条目自愈：PUT 后绕过 API 直接删文件，GET 单条 404 且索引同步剔除 */
+    await req(srv.base, 'PUT', '/api/runs/' + id, rec(id));
+    fs.rmSync(path.join(RUNS_DIR, id + '.json'), { force: true });
+    assert.strictEqual((await req(srv.base, 'GET', '/api/runs/' + id)).status, 404);
+    assert.ok(!(await req(srv.base, 'GET', '/api/runs')).data.runs.some((x) => x.id === id));
   } finally {
     srv.child.kill();
   }
@@ -85,6 +91,9 @@ test('newRunId 生成的 id 能被 server 接受（id 规则单一行为源交�
     await srv.wait();
     const put = await req(srv.base, 'PUT', '/api/runs/' + id, rec(id));
     assert.strictEqual(put.status, 200);
+    /* 确定性互补样本：纯数字后缀也是合法形状（防服务端正则误收紧），
+     * 文件不存在应 404 而非 400，不落盘 */
+    assert.strictEqual((await req(srv.base, 'GET', '/api/runs/r-0101-0001-0000')).status, 404);
   } finally {
     await req(srv.base, 'DELETE', '/api/runs/' + id).catch(() => {});
     srv.child.kill();
@@ -103,8 +112,24 @@ test('索引缺失时从目录重建', async () => {
   } finally { srv.child.kill(); }
 });
 
+test('index.json 是合法 JSON 但非数组：不崩进程，从目录重建', async () => {
+  fs.mkdirSync(RUNS_DIR, { recursive: true });
+  fs.writeFileSync(path.join(RUNS_DIR, 'index.json'), '{"a":1}');
+  const srv = await startServer();
+  try {
+    await srv.wait();
+    fs.writeFileSync(path.join(RUNS_DIR, 'r-0101-0002-t002.json'), JSON.stringify(rec('r-0101-0002-t002')));
+    const list = await req(srv.base, 'GET', '/api/runs');
+    assert.strictEqual(list.status, 200);
+    assert.ok(Array.isArray(list.data.runs), 'runs 是数组');
+    assert.ok(list.data.runs.some((x) => x.id === 'r-0101-0002-t002'));
+  } finally { srv.child.kill(); }
+});
+
 test('清理测试产物', async () => {
   ['r-0101-0001-t001', 'r-0101-0002-t002'].forEach((id) => {
     fs.rmSync(path.join(RUNS_DIR, id + '.json'), { force: true });
   });
+  /* 索引一并清掉：不给开发者真实 data/runs/index.json 留测试幽灵条目 */
+  fs.rmSync(path.join(RUNS_DIR, 'index.json'), { force: true });
 });
