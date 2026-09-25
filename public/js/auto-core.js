@@ -664,6 +664,7 @@
       });
     }
     (s.followUps || []).forEach((r) => {
+      const k = r.kind || 'param';
       const p = r.payload || r.request || null;
       const titles = {
         param: '参数补问 · 第 ' + r.batch + ' 批',
@@ -671,7 +672,7 @@
         text: '文本补问 · ' + (r.forAction || ''),
       };
       out.push({
-        kind: r.kind || 'param', title: titles[r.kind] || '补问',
+        kind: k, title: titles[k] || '补问',
         payload: p, response: r.response || null, error: r.error || null,
         batch: r.batch != null ? r.batch : null, param: r.param || null, action: r.action || null,
         text: r.text || null, forAction: r.forAction || null, from: r.from || null,
@@ -712,7 +713,7 @@
       n: s.n, label: s.label, pageInfo: s.pageInfo, snapshot: s.snapshot || null,
       refLabels: s.refLabels || null, decision: s.decision || null,
       request: s.payload || null, response: s.response || null, jevError: s.jevError || null,
-      exec: s.exec || null, anno: s.anno || null, annoError: s.annoError || null,
+      exec: s.exec || null, terminal: s.terminal || null, anno: s.anno || null, annoError: s.annoError || null,
       llm: s.llm ? { messages: s.llm.messages, response: s.llm.raw, text: s.llm.text, error: s.llm.error } : null,
       screenshot: s.screenshot || null, historyLine: s.historyLine || null,
       trim: s.trim || null, trimNote: s.trimNote || null,

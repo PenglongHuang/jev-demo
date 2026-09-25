@@ -673,6 +673,9 @@ test('actionsOf：首轮 + 三类补问 + LLM 的顺序、标题与字段归一'
   assert.strictEqual(acts[4].title, 'LLM 生成输入');
   assert.strictEqual(acts[4].text, '招商银行');
   assert.strictEqual(acts[4].payload, null);          // LLM 的输入在 messages，不在 payload
+  /* 空输入 / 无任何模型调用的步骤 → 空流水（不是异常） */
+  assert.deepStrictEqual(AutoCore.actionsOf(null), []);
+  assert.deepStrictEqual(AutoCore.actionsOf({}), []);
 });
 
 test('actionsOf：弹窗步 1 题标题；序列化形状（request 字段）同样可读', () => {
@@ -705,6 +708,10 @@ test('actionStatus：落定=ok、出错=error、在途=pending', () => {
   assert.strictEqual(AutoCore.actionStatus({ kind: 'param', error: 'x' }), 'error');
   assert.strictEqual(AutoCore.actionStatus({ kind: 'llm', text: '招商银行' }), 'ok');
   assert.strictEqual(AutoCore.actionStatus({ kind: 'llm', error: 'no cfg' }), 'error');
+  /* main 行动带 jevError（经 actionsOf 映射到 error）→ error */
+  const failed = AutoCore.actionsOf({ payload: { questions: {} }, response: null, jevError: 'boom' })[0];
+  assert.strictEqual(failed.error, 'boom');
+  assert.strictEqual(AutoCore.actionStatus(failed), 'error');
 });
 
 test('newRunId：形状 r-MMDD-HHmm-xxxx，与 server 端 RUN_ID_RE 一致', () => {
@@ -729,17 +736,27 @@ test('buildRunRecord：meta 汇总正确、steps 序列化含 request/followUps/
       exec: { ok: true }, anno: null, screenshot: null, historyLine: '2. l2', trim: null, trimNote: null,
       followUps: [{ kind: 'param', batch: 2, payload: { questions: {} }, response: { answers: {} }, param: 'e9' }],
       llm: { messages: [{ role: 'user', content: 'p' }], raw: { id: 'x' }, text: 'v', error: null } },
+    /* 终结步：exec 为 null、terminal 是动作名 —— 不序列化的话回放会把「已完成」渲染成进行中 */
+    { n: 3, label: '任务已完成', pageInfo: { url: 'u', title: 't' }, snapshot: '', refLabels: {},
+      decision: { action: '任务已完成', param: '无需元素' }, payload: { state: {}, questions: {} }, response: { answers: {} },
+      exec: null, terminal: '任务已完成', anno: null, screenshot: null, historyLine: '3. 任务已完成',
+      trim: null, trimNote: null, followUps: [] },
   ];
   const rec = AutoCore.buildRunRecord({
     id: 'r-0925-1912-ab12', runCfg, jevModel: 'jev-latest', llmModel: 'm-llm',
     startedAt: '2026-09-25T11:12:00.000Z', endState: 'done', endReason: 'Jev 判定：任务已完成', steps,
   });
   assert.strictEqual(rec.meta.id, 'r-0925-1912-ab12');
-  assert.strictEqual(rec.meta.stepCount, 2);
-  assert.strictEqual(rec.meta.jevCalls, 3);   /* 2 次首轮 + 1 次参数补问 */
+  assert.strictEqual(rec.meta.stepCount, 3);
+  assert.strictEqual(rec.meta.jevCalls, 4);   /* 3 次首轮 + 1 次参数补问 */
   assert.strictEqual(rec.meta.llmCalls, 1);
   assert.strictEqual(rec.meta.endState, 'done');
   assert.strictEqual(rec.steps[1].request.state, steps[1].payload.state);   /* payload → request */
   assert.strictEqual(rec.steps[1].llm.response, steps[1].llm.raw);
   assert.strictEqual(rec.steps[1].followUps[0].request, steps[1].followUps[0].payload);
+  assert.strictEqual(rec.steps[2].terminal, '任务已完成');   /* 终结步动作名必须随记录落盘 */
+  /* 空 steps + 未传 endState → running / 0（进行中快照） */
+  const empty = AutoCore.buildRunRecord({ id: 'r-0925-1912-ab12', runCfg, jevModel: 'j', llmModel: 'l', startedAt: 't' });
+  assert.strictEqual(empty.meta.endState, 'running');
+  assert.strictEqual(empty.meta.stepCount, 0);
 });
