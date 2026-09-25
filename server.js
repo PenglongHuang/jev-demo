@@ -53,7 +53,7 @@ const MIME = {
  */
 function applyCors(res) {
   res.setHeader('Access-Control-Allow-Origin', ALLOW_ORIGIN);
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Typesafe-Key, X-Endpoint, X-Llm-Base, X-Llm-Key');
   res.setHeader('Access-Control-Max-Age', '86400');
 }
@@ -167,6 +167,104 @@ function handleWorkspace(req, res) {
   }
 
   sendJson(res, 405, { ok: false, error: { message: 'Method Not Allowed' } });
+}
+
+/* ---------------- 运行会话记录：data/runs/<id>.json + index.json ----------------
+ * 列表只读索引 sidecar（首访问时缺失则扫目录重建），PUT/DELETE 同步维护；
+ * 全量文件含截图 base64（数 MB），绝不整读进列表。 */
+const RUNS_DIR = path.join(DATA_DIR, 'runs');
+const RUNS_INDEX = path.join(RUNS_DIR, 'index.json');
+const RUN_ID_RE = /^r-[0-9]{4}-[0-9]{4}-[a-z0-9]{4}$/;
+
+let runsIndexCache = null;
+
+function runIndexEntry(meta) {
+  return {
+    id: meta.id, goal: String(meta.goal || '').slice(0, 60),
+    endState: meta.endState || 'running', stepCount: meta.stepCount || 0,
+    startedAt: meta.startedAt || null, endedAt: meta.endedAt || null,
+  };
+}
+function runsIndexSave() {
+  try {
+    fs.mkdirSync(RUNS_DIR, { recursive: true });
+    const tmp = RUNS_INDEX + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(runsIndexCache));
+    fs.renameSync(tmp, RUNS_INDEX);
+  } catch (_) { /* 索引写失败不阻断主流程，下次重建 */ }
+}
+function runsIndexLoad() {
+  if (runsIndexCache) return runsIndexCache;
+  try { runsIndexCache = JSON.parse(fs.readFileSync(RUNS_INDEX, 'utf8')); }
+  catch (_) {
+    runsIndexCache = [];
+    let names = [];
+    try { names = fs.readdirSync(RUNS_DIR); } catch (_) { /* 目录尚不存在 */ }
+    names.filter((f) => /^r-.*\.json$/.test(f)).forEach((f) => {
+      try {
+        const one = JSON.parse(fs.readFileSync(path.join(RUNS_DIR, f), 'utf8'));
+        if (one && one.meta && one.meta.id) runsIndexCache.push(runIndexEntry(one.meta));
+      } catch (_) { /* 单文件损坏跳过 */ }
+    });
+    runsIndexSave();
+  }
+  runsIndexCache.sort((a, b) => String(b.startedAt || '').localeCompare(String(a.startedAt || '')));
+  return runsIndexCache;
+}
+
+function handleRuns(req, res, pathname) {
+  applyCors(res);
+  const rest = pathname.slice('/api/runs'.length).replace(/^\/+/, '');
+  const id = rest.split('/')[0] || '';
+  const err = (code, msg) => sendJson(res, code, { ok: false, error: { message: msg } });
+
+  if (req.method === 'GET' && !id) return sendJson(res, 200, { ok: true, runs: runsIndexLoad() });
+  if (!RUN_ID_RE.test(id)) return err(400, '会话 id 不合法：' + id);
+  const file = path.join(RUNS_DIR, id + '.json');
+
+  if (req.method === 'GET') {
+    fs.readFile(file, (e, data) => {
+      if (e) return err(404, '会话不存在：' + id);
+      try { sendJson(res, 200, JSON.parse(data)); }
+      catch (_) { err(500, '会话文件损坏：' + id); }
+    });
+    return;
+  }
+  if (req.method === 'PUT') {
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 96 * 1024 * 1024) req.destroy(); });
+    req.on('end', () => {
+      let obj;
+      try { obj = JSON.parse(body || '{}'); }
+      catch (_) { return err(400, '请求体不是合法 JSON'); }
+      if (!obj || !obj.meta || obj.meta.id !== id) return err(400, '记录 meta.id 与路径不一致');
+      fs.mkdir(RUNS_DIR, { recursive: true }, (e1) => {
+        if (e1) return err(500, '目录创建失败：' + e1.message);
+        const tmp = file + '.tmp';
+        fs.writeFile(tmp, JSON.stringify(obj), (e2) => {
+          if (e2) return err(500, '写入失败：' + e2.message);
+          fs.rename(tmp, file, (e3) => {
+            if (e3) return err(500, '落盘失败：' + e3.message);
+            runsIndexCache = runsIndexLoad().filter((x) => x.id !== id);
+            runsIndexCache.push(runIndexEntry(obj.meta));
+            runsIndexCache.sort((a, b) => String(b.startedAt || '').localeCompare(String(a.startedAt || '')));
+            runsIndexSave();
+            sendJson(res, 200, { ok: true });
+          });
+        });
+      });
+    });
+    return;
+  }
+  if (req.method === 'DELETE') {
+    fs.unlink(file, () => {          /* 不存在也成功（幂等） */
+      runsIndexCache = runsIndexLoad().filter((x) => x.id !== id);
+      runsIndexSave();
+      sendJson(res, 200, { ok: true });
+    });
+    return;
+  }
+  err(405, 'Method Not Allowed');
 }
 
 /* ---------------- playwright-jev-agent ----------------
@@ -551,6 +649,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (pathname === '/api/workspace') return handleWorkspace(req, res);
+  if (pathname === '/api/runs' || pathname.startsWith('/api/runs/')) return handleRuns(req, res, pathname);
   if (pathname.startsWith('/api/browser/')) return handleBrowser(req, res, pathname.slice('/api/browser/'.length));
   if (req.method === 'POST' && pathname === '/api/systemone') return proxySystemOne(req, res);
   if (req.method === 'POST' && pathname === '/api/llm') return proxyLlm(req, res);
