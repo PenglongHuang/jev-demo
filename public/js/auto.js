@@ -109,7 +109,77 @@ const Auto = (() => {
     saveTimer = setTimeout(() => { saveTimer = null; saveChain = saveChain.then(doSave); }, 500);
   }
 
-  async function refreshRunsList() { /* Task 5 实装（拉 GET /api/runs） */ }
+  async function refreshRunsList() {
+    try {
+      const r = await fetch('/api/runs', { cache: 'no-store' });
+      const d = await r.json();
+      runsList = (d && d.runs) || [];
+    } catch (_) { runsList = []; }
+    renderSessDd();
+  }
+
+  const END_LABEL = { running: '运行中' };
+  /* live=true：页面上还跑着的会话（「运行中」）；live=false：列表里的落盘记录 ——
+   * running 只说明落盘停在半路（刷新/关页），标「中断」 */
+  function sessItemState(m, live) {
+    if (m.endState === 'running') return live ? END_LABEL.running : '中断';
+    return (END_STATES[m.endState] || END_STATES.error).label;
+  }
+
+  function renderSessDd() {
+    const meta = view.sess === 'current'
+      ? { id: runId, goal: runCfg && runCfg.goal }
+      : (viewRecord && viewRecord.meta);
+    els.sessBtn.textContent = meta && meta.id
+      ? '会话 ' + meta.id + (meta.goal ? ' · ' + shortStr(meta.goal, 12) : '')
+      : '会话 —';
+    els.sessList.innerHTML = '';
+    const mkItem = (m, isCur, canDel) => {
+      const row = el('div', 'sess-item' + (isCur ? ' cur' : ''));
+      const pick = el('button', 'pick');
+      pick.type = 'button';
+      pick.innerHTML = '<span class="sid"></span><span class="sg"></span><span class="st"></span>';
+      pick.querySelector('.sid').textContent = m.id || '—';
+      pick.querySelector('.sg').textContent = shortStr(m.goal || '（无目标）', 30);
+      pick.querySelector('.st').textContent = sessItemState(m, isCur) + ' · ' + (m.stepCount || 0) + ' 步';
+      pick.title = m.goal || '';
+      pick.onclick = () => { els.sessList.hidden = true; openSession(isCur ? 'current' : m.id); };
+      row.appendChild(pick);
+      if (canDel) {
+        const del = el('button', 'sess-del', '✕');
+        del.type = 'button'; del.title = '删除该会话记录';
+        del.onclick = async (e) => {
+          e.stopPropagation();
+          if (!window.confirm('删除会话 ' + m.id + ' 的运行记录？')) return;
+          await fetch('/api/runs/' + m.id, { method: 'DELETE' });
+          if (view.sess === m.id) openSession('current');
+          else refreshRunsList();
+        };
+        row.appendChild(del);
+      }
+      els.sessList.appendChild(row);
+    };
+    if (runId) mkItem({ id: runId, goal: runCfg && runCfg.goal, endState: running ? 'running' : (els.runPill.dataset.state || 'error'), stepCount: steps.length }, view.sess === 'current', false);
+    runsList.filter((m) => m.id !== runId).forEach((m) => mkItem(m, view.sess === m.id, true));
+  }
+
+  async function openSession(which) {
+    if (which === 'current') {
+      view.sess = 'current'; viewRecord = null;
+      renderSessDd(); renderFlow();
+      return;
+    }
+    try {
+      const r = await fetch('/api/runs/' + which, { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      viewRecord = hydrateRecord(await r.json());
+      view.sess = which; view.type = 'session'; view.follow = false;
+      renderSessDd(); renderFlow();
+    } catch (e) {
+      toast('历史会话读取失败：' + (e && e.message ? e.message : e));
+      refreshRunsList();
+    }
+  }
 
   /* 树视图状态：sess='current' 看本页运行，否则为历史会话 id；type= session|step|action */
   const view = { sess: 'current', type: 'session', n: 0, i: 0, follow: true };
@@ -1815,6 +1885,15 @@ const Auto = (() => {
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
     });
     els.exportBtn.onclick = exportRun;
+    /* 会话下拉：开合 + 点外收起；打开时拉最新列表 */
+    els.sessBtn.onclick = (e) => {
+      e.stopPropagation();
+      els.sessList.hidden = !els.sessList.hidden;
+      if (!els.sessList.hidden) refreshRunsList();
+    };
+    document.addEventListener('click', (e) => {
+      if (!els.sessDd.contains(e.target)) els.sessList.hidden = true;
+    });
     /* 键盘 ←→ 在当前视图的步骤列表间移动（历史会话视图同样生效；
      * 输入控件聚焦、或编辑弹窗打开时不抢按键） */
     document.addEventListener('keydown', (e) => {
@@ -1838,6 +1917,7 @@ const Auto = (() => {
     renderSummary();
     bindEvents();
     probeEngine();
+    refreshRunsList();
   }
 
   return { init: init };
