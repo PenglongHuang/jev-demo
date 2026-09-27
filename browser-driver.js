@@ -1184,13 +1184,22 @@ async function act(session, command, ref, text) {
   return { ok: true, result: out.result };
 }
 
+/* 截图失败里哪些值得重试：**只有超时**。
+ * 为什么重试：playwright-cli 的 screenshot 默认走 css 档，实测在 dpr 为小数等情形下会撞 CLI
+ * 的 5s 动作超时（同一命令隔一会儿重试往往就过）。这张图是标注与人眼复核的唯一凭据 ——
+ * 丢一次整步就没图了。丢标签页 / 弹窗这类失败不重试：重试没意义，只是白等一个超时周期。 */
+const SHOT_TIMEOUT_RE = /TimeoutError|timeout|超时/i;
+
 async function screenshot(session, name) {
   /* 守卫也在这里：截图会把当前页面拍下来存进 data/ 与运行记录 ——
    * 当前页若是用户自己的页面，那就是把人家页面收进了我们的记录里。 */
   const refuse = await ownTabRefusal(session, 'screenshot');
   if (refuse) return refuse;
   const file = String(name || 'shot').replace(/[^A-Za-z0-9_-]/g, '') + '.png';
-  const out = await exec(session, ['screenshot', '--filename', file]);
+  const argv = ['screenshot', '--filename', file];
+  let out = await exec(session, argv);
+  /* 只重试一次；两次都超时就如实把失败带回去（不装成功，也不无限重试） */
+  if (!out.ok && SHOT_TIMEOUT_RE.test(String(out.error || ''))) out = await exec(session, argv);
   if (!out.ok) return out;
   const p = path.join(dataDir, file);
   try {

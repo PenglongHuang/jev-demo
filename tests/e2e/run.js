@@ -23,7 +23,7 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 const driver = require(path.join(__dirname, '..', '..', 'browser-driver.js'));
 const { parseSnapshotRefs } = require(path.join(__dirname, '..', '..', 'public', 'js', 'util.js'));
-const { pngHasPixel } = require(path.join(__dirname, '..', 'png-pixels.js'));
+const { pngHasPixel, pngPixels } = require(path.join(__dirname, '..', 'png-pixels.js'));
 const { startMocks } = require('./mock-server');
 
 const ORIGIN = process.env.E2E_ORIGIN || 'http://localhost:3000';
@@ -216,6 +216,55 @@ async function cardShot() {
   const at = raw.indexOf('@');
   if (at < 0) return { dataUrl: '', anno: '', reason: raw || 'eval 无输出' };
   return { dataUrl: raw.slice(at + 1), anno: raw.slice(0, at), reason: '' };
+}
+
+/* 本轮最新一条运行记录（前端 auto.js 跑动中把 {meta,steps} PUT 落盘到 data/runs/<id>.json）。
+ * 取 mtime 不早于本轮开始、且最新的一条；读不出来返回 null —— 调用方据此报红，
+ * 不能让「记录没读到」悄悄变成「断言通过」。 */
+function newestRunRecord(sinceMs) {
+  const dir = path.join(__dirname, '..', '..', 'data', 'runs');
+  let files;
+  try { files = fs.readdirSync(dir); } catch (_) { return null; }
+  const newest = files
+    .filter((f) => /^r-.*\.json$/.test(f))
+    .map((f) => ({ f: path.join(dir, f), m: fs.statSync(path.join(dir, f)).mtimeMs }))
+    .filter((x) => x.m >= sinceMs)
+    .sort((a, b) => b.m - a.m)[0];
+  if (!newest) return null;
+  try { return JSON.parse(fs.readFileSync(newest.f, 'utf8')); } catch (_) { return null; }
+}
+
+/* 标注的**位置**断言。
+ *
+ * 为什么不能只断言「图里有标注色」：框整体画偏时颜色照样在（2026-09-28 修的那次偏移
+ * 就是如此，颜色断言全绿、问题靠人眼看图才发现）。位置真值取本轮记录里那一步的
+ * anno.rect —— 它与截图是同一时刻读的页内 getBoundingClientRect，而 css 档截图的内容
+ * 与 CSS 像素同刻度（见 public/js/anno.js 文件头 3），所以框必须与 rect 逐字段相等，
+ * 且确实落在图上。
+ *
+ * 边界：本用例的窗口是 100% 缩放（画布宽 == 视口宽），这条守的是「契约不被改坏」；
+ * 「页面缩放 ≠100%（画布宽 == 视口宽/缩放）时也必须不偏」的复现与实测数字在
+ * tests/anno.spec.js 的 B 站用例里。 */
+function checkAnnoPosition(card, sinceMs) {
+  const got = String(card.anno || '').split(',').map(Number).slice(0, 4);
+  if (got.length < 4 || got.some((v) => !Number.isFinite(v))) {
+    return { ok: false, detail: '卡片 data-anno 不合法：' + JSON.stringify(card.anno) };
+  }
+  const rec = newestRunRecord(sinceMs);
+  if (!rec) return { ok: false, detail: '没找到本轮运行记录（data/runs 里 mtime >= 本轮开始的记录）' };
+  const step = (rec.steps || []).find((s) => s.anno && s.anno.box && s.anno.rect);
+  if (!step) return { ok: false, detail: '记录里没有「带标注几何」的步骤' };
+  const r = step.anno.rect, vp = step.anno.viewport;
+  const want = [r.x, r.y, Math.max(r.w, 8), Math.max(r.h, 8)];
+  const same = want.every((v, i) => Math.abs(v - got[i]) <= 1);   /* 记录里的框是四舍五入过的整数 */
+  const px = pngPixels(card.dataUrl);
+  const inside = Boolean(px) && got[0] + got[2] > 0 && got[1] + got[3] > 0 && got[0] < px.w && got[1] < px.h;
+  return {
+    ok: same && inside,
+    detail: '框=' + got.join(',') + ' 元素=' + want.join(',')
+      + ' 视口=' + (vp ? vp.w + 'x' + vp.h : '?') + ' 图=' + (px ? px.w + 'x' + px.h : '?')
+      + (same ? '' : ' ← 框没套在元素上') + (inside ? '' : ' ← 框不在图上'),
+  };
 }
 async function resetMailbox() {
   const snap = await taskSnapshot();
@@ -684,7 +733,9 @@ async function configureMock(sysonePort, llmPort) {
     const clickArch = await clickTreeNode('/归档】/');
     await sleep(500);
     const card = await cardShot();
-    const okCard = clickArch.ok && Boolean(card.dataUrl) && pngHasPixel(card.dataUrl, [225, 29, 72]);
+    const anno = checkAnnoPosition(card, t0);
+    const okCard = clickArch.ok && Boolean(card.dataUrl)
+      && pngHasPixel(card.dataUrl, [225, 29, 72]) && anno.ok;
     if (card.dataUrl) {
       fs.writeFileSync(path.join(EVID_DIR, 'anno-s1-card.png'), Buffer.from(card.dataUrl.split(',')[1], 'base64'));
     }
@@ -693,7 +744,8 @@ async function configureMock(sysonePort, llmPort) {
     record('S1 连续模式 · 精确归档 9 月对账单（8 月/兴业保留）', okMail && okUi && okDone && okCard && pageClean,
       (okMail ? '邮箱状态正确：已归档 1 封、干扰项保留' : '邮箱状态异常')
       + '；终止 state=' + state
-      + '；卡片图标注=' + (okCard ? '有（几何 ' + card.anno + '）' : '没有（' + (card.reason || '图里无标记色') + '）')
+      + '；卡片图标注=' + (pngHasPixel(card.dataUrl, [225, 29, 72]) ? '有' : '没有（' + (card.reason || '图里无标记色') + '）')
+      + '（' + anno.detail + '）'
       + '；被驱动页面=' + (pageClean ? '干净（无标注痕迹）' : (shot ? '不该有标注却出现了' : '本轮没找到驱动页截图')));
     await saveShot('e2e-s1-archive');
   } catch (e) { record('S1 连续模式 · 归档对账单', false, e.message); }

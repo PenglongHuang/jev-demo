@@ -755,3 +755,83 @@ test('open(cdp)：403（授权没点）只发一条 attach —— 重试会把�
     await driver.close(sess).catch(() => {});
   }
 });
+
+/* ---------- 步骤截图：css 档偶发超时 → 重试一次 ----------
+ * 为什么需要重试：playwright-cli 的 screenshot 默认走 css 档，实测在 dpr 为小数等情形下会撞
+ * CLI 的 5s 动作超时（同一命令隔一会儿重试往往就过）。这张图是标注与人眼复核的唯一凭据，
+ * 丢一次整步就没图了。真浏览器跑不出「第一次超时、第二次成功」这种时序，所以用假 CLI。 */
+
+/* 有状态假 CLI：按调用序号回不同的 JSON；收到成功回包且带 --filename 时把 1x1 PNG 写到
+ * cwd（= driver.dataDir），让 driver 那条「读文件 → dataURL」的路真的走通 —— 于是
+ * 「重试之后这一步确实拿到图」也能被断言，而不是只数调用次数。 */
+function fakeShotHarness(seq) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jev-fakeshot-'));
+  const argvFile = path.join(dir, 'argv.txt');
+  fs.writeFileSync(path.join(dir, 'seq.json'), JSON.stringify(seq));
+  fs.writeFileSync(path.join(dir, 'stub.js'), [
+    'const fs = require("fs"), path = require("path");',
+    'const args = process.argv.slice(2);',
+    'fs.appendFileSync(path.join(__dirname, "argv.txt"), args.join(" ") + "\\n");',
+    'const n = fs.readFileSync(path.join(__dirname, "argv.txt"), "utf8").trim().split(/\\r?\\n/).filter(Boolean).length;',
+    'const seq = JSON.parse(fs.readFileSync(path.join(__dirname, "seq.json"), "utf8"));',
+    'const reply = seq[Math.min(n - 1, seq.length - 1)];',
+    'if (!reply.isError) {',
+    '  const fi = args.indexOf("--filename");',
+    '  if (fi >= 0) {',
+    '    const name = String(args[fi + 1]).replace(/[^A-Za-z0-9_.-]/g, "");',
+    '    const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";',
+    '    fs.writeFileSync(path.resolve(process.cwd(), name), Buffer.from(png, "base64"));',
+    '  }',
+    '}',
+    'process.stdout.write(JSON.stringify(reply) + "\\n");',
+  ].join('\n'));
+  fs.writeFileSync(path.join(dir, 'playwright-cli.cmd'), '@echo off\r\nnode "%~dp0stub.js" %*\r\n');
+  fs.writeFileSync(path.join(dir, 'playwright-cli'), '#!/bin/sh\nexec node "$(dirname "$0")/stub.js" "$@"\n');
+  fs.chmodSync(path.join(dir, 'playwright-cli'), 0o755);
+  const oldPath = process.env.PATH;
+  process.env.PATH = dir + path.delimiter + oldPath;
+  const lines = () => { try { return fs.readFileSync(argvFile, 'utf8').split(/\r?\n/).filter(Boolean); } catch (_) { return []; } };
+  return {
+    shots: () => lines().filter((l) => /screenshot/.test(l)),
+    restore: () => { process.env.PATH = oldPath; fs.rmSync(dir, { recursive: true, force: true }); },
+  };
+}
+const SHOT_TIMEOUT_ERR = { isError: true, error: 'TimeoutError: Timeout 5000ms exceeded.\nCall log:\n - taking page screenshot' };
+
+test('截图超时（CLI 5s）重试一次，第二次成功则这一步确实拿到图', async () => {
+  const h = fakeShotHarness([SHOT_TIMEOUT_ERR, { result: '- [Screenshot of viewport](./x.png)' }]);
+  const sess = 'jevshot' + Date.now().toString(36);
+  const name = 'e2e-shot-retry-' + Date.now().toString(36);
+  try {
+    const r = await driver.screenshot(sess, name);
+    assert.strictEqual(h.shots().length, 2, '超时应重试一次，实际调用：' + JSON.stringify(h.shots()));
+    assert.strictEqual(r.ok, true, '重试成功后应有图：' + JSON.stringify(r));
+    assert.match(String(r.dataUrl), /^data:image\/png;base64,/, 'dataURL 前缀不对：' + String(r.dataUrl).slice(0, 40));
+  } finally {
+    h.restore();
+    try { fs.unlinkSync(path.join(driver.dataDir, name + '.png')); } catch (_) { /* 没写出来就算了 */ }
+  }
+});
+
+test('截图非超时失败不重试（丢标签页/弹窗这类失败重试没意义，白等一个超时周期）', async () => {
+  const h = fakeShotHarness([{ isError: true, error: '专用标签页已不在（被关闭或被切走）' }]);
+  const sess = 'jevshot' + Date.now().toString(36);
+  try {
+    const r = await driver.screenshot(sess, 'e2e-shot-noretry');
+    assert.strictEqual(h.shots().length, 1, '只该试一次：' + JSON.stringify(h.shots()));
+    assert.strictEqual(r.ok, false);
+    assert.match(String(r.error), /标签页已不在/);
+  } finally { h.restore(); }
+});
+
+test('两次都超时：如实返回失败，不无限重试', async () => {
+  const h = fakeShotHarness([SHOT_TIMEOUT_ERR]);
+  const sess = 'jevshot' + Date.now().toString(36);
+  try {
+    const r = await driver.screenshot(sess, 'e2e-shot-always-timeout');
+    assert.strictEqual(h.shots().length, 2, '最多两次：' + JSON.stringify(h.shots()));
+    assert.strictEqual(r.ok, false);
+    assert.match(String(r.error), /Timeout/i, '得把超时原因带回去：' + String(r.error));
+  } finally { h.restore(); }
+});
+
