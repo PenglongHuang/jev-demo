@@ -438,6 +438,23 @@ button { font-family: inherit; cursor: pointer; transition: all .15s; border-rad
 .warnbar b { font-weight: 700; }
 .warnbar code { font-family: var(--mono); font-size: 12px; background: rgba(0,0,0,.06); padding: 2px 6px; border-radius: 5px; color: #6b4404; }
 .warnbar .title { font-weight: 700; margin-bottom: 4px; color: #7a4f04; }
+
+/* ---------- 错误条 ----------
+ * 与 warning 条同构，但：整段原文用 <pre> 摊开（保留换行、可选中），右上角一键复制。
+ * 报错原文常常要拿去搜或贴给人，所以它必须留在页面上、能被选中 —— 不能用 toast。 */
+.errbar {
+  display: none; margin: 0 0 20px; padding: 12px 15px 14px;
+  background: var(--red-soft); border: 1px solid #f3c9c9; border-radius: var(--radius);
+}
+.errbar.show { display: block; }
+.err-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.err-head .spacer { flex: 1; }
+.err-title { font-size: 13px; font-weight: 700; color: #a02020; }
+.err-body {
+  margin: 0; font-family: var(--mono); font-size: 12px; line-height: 1.65; color: #7a1d1d;
+  white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto;
+  -webkit-user-select: text; user-select: text; cursor: text;
+}
 .btn-retry {
   margin-top: 11px; padding: 8px 15px;
   border: 1px solid #d9b673; background: #fff; color: #8a5a06;
@@ -516,12 +533,14 @@ button { font-family: inherit; cursor: pointer; transition: all .15s; border-rad
 .v-score .main { color: var(--green); }
 .v-noul .main { color: var(--amber); }
 
-.bars { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.bars { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .bar-row { display: grid; grid-template-columns: minmax(70px, 30%) 1fr 46px; gap: 9px; align-items: center; font-size: 12px; }
 .bar-label { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--mono); font-size: 11px; }
 .bar-row.hit .bar-label { color: var(--text); font-weight: 700; }
 .bar-track { height: 7px; background: #f0f1f3; border-radius: 100px; overflow: hidden; }
-.bar-fill { height: 100%; border-radius: 100px; transition: width .6s cubic-bezier(.22, 1, .36, 1); }
+/* 必须 display:block：这是行内 span，width 对行内元素不生效，
+ * 条形图会只剩灰色轨道 + 百分比数字（Demo 模式与 auto 模式共用此样式） */
+.bar-fill { display: block; height: 100%; border-radius: 100px; transition: width .6s cubic-bezier(.22, 1, .36, 1); }
 .bar-val { text-align: right; font-family: var(--mono); color: var(--text-2); font-size: 11px; }
 .bar-row.hit .bar-val { color: var(--text); font-weight: 700; }
 
@@ -556,12 +575,14 @@ pre.raw {
   max-height: 480px; margin: 0;
 }
 
-/* 错误框 */
-.err {
+/* 错误框（Demo 模式专用）。类名带 demo- 前缀是必须的：原先叫 .err，而树里失败步骤的
+ * 圆点 class 是 `dot err` —— 同时命中 `.dot`（7px）和这条 `.err`（padding 14/16px、
+ * border、radius 11px），圆点被撑成 34×30 的红块。全局类名一律带命名空间。 */
+.demo-err {
   background: var(--red-soft); border: 1px solid #f5c9c9; color: #9c2f2f;
   border-radius: 11px; padding: 14px 16px; font-size: 13px; line-height: 1.7;
 }
-.err b { font-weight: 700; }
+.demo-err b { font-weight: 700; }
 
 /* toast */
 .toast {
@@ -649,12 +670,22 @@ table.spec td code { font-size: 11px; }
 .btn-ghost.danger { color: #b91c1c; border-color: #fecaca; }
 .btn-ghost.danger:hover { background: #fef2f2; }
 
-/* ---------- 任务配置：外层只读摘要 ---------- */
+/* ---------- 任务配置：外层（主字段就地可编辑 + 运行参数摘要） ---------- */
 .task-summary {
   border: 1px solid var(--border); border-radius: var(--radius-s);
   background: #fbfbfd; padding: 14px 16px;
   display: flex; flex-direction: column; gap: 12px;
 }
+/* 外层表单与弹窗共用一套控件外观（同一组 .field / .auto-config 规则） */
+.task-summary .ts-edit { padding-bottom: 12px; border-bottom: 1px dashed var(--border); }
+.task-summary .ts-edit .field label { font-size: 12px; color: var(--text-3); margin-bottom: 6px; }
+.task-summary .ts-edit textarea {
+  width: 100%; box-sizing: border-box; padding: 8px 11px; min-height: 62px;
+  border: 1px solid var(--border); border-radius: 8px; font-size: 13px; line-height: 1.6;
+  font-family: inherit; background: #fff; color: var(--text); resize: vertical;
+}
+.task-summary .ts-edit textarea:focus,
+.task-summary .ts-edit input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .ts-head { display: flex; align-items: center; gap: 10px; }
 .ts-head h3 { margin: 0; font-size: 13px; font-weight: 700; color: var(--text-2); letter-spacing: .1px; }
 .ts-head .spacer { flex: 1; }
@@ -719,40 +750,102 @@ table.spec td code { font-size: 11px; }
 .auto-progress { font-family: var(--mono); font-size: 12px; color: var(--text-2); }
 .auto-elapsed { font-family: var(--mono); font-size: 12px; color: var(--text-3); }
 
-/* tlPulse 动画保留：会话树里 .dot.run / .dot.pending 圆点仍在引用 */
+/* 运行点脉冲（琥珀）：.dot.run / .dot.pending 圆点在引用 */
 @keyframes tlPulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(79, 70, 229, .28); }
-  50% { box-shadow: 0 0 0 5px rgba(79, 70, 229, .08); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, .30); }
+  50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, .10); }
 }
 
-/* ---------- 会话树 + 右侧详情 ---------- */
-.flow-main { display: flex; gap: 14px; align-items: flex-start; }
+/* ---------- 会话树 + 右侧详情 ----------
+ * 树的几何：所有状态点落在同一条脊柱线（x≈29.5）上；
+ * 行动行经 ::before 纵轨 + ::after 肘形横线挂在父步骤下，
+ * 末个行动行带 .last 让纵轨截止到行中线，形成干净的收口。 */
+.flow-main { display: flex; gap: 16px; align-items: flex-start; }
 .flow-tree {
-  width: 300px; flex: none; background: #fafbfd; border: 1px solid var(--border);
-  border-radius: 12px; padding: 8px; max-height: 70vh; overflow-y: auto; overflow-x: hidden;
+  width: 320px; flex: none; background: #fafbfd; border: 1px solid var(--border);
+  border-radius: 14px; padding: 8px; max-height: 70vh;
+  overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain;
+  scrollbar-width: thin; scrollbar-color: #d5d8e2 transparent;
 }
+.flow-tree::-webkit-scrollbar { width: 9px; }
+.flow-tree::-webkit-scrollbar-track { background: transparent; }
+.flow-tree::-webkit-scrollbar-thumb {
+  background: #d9dce5; border-radius: 99px; border: 2.5px solid #fafbfd;
+}
+.flow-tree::-webkit-scrollbar-thumb:hover { background-color: #c6cad6; }
+
 .tn {
-  display: flex; align-items: center; gap: 7px; width: 100%; text-align: left;
-  padding: 6px 9px; border: none; background: none; border-radius: 8px;
-  cursor: pointer; color: var(--text-2); font-size: 12.5px; line-height: 1.45; font-family: inherit;
+  position: relative; display: flex; align-items: center; gap: 8px;
+  width: 100%; text-align: left; padding: 7px 10px 7px 26px;
+  border: none; background: none; border-radius: 8px;
+  cursor: pointer; color: var(--text-2); font-size: 12.5px; line-height: 1.5; font-family: inherit;
+  transition: background-color .13s ease, color .13s ease, box-shadow .13s ease;
 }
-.tn:hover { background: #f0f2fa; }
-.tn.sel { background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+.tn:hover { background: rgba(79, 70, 229, .055); }
+.tn.sel {
+  background: var(--accent-soft); color: var(--accent); font-weight: 600;
+  box-shadow: inset 2.5px 0 0 var(--accent);
+}
 .tn .lb { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tn .dur { font-size: 10.5px; color: var(--text-3); font-family: var(--mono); }
-.tn.kid { margin-left: 20px; }
-.tn.act-kid { margin-left: 40px; font-size: 12px; color: var(--text-3); }
-.tn.follow-btn { justify-content: center; color: var(--accent); font-weight: 600; }
-.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.tn .lb b { font-weight: 600; color: var(--text); }
+.tn.sel .lb b { color: inherit; }
+/* 树内第二字体：命令/ref/会话 id 用等宽小字号，与中文 sans 形成层级（CJK 自动回退） */
+.tn .lb .mono { font-family: var(--mono); font-size: 11px; }
+.tn .dur {
+  flex: none; min-width: 46px; margin-left: auto; text-align: right;
+  font-size: 10.5px; color: var(--text-3); font-family: var(--mono);
+}
+.tn.sel .dur { color: var(--accent); opacity: .7; }
+
+/* 会话根行：脊柱起点，略加重量；padding-left 25 使 9px 圆环中心与步骤点脊柱（x≈29.5）对齐 */
+.tn.sess-row { color: var(--text); font-weight: 600; padding-top: 8px; padding-bottom: 8px; padding-left: 25px; }
+
+/* 步骤行：标签里的步骤号加重，耗时退到右侧数据列 */
+.tn.kid { padding-left: 26px; }
+.tn.kid.has-acts::before {
+  content: ''; position: absolute; left: 29px; top: calc(50% + 6px); bottom: 0;
+  width: 1.5px; background: #d9dce6;
+}
+
+/* 行动行：纵轨 + 肘形横线；选中时导轨染上淡 indigo */
+.tn.act-kid { padding-left: 52px; font-size: 12px; color: var(--text-3); }
+.tn.act-kid::before {
+  content: ''; position: absolute; left: 29px; top: 0; bottom: 0; width: 1.5px; background: #d9dce6;
+}
+.tn.act-kid::after {
+  content: ''; position: absolute; left: 29px; top: 50%; width: 18px; height: 1.5px; background: #d9dce6;
+}
+.tn.act-kid.last::before { bottom: 50%; }
+.tn.act-kid.sel::before, .tn.act-kid.sel::after { background: rgba(79, 70, 229, .35); }
+.tn.act-kid .dot { width: 6px; height: 6px; }
+
+/* 跟随按钮：虚线胶囊，安静地等在树尾 */
+.tn.follow-btn {
+  justify-content: center; margin: 8px 6px 2px; padding: 6px;
+  color: var(--accent); font-weight: 600; font-size: 12px;
+  border: 1px dashed rgba(79, 70, 229, .35); border-radius: 99px;
+}
+.tn.follow-btn:hover { background: var(--accent-soft); border-style: solid; }
+
+/* 状态点：固定尺寸的徽标。padding/border 必须显式归零 —— 它的 class 是
+ * `dot <状态>` 两段式，一旦页面别处出现同名裸类（历史上就撞过 .err），
+ * 内边距会把点撑成一大块。.dot.root 的圆环边框靠更高特异性覆盖，不受影响。 */
+.dot { width: 7px; height: 7px; border-radius: 50%; flex: none; padding: 0; border: 0; }
 .dot.ok { background: #22c55e; } .dot.err { background: #ef4444; }
 .dot.run { background: #f59e0b; animation: tlPulse 1.6s ease-in-out infinite; }
 .dot.mute { background: #cbd0da; } .dot.term { background: var(--accent); }
 /* AutoCore.actionStatus 的实际返回值是 error/pending（非 err/run），补两个别名圆点 */
 .dot.error { background: #ef4444; }
 .dot.pending { background: #f59e0b; animation: tlPulse 1.6s ease-in-out infinite; }
-.tn .k { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 4px; flex: none; }
-.tn .k.jev { background: #f5f1fe; color: #6d28d9; border: 1px solid #e4dcfa; }
-.tn .k.llm { background: #ecfdf5; color: #047857; border: 1px solid #bbf7d0; }
+/* 会话根：空心圆环 = 容器标记，与步骤状态实心点在形状和颜色上都区分；
+ * 置于 .dot.run 之后，background: transparent 才能盖过 .dot.run 的实心底色 */
+.dot.root { width: 9px; height: 9px; background: transparent; border: 2px solid var(--accent); }
+.dot.root.run { border-color: #f59e0b; }
+
+/* 行动类别：小 soft pill（弱化存在感，颜色仍与右侧 fd-tag 呼应） */
+.tn .k { font-size: 9px; font-weight: 700; letter-spacing: .05em; padding: 2px 7px; border-radius: 99px; flex: none; }
+.tn .k.jev { background: var(--violet-soft); color: var(--violet); }
+.tn .k.llm { background: var(--green-soft); color: var(--green); }
 
 .flow-detail { flex: 1; min-width: 0; }
 .fd-head {
@@ -794,6 +887,22 @@ table.ov tbody tr:hover { background: #f7f8ff; }
 .fd-tag.llm { background: #ecfdf5; color: #047857; }
 /* 分节小标题（会话总览 / 本步行动）：旧轮播没有这个类，随树视图一并补上 */
 .sec-t { font-size: 12px; font-weight: 700; color: var(--text-3); letter-spacing: .05em; }
+/* 右侧详情一屏多块（输出 / state / 问题 / 裁剪 / 原始报文）：
+ * 每块一个卡片边界，块头带竖标 + 虚线分隔，避免所有内容糊成一片 */
+.fd-body .sec {
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 14px 14px; background: #fff;
+  gap: 0;   /* 间距由块头 margin-bottom 与 .raw-label 自身 margin 给，避免 flex gap 叠加出双倍空隙 */
+}
+.fd-body .sec-head, .fd-body .sec-t {
+  display: flex; align-items: center; gap: 8px;
+  padding-bottom: 8px; margin-bottom: 12px;
+  border-bottom: 1px dashed var(--border);
+}
+.fd-body .sec-head::before, .fd-body .sec-t::before {
+  content: ''; width: 3px; height: 12px; border-radius: 2px; background: var(--accent); flex: none;
+}
+.fd-body .sec-head.violet::before { background: var(--violet); }
 
 /* 会话下拉 */
 .sess-dd { position: relative; }
@@ -804,11 +913,36 @@ table.ov tbody tr:hover { background: #f7f8ff; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .sess-btn:hover { border-color: var(--accent); }
-.sess-list {
+/* 会话下拉面板：过滤框 + 可滚列表 + 底部工具条。
+ * 原先这里只有 .sess-list 本身（absolute 定位、无高度上限）—— 实测 135 条记录时
+ * 列表高达 5401px、远超视口。现在位置属性归容器，列表只负责滚。
+ * 高度上限是这条修复的核心：max-height: min(60vh, 420px)。 */
+.sess-panel {
   position: absolute; top: 110%; left: 0; z-index: 40; background: #fff;
   border: 1px solid var(--border-strong); border-radius: 10px;
-  box-shadow: var(--shadow-lift); min-width: 360px; max-width: 480px; overflow: hidden;
+  box-shadow: var(--shadow-lift); min-width: 360px; max-width: 480px;
+  display: flex; flex-direction: column; overflow: hidden;
+  max-height: min(60vh, 420px);
 }
+.sess-filter {
+  flex: none; margin: 9px 10px 4px; width: calc(100% - 20px); box-sizing: border-box;
+  font-size: 12.5px; padding: 6px 9px; border: 1px solid var(--border-strong);
+  border-radius: 8px; background: #fff; font-family: inherit;
+}
+.sess-filter:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+/* 列表本身只剩「占满剩余高度 + 纵向滚动」。位置/边框/阴影都归 .sess-panel。 */
+.sess-list {
+  flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
+  overscroll-behavior: contain; scrollbar-width: thin;
+}
+.sess-empty { padding: 14px; text-align: center; color: var(--text-3); font-size: 12px; }
+/* 面板底部工具条（条目 8 的清理入口住这里）：不参与滚动，钉在面板底 */
+.sess-foot {
+  flex: none; border-top: 1px solid var(--border); padding: 8px 10px;
+  display: flex; align-items: center; gap: 8px; background: #fcfcfd;
+}
+.sess-foot:empty { display: none; }
+.sess-foot .foot-note { font-size: 11.5px; color: var(--text-3); margin-left: auto; }
 .sess-item { padding: 9px 13px; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid #f3f4f6; }
 .sess-item:last-child { border-bottom: none; }
 .sess-item .pick { flex: 1; min-width: 0; background: none; border: none; cursor: pointer; text-align: left; font-family: inherit; display: flex; gap: 8px; align-items: center; }
@@ -820,7 +954,7 @@ table.ov tbody tr:hover { background: #f7f8ff; }
 .sess-del { background: none; border: none; color: var(--text-3); cursor: pointer; font-size: 13px; padding: 2px 6px; border-radius: 5px; flex: none; }
 .sess-del:hover { color: #b91c1c; background: #fef2f2; }
 
-@media (max-width: 1080px) { .flow-tree { width: 240px; } }
+@media (max-width: 1080px) { .flow-tree { width: 264px; } }
 @media (max-width: 900px) {
   .flow-main { flex-direction: column; }
   .flow-tree { width: 100%; max-height: 40vh; }
@@ -965,6 +1099,15 @@ table.ov tbody tr:hover { background: #f7f8ff; }
 .req-inner { display: flex; flex-direction: column; gap: 14px;
   border-left: 2px solid var(--border); padding-left: 14px; }
 
+/* 补问行动的结论行（已选定 X / 已改为 X / 命中 e5）—— 位置同首轮卡的「决策摘要」，
+   只是补问只回一题，一句结论就够；未落定走 pend、失败走 bad */
+.fu-hit {
+  display: inline-block; font-size: 12.5px; font-weight: 700; color: #15803d;
+  background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 6px 10px;
+}
+.fu-hit.pend { color: var(--text-3); background: #f8fafc; border-color: var(--border); }
+.fu-hit.bad { color: #b91c1c; background: #fef2f2; border-color: #fecaca; }
+
 /* 原始报文折叠 */
 .raw-details summary { cursor: pointer; font-size: 12.5px; color: var(--text-3); user-select: none; }
 .raw-details summary:hover { color: var(--accent); }
@@ -1019,6 +1162,27 @@ table.ov tbody tr:hover { background: #f7f8ff; }
 .llm-slot { border-top: 1px dashed var(--border-strong); padding-top: 14px; margin-top: 2px; }
 .llm-slot-title { font-size: 13px; font-weight: 700; margin-bottom: 10px; }
 .llm-slot-title .llm-slot-sub { font-size: 11.5px; font-weight: 500; color: var(--text-3); margin-left: 8px; }
+/* 可折叠分节（生成模型 / 高级参数）：标题行本身就是摘要，右侧带当前值，
+   默认收起 —— 配置弹窗正文高于一屏时，最下面那节会掉到折叠线以下被当成"被删了"。
+   收起时标题行仍然在屏内，且写着里面的当前值，所以没有信息被藏起来。 */
+.llm-slot > summary {
+  display: flex; align-items: baseline; gap: 0; flex-wrap: wrap;
+  cursor: pointer; list-style: none; user-select: none; margin-bottom: 0;
+}
+.llm-slot > summary::-webkit-details-marker { display: none; }
+.llm-slot > summary::before {
+  content: "▸"; color: var(--text-3); font-size: 11px; margin-right: 6px;
+  display: inline-block; transition: transform .12s;
+}
+.llm-slot[open] > summary::before { content: "▾"; }
+.llm-slot > summary:hover { color: var(--accent); }
+.llm-slot > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+.llm-slot .slot-state {
+  margin-left: auto; font-size: 11.5px; font-weight: 600; color: var(--text-2);
+  background: var(--bg); border: 1px solid var(--border); border-radius: 999px; padding: 2px 9px;
+}
+.llm-slot[open] > summary { margin-bottom: 10px; }
+.llm-slot .slot-body { display: flex; flex-direction: column; gap: 14px; }
 /* 高级参数里的勾选行：说明文字折行对齐到勾选框右侧 */
 .check-row { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; cursor: pointer; margin-bottom: 10px; }
 .check-row input { margin: 2px 0 0; flex: 0 0 auto; }
@@ -1091,3 +1255,65 @@ table.ov tbody tr:hover { background: #f7f8ff; }
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 .modal input[type="password"], .modal #cfgEndpoint, .modal #cfgModelInput { font-family: var(--mono); font-size: 12.5px; }
+/* 勾选框不是文本输入：上面 .modal input 的 width:100% + padding 会把它拉满整行
+ * （高级参数里复选框被撑成一大块、说明文字被挤成竖排），这里豁免 */
+.modal input[type="checkbox"] { width: auto; padding: 0; flex: 0 0 auto; }
+/* 配置弹窗字段多（生成模型 + 高级参数两槽位），480px 放不下长提示文案 */
+.modal.config-modal { max-width: 680px; }
+/* 高级参数的两个数值字段并排，避免弹窗加宽后输入框被拉到 680px 宽 */
+.config-modal .trim-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 16px; }
+
+/* ===================== Wave 0 冻结：撤销提示 / 确认弹窗 / 开跑检查 / 顶栏发送 / 步骤标签 ===================== */
+
+/* 撤销提示：坐在 toast（bottom:28px）上方，不打架 */
+#undoHost { position: fixed; left: 50%; bottom: 84px; transform: translateX(-50%); z-index: 1100; }
+.undo-toast {
+  display: flex; align-items: center; gap: 12px;
+  background: #17181c; color: #fff; padding: 10px 12px 10px 16px;
+  border-radius: 11px; font-size: 13px; box-shadow: 0 10px 32px rgba(0,0,0,.25);
+  opacity: 0; transform: translateY(10px); transition: .2s;
+}
+.undo-toast.show { opacity: 1; transform: none; }
+.undo-btn {
+  background: rgba(255,255,255,.14); color: #fff; border: none; border-radius: 7px;
+  padding: 5px 12px; font-size: 12.5px; font-weight: 650;
+}
+.undo-btn:hover { background: rgba(255,255,255,.26); }
+
+/* 确认弹窗：沿用 .modal 视觉，窄一档 */
+.modal.confirm-modal { max-width: 460px; }
+.btn-primary.danger-solid { background: var(--red); box-shadow: 0 2px 8px rgba(220,38,38,.25); }
+.btn-primary.danger-solid:hover { background: #b91c1c; }
+
+/* 开跑前检查：四格状态胶囊（差什么提前说清；不禁用开始按钮） */
+.preflight { display: flex; flex-wrap: wrap; gap: 8px; }
+.preflight:empty { display: none; }
+.pf-item {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+  border: 1px solid var(--border); border-radius: 100px; padding: 4px 11px;
+  background: #fff; color: var(--text-2);
+}
+.pf-item::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: #cbd0da; flex: none; }
+.pf-item.ok { border-color: #c9ead9; background: var(--green-soft); color: #0b6b4d; }
+.pf-item.ok::before { background: #22c55e; }
+.pf-item.bad { border-color: #f6caca; background: var(--red-soft); color: #9c2f2f; }
+.pf-item.bad::before { background: #ef4444; }
+.pf-item b { font-weight: 700; }
+
+/* 顶栏发送：Demo 模式常驻主操作（卡片里那个在 1366×768 下位于折线下方 200px） */
+.btn-send-top { flex: none; padding: 7px 16px; font-size: 13px; width: auto; }
+
+/* 步骤标签折两行：320px 树宽下「click 【e254 · 星标邮件（5）】」会被截掉最有用的元素名。
+ * 必须是纯 CSS —— e2e 的 flat 快照断言（run.js 的 /select【e\d+ · 订单状态】 "…"/）
+ * 依赖 .tn 的 textContent 逐字不变，改 innerHTML 插 <br> 会打红。CSS 折行不进 textContent。 */
+.tn .lb {
+  white-space: normal;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; line-height: 1.45;
+}
+.tn.kid, .tn.act-kid { align-items: flex-start; }   /* 两行时状态点对齐首行，不居中悬空 */
+.tn .dot, .tn .dur, .tn .k { margin-top: 3px; }
+
+/* 任务目标给个高度上限：邮箱场景那段六步长文会霸占首屏（内部滚动，不截断内容） */
+.task-summary .ts-edit textarea#autoGoal { max-height: 96px; }
+

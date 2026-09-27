@@ -5,7 +5,8 @@
  * 分工：工程负责把候选收敛到模型判得好的规模，Jev 负责在候选里做决定。
  *   - 只在超限时介入：≤ SOFT_LIMIT 的页面原样透传，行为与裁剪功能上线前逐字节一致
  *   - 排序是确定性的加权和（关键词稀有度 / 可点击优先 / 已失败降权），同分按快照顺序
- *   - 末尾保留「无需元素」，并在还有候选时附「其他」兜底项，由调用方在同一步内补问下一批
+ *   - 还有候选未列出时附「其他」兜底项，由调用方在同一步内补问下一批
+ *     （「无需元素」已下线：与不作用于元素的动作语义打架，被模型误当「本批没有目标」）
  *
  * 纯逻辑无 DOM：浏览器挂 window.RefFunnel，Node 走 module.exports（node:test 使用）。
  * ref 解析复用 util.js（同一实现保证浏览器与测试行为一致）。
@@ -17,10 +18,9 @@
     ? { parseSnapshotRefs: window.parseSnapshotRefs, buildRefCriteria: window.buildRefCriteria }
     : require('./util.js');
 
-  /* 接口硬上限 255，留 5 个余量给「无需元素」「其他」兜底项 */
+  /* 接口硬上限 255，留 5 个余量给「其他」兜底项 */
   var SOFT_LIMIT = 250;
   var DEFAULT_LIMIT = 80;
-  var REF_NONE = '无需元素';
   var REF_MORE = '其他';
 
   /* 打分权重 */
@@ -299,7 +299,6 @@
         ? '（在「' + shortName(x.ancestor) + '」内）' : '';
       criteria[x.ref] = (x.interactive ? '【可交互】' : '【容器/静态】') + ' ' + x.label + hint;
     });
-    criteria[REF_NONE] = '不需要操作任何元素（例如任务已完成、或仅需滚动/等待）';
 
     var remaining = all.length - batch * wantLimit;
     if (remaining > 0 && batch < maxTranches) {
@@ -318,7 +317,6 @@
   var RefFunnel = {
     SOFT_LIMIT: SOFT_LIMIT,
     DEFAULT_LIMIT: DEFAULT_LIMIT,
-    REF_NONE: REF_NONE,
     REF_MORE: REF_MORE,
     extractTerms: extractTerms,
     rankRefs: rankRefs,

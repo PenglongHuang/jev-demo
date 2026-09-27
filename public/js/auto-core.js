@@ -59,7 +59,9 @@
     '放弃': '当前页面无法完成任务，停止并报告'
   };
 
-  var REF_NONE = '无需元素';
+  /* 「无需元素」兜底项已下线：它与「不作用于元素的动作」语义打架，密集页分批候选里
+   * 被模型误读成「本批没有目标元素」（实测百度结果页连续 3 步选它 → 校验失败终止）。
+   * 现在参数题只放真实 ref；不作用于元素的动作选了参数也不消费（normalizeParam 剥掉）。 */
   var TEXT_NONE = '无';
   /* 「未完成」量表级数 —— 必须与 buildQuestions 里「未完成」criteria 的行数一致：
    * API 的 score = 等级下标加权均值，范围 0 ~ 级数-1；归一化除以 (级数-1)。
@@ -84,10 +86,27 @@
     return ['（更早的 ' + (list.length - k) + ' 步已省略）'].concat(list.slice(-k));
   }
 
+  /* 「标签页」字段：逐行列出每个 Tab（当前 Tab 带【当前】标记），多个 Tab 时
+   * 追加切换动词提示。快照/截图只覆盖当前 Tab —— 不写明这一点，模型看到
+   * 「点击成功但页面没变」只会反复重试（实测百度 target=_blank 事故） */
+  function formatTabs(tabs) {
+    var list = (tabs || []).map(function (t) {
+      return (t.current ? '【当前】' : '') + 'Tab ' + t.index + '：' + (t.title || '（无标题）') + ' — ' + (t.url || '');
+    });
+    if ((tabs || []).length > 1) {
+      list.push('注意：页面快照与截图只覆盖【当前】Tab。点击链接常会开新 Tab（页面看起来没变）——'
+        + '若目标内容在别的 Tab，用 tab-select 切换（序号见上），tab-close 可关闭多余 Tab。');
+    }
+    return list;
+  }
+
   function buildState(ctx) {
+    var tabs = Array.isArray(ctx.tabs) && ctx.tabs.length ? ctx.tabs
+      : [{ index: 0, current: true, title: String(ctx.title || ''), url: String(ctx.url || '') }];
     return {
       '任务目标': String(ctx.goal || ''),
       '当前页面': { 'url': String(ctx.url || ''), '标题': String(ctx.title || '') },
+      '标签页': formatTabs(tabs),
       '已完成步骤': compressHistory(ctx.history || []),
       '上一步结果': ctx.lastResult || '（这是第一步，之前尚无任何操作）',
       '页面快照': String(ctx.snapshot || '')
@@ -139,7 +158,8 @@
     var meta = (param && param.meta) || {};
     var criteria = (param && param.criteria) || {};
     var head = '该动作应作用于快照中的哪个元素？';
-    var tail = '不需要元素的动作（press / goto / 无操作等）选「无需元素」。';
+    var tail = '若你决定的动作不作用于任何元素（press / goto / 前进后退 / 刷新 / 标签页 / 弹窗 / 无操作 / 终止），'
+      + '「参数」不会被使用，任选一项即可。';
     if (!meta.trimmed) {
       return head + '选项由当前快照自动解析，【可交互】为可操作元素。' + tail;
     }
@@ -166,11 +186,12 @@
     var from = (batch - 1) * limit + 1;
     var to = Math.min(batch * limit, total);
     var scope = '第 ' + from + '–' + to + ' 个，全页共 ' + total + ' 个';
+    /* 补问只发生在「动作需要元素且首轮选了『其他』」的路径上（normalizeParam 已把
+     * 不需要元素的动作拦下），这里不再提「无需元素」—— 候选里也没有它 */
     var instructions = '已确定的动作是「' + o.action + '」。本批是第 ' + batch + ' 批候选（' + scope + '）。'
       + (o.paramCriteria && o.paramCriteria.criteria && o.paramCriteria.criteria[REF_MORE]
         ? '若目标元素仍不在本批中，请继续选「' + REF_MORE + '」展开下一批。'
-        : '这是最后一批候选，请在本批内做出选择。')
-      + '不需要元素的动作选「无需元素」。';
+        : '这是最后一批候选，请在本批内做出选择。');
     return {
       '参数': { type: 'choice', instructions: instructions, criteria: o.paramCriteria.criteria }
     };
@@ -186,12 +207,17 @@
     return String(param);
   }
 
-  /* 「其他」配到不需要元素的动作上时，归一为「无需元素」并给一句说明（不报错、不中断） */
+  /* 动作不需要元素时，参数一律剥掉（不传给浏览器、不进时间线标签）：
+   * 「无需元素」下线后模型仍必须回答参数题，随手选的 ref 由这里静默忽略；
+   * 「其他」配到这类动作上时同样归一为空并给一句说明（不报错、不中断、也不展开下一批） */
   function normalizeParam(decision) {
-    var param = decision && decision.param;
-    if (!isRefMore(param)) return { param: param, note: '' };
-    if (needRef(decision.action)) return { param: param, note: '' };
-    return { param: REF_NONE, note: '动作 ' + decision.action + ' 不需要元素，「' + REF_MORE + '」按「无需元素」处理' };
+    var d = decision || {};
+    if (needRef(d.action)) return { param: d.param || null, note: '' };
+    if (!d.param) return { param: null, note: '' };
+    if (isRefMore(d.param)) {
+      return { param: null, note: '动作 ' + d.action + ' 不需要作用于元素，「' + REF_MORE + '」按未选参数处理' };
+    }
+    return { param: null, note: '' };
   }
 
   /* ---------------- 动作 × 元素角色兼容性 ----------------
@@ -237,7 +263,7 @@
     var action = d.action;
     if (!ACTION_ROLE_ALLOW[action] || !needRef(action)) return { conflict: false };
     var ref = d.param;
-    if (!ref || ref === REF_NONE) return { conflict: false };
+    if (!ref) return { conflict: false };
     var role = (roles || {})[ref];
     if (!role || !roleBlocks(action, role)) return { conflict: false };
     return {
@@ -393,6 +419,21 @@
       COMMON_KEY_NAMES.forEach(function (k) {
         if (!criteria[k]) criteria[k] = '键名：' + (KEY_HINTS[k] || k);   // 变量与键名撞名时变量优先（用户显式意图）
       });
+    } else if (action === 'tab-select' || action === 'tab-close') {
+      /* 序号直出（不与变量池混选）：driver 硬校验这两个动作的文本必须是非负整数
+       * （标签页序号），候选给成关键词/变量只会拼出 tab-select "jev" 这种必败命令
+       * （实测事故）。tabs 由主循环每轮从 page-info 带回 —— 工程自动注入，
+       * 模型只能从真实打开的 Tab 里挑。 */
+      var tabList = (o.tabs || []).filter(function (t) { return t && typeof t.index === 'number'; });
+      tabList.forEach(function (t) {
+        criteria[String(t.index)] = (t.current ? '【当前】' : '') + 'Tab ' + t.index + '：'
+          + (t.title || '（无标题）') + ' — ' + (t.url || '');
+      });
+      if (action === 'tab-select' && !tabList.length) {
+        /* 读不到标签页列表：拼不出合法序号，宁记失败步也不让变量池瞎猜 */
+        return null;
+      }
+      if (action === 'tab-select') optionListNote = '候选就是当前打开的全部标签页序号，必须从中选择。';
     } else {
       criteria = variableTextCriteria(variables);
     }
@@ -405,14 +446,18 @@
 
     var target = '';
     if (o.refLabel) target = '，目标元素 ' + o.param + '「' + String(o.refLabel).replace(/^【[^】]*】\s*/, '') + '」';
-    else if (o.param && o.param !== REF_NONE) target = '，目标元素 ' + o.param;
+    else if (o.param) target = '，目标元素 ' + o.param;
     var instructions = '已确定动作 ' + action + target + '。'
       + (action === 'select'
         ? '这个动作的文本就是要选定的选项名。' + optionListNote
         : action === 'press'
           ? '请选出要按下的键（变量优先，其次常用键名）。'
-          : '该动作需要输入文本，请选出应使用的值。')
-      + (TEXT_OPTIONAL_ACTIONS[action] ? '本动作也可以不带文本，不需要就选「无」。' : '');
+          : action === 'tab-select'
+            ? '这个动作的文本是要切换到的标签页序号。' + optionListNote
+            : action === 'tab-close'
+              ? '这个动作的文本是要关闭的标签页序号；选「无」则不传序号、关闭当前 Tab。'
+              : '该动作需要输入文本，请选出应使用的值。')
+      + (TEXT_OPTIONAL_ACTIONS[action] && action !== 'tab-close' ? '本动作也可以不带文本，不需要就选「无」。' : '');
     return { '文本': { type: 'choice', instructions: instructions, criteria: criteria } };
   }
 
@@ -451,8 +496,9 @@
   function buildQuestions(ctx) {
     var snapshot = ctx.snapshot || '';
     var param = ctx.param || paramCriteria(ctx);
+    var paramCriteriaMap = param.criteria || refCriteria(snapshot);
 
-    return {
+    var out = {
       '动作': {
         type: 'choice',
         /* 角色 → 动词的对照必须写在这里：动作题与「参数」同请求同时作答，动作的选择本身
@@ -465,21 +511,27 @@
           + '滚动页面 → press（键名在动作确定后的「文本」补问里选，常用 PageDown / PageUp）；仅等待页面变化 → 无操作。'
           + '若目标已达成选「任务已完成」；当前页面无法完成任务选「放弃」。',
         criteria: Object.assign({}, AUTO_TOOLS, TERMINAL_TOOLS)
-      },
-      '参数': {
-        type: 'choice',
-        instructions: paramInstructions(param),
-        criteria: param.criteria || refCriteria(snapshot)
-      },
-      '未完成': {
-        type: 'score',
-        instructions: '对「任务目标的未完成程度」打分：0 = 已完成，1 = 未完成。以页面快照和当前状态为准。',
-        criteria: [
-          '0 · 已完成：目标结果已体现在页面上',
-          '1 · 进行中：关键步骤进行中，仍未完成'
-        ]
       }
     };
+    /* 零 ref 页面（空白页 / 极简页）没有参数候选 —— 空选项的 choice 题会被接口拒，
+     * 直接不发这题；parseDecision 容忍参数答案缺失（null），需要元素的动作由
+     * planExecution 抛出带说明的失败步 */
+    if (Object.keys(paramCriteriaMap).length) {
+      out['参数'] = {
+        type: 'choice',
+        instructions: paramInstructions(param),
+        criteria: paramCriteriaMap
+      };
+    }
+    out['未完成'] = {
+      type: 'score',
+      instructions: '对「任务目标的未完成程度」打分：0 = 已完成，1 = 未完成。以页面快照和当前状态为准。',
+      criteria: [
+        '0 · 已完成：目标结果已体现在页面上',
+        '1 · 进行中：关键步骤进行中，仍未完成'
+      ]
+    };
+    return out;
   }
 
   /* ---------------- 决策解析 ---------------- */
@@ -497,7 +549,9 @@
     }
     return {
       action: action,
-      param: (a['参数'] && a['参数'].choice) || REF_NONE,
+      /* 参数答案缺失（零 ref 页没问 / 上游没回）按 null 处理：需要元素的动作
+       * 在 planExecution 抛错，不需要元素的静默放行 */
+      param: (a['参数'] && a['参数'].choice) || null,
       /* 文本不再随首轮作答（动作感知的候选没法提前构造）—— 需要文本的动作
        * 在动作+参数落定后走 buildTextFollowUp 补问。容错：旧上游多回的「文本」
        * 答案直接忽略，不在这里消费。 */
@@ -522,13 +576,13 @@
     if (action === '无操作') return { kind: 'noop' };
 
     if (action === '生成输入') {
-      if (decision.param === REF_NONE) throw new Error('生成输入需要指定目标输入框的 ref，但 Jev 选择了「无需元素」');
+      if (!decision.param) throw new Error('生成输入需要指定目标输入框的 ref，但 Jev 未在「参数」题选定元素');
       return { kind: 'llm', ref: decision.param };
     }
 
     var ref = null;
     if (needRef(action)) {
-      if (decision.param === REF_NONE) throw new Error('动作 ' + action + ' 需要作用于具体元素，但 Jev 选择了「无需元素」');
+      if (!decision.param) throw new Error('动作 ' + action + ' 需要作用于具体元素，但 Jev 未在「参数」题选定元素');
       ref = decision.param;
     }
     var text = null;
@@ -636,7 +690,7 @@
     if (isRefMore(decision.param)) return action + '【' + REF_MORE + ' · 展开下一批】';
     if (action === '生成输入') return '生成输入【' + decision.param + ' · ' + shortRefLabel(refLabels[decision.param]) + '】';
     var out = action;
-    if (REF_ACTIONS[action] && decision.param !== REF_NONE) {
+    if (REF_ACTIONS[action] && decision.param) {
       out += '【' + decision.param + ' · ' + shortRefLabel(refLabels[decision.param]) + '】';
     }
     var text = resolveText(decision.text, variables);
@@ -644,8 +698,50 @@
     return out;
   }
 
+  /* Playwright actionability 失败的根因（被什么挡住 / 不可见 / 不稳）写在日志行尾，
+   * 摘要必须把它带上：只截前 80 字符的话，模型看到的永远只是「Timeout 5000ms exceeded」，
+   * 推不出「要先清掉遮挡物再点」，于是重复点同一元素直到终止
+   * （实测会话 r-0926-0046-qrys：步骤 5-7 三次相同 click，每次 5s 超时）。 */
+  var ERR_ROOT_RE = /intercepts pointer events|subtree intercepts|not visible|not stable|outside of the viewport|element is not (enabled|attached|visible)|命令超时/;
+
+  /* 长行折叠中段：根因短语固定在行尾，按长度从头截会把根因切掉（与 browser-driver.js
+   * 里的同名 helper 同源；两端是不同运行时，各留一份 4 行实现比让驱动依赖 public/js 便宜） */
+  function clipMiddle(line, max) {
+    var s = String(line);
+    if (s.length <= max) return s;
+    var tail = Math.floor(max / 2);
+    return s.slice(0, max - tail - 1) + '…' + s.slice(-tail);
+  }
+
+  function briefError(err) {
+    var s = String(err == null ? '' : err).replace(/\u001b\[[0-9;]*m/g, '').trim();
+    if (!s) return '未知错误';
+    /* 驱动层已把摘要拼成「首行 | 根因行」；老格式/别处构造的错误可能仍是多行原文 */
+    var segs = s.split(/\s*\|\s*|[\r\n]+/).map(function (x) { return x.trim(); }).filter(Boolean);
+    if (!segs.length) return '未知错误';
+    var root = null;
+    for (var i = 0; i < segs.length; i++) {
+      if (ERR_ROOT_RE.test(segs[i])) { root = segs[i]; break; }
+    }
+    /* 逐段折叠而不是截拼接后的整串 —— 后者会把排在末尾的根因段整个切掉 */
+    var head = clipMiddle(segs[0], 120);
+    if (!root || root === segs[0]) return head;
+    return head + ' ｜ ' + clipMiddle(root, 160);
+  }
+
   function formatHistoryStep(n, label, ok, err) {
-    return n + '. ' + label + (ok ? '成功' : '失败：' + String(err || '').slice(0, 80));
+    return n + '. ' + label + (ok ? '成功' : '失败：' + briefError(err));
+  }
+
+  /* param 是否为当前快照里真实存在的 ref。
+   * 不能用 /^e\d+$/ 这类正则猜 ref 形状：切到第 N 个标签页后 playwright 会给 ref 加 fN 前缀
+   * （e496 → f2e496），正则失配会让失败记忆静默失效 —— 实测会话 r-0926-0046-qrys 第 5-7 步
+   * 重复点同一个被遮挡元素，failedRefs 一条都没记上（连 -40 降权都没发生过）。
+   * refLabels 是当前快照解析出的全量 ref 表，天然覆盖任何前缀。 */
+  function isRefParam(param, refLabels) {
+    var s = String(param == null ? '' : param).trim();
+    if (!s || !refLabels) return false;
+    return Object.prototype.hasOwnProperty.call(refLabels, s);
   }
 
   /* ===================== 运行记录归一（会话树 / 落盘共用） =====================
@@ -666,10 +762,14 @@
     (s.followUps || []).forEach((r) => {
       const k = r.kind || 'param';
       const p = r.payload || r.request || null;
+      /* 与首轮同一形状：种类 · 题数 · 上下文。补问按构造恒为单题，题数仍从
+       * payload 数出来 —— 老记录可能没有 payload，那时退回 1。 */
+      const qp = (p && p.questions) || null;
+      const n = qp ? Object.keys(qp).length : 1;
       const titles = {
-        param: '参数补问 · 第 ' + r.batch + ' 批',
-        action: '动作补问 · 「' + (r.from || '') + '」与角色 ' + (r.role || '') + ' 冲突',
-        text: '文本补问 · ' + (r.forAction || ''),
+        param: '参数补问 · ' + n + ' 题 · 第 ' + r.batch + ' 批',
+        action: '动作补问 · ' + n + ' 题 · 「' + (r.from || '') + '」与角色 ' + (r.role || '') + ' 冲突',
+        text: '文本补问 · ' + n + ' 题 · ' + (r.forAction || ''),
       };
       out.push({
         kind: k, title: titles[k] || '补问',
@@ -730,7 +830,8 @@
     return {
       meta: {
         id: o.id, goal: c.goal, startUrl: c.url,
-        browser: c.browserUsed || c.browser, window: c.window || null,
+        browser: c.browserUsed || c.browser, mode: c.mode || 'isolated', cdp: c.cdp || null,
+        window: c.window || null,
         variables: c.variables || [], maxSteps: c.maxSteps,
         screenshotOn: !!c.screenshotOn, paramTrim: c.paramTrim || null,
         jevModel: o.jevModel, llmModel: o.llmModel,
@@ -745,7 +846,6 @@
   var AutoCore = {
     AUTO_TOOLS: AUTO_TOOLS,
     TERMINAL_TOOLS: TERMINAL_TOOLS,
-    REF_NONE: REF_NONE,
     REF_MORE: REF_MORE,
     TEXT_NONE: TEXT_NONE,
     SCORE_LEVELS: SCORE_LEVELS,
@@ -783,6 +883,8 @@
     sanitizeLlmText: sanitizeLlmText,
     describeDecision: describeDecision,
     formatHistoryStep: formatHistoryStep,
+    briefError: briefError,
+    isRefParam: isRefParam,
     actionsOf: actionsOf,
     actionStatus: actionStatus,
     newRunId: newRunId,

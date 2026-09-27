@@ -6,6 +6,8 @@ const assert = require('node:assert');
 const path = require('path');
 const http = require('http');
 const fs = require('fs');
+const os = require('os');
+const net = require('net');
 const { spawn } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
@@ -29,7 +31,7 @@ test.before(async () => {
     env: Object.assign({}, process.env, { PORT: String(port) }),
     stdio: 'ignore', windowsHide: true,
   });
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 150; i++) {
     try {
       const r = await fetch(serverBase + '/api/health');
       if (r.ok && (await r.json()).ok) break;

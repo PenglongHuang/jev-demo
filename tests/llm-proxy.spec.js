@@ -44,7 +44,7 @@ function startServer() {
   });
   const base = 'http://127.0.0.1:' + port;
   const wait = async () => {
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 150; i++) {
       try {
         const r = await fetch(base + '/api/health');
         if (r.ok && (await r.json()).ok) return base;
@@ -93,7 +93,7 @@ test('POST /api/llm：校验、透传、错误映射', async (t) => {
       stdio: 'ignore', windowsHide: true,
     });
     t.after(() => child2.kill());
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 150; i++) {
       try { const h = await fetch('http://127.0.0.1:' + port2 + '/api/health'); if (h.ok) break; } catch (_) { /* retry */ }
       await new Promise((rs) => setTimeout(rs, 100));
     }

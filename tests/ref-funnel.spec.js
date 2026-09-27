@@ -98,14 +98,14 @@ test('阈值是 250：正好 250 个 ref 不裁，251 个才裁', () => {
 
 /* ---------- 裁剪与兜底 ---------- */
 
-test('裁剪后：选项数 = limit + 无需元素 + 其他，且 meta 记录折叠数量', () => {
+test('裁剪后：选项数 = limit + 其他（「无需元素」已下线），且 meta 记录折叠数量', () => {
   const snap = denseSnapshot(200, 0, '');          // 405 个 ref
   const out = Funnel.buildBoundedRefCriteria(snap, { goal: '找候选人', limit: 80, batch: 1, maxTranches: 3 });
   const ks = keys(out.criteria);
   assert.strictEqual(out.meta.totalRefs, 405);
   assert.strictEqual(out.meta.trimmed, true);
-  assert.strictEqual(ks.length, 80 + 1 + 1);
-  assert.ok(out.criteria['无需元素'], '必须保留「无需元素」');
+  assert.strictEqual(ks.length, 80 + 1);
+  assert.strictEqual(out.criteria['无需元素'], undefined, '「无需元素」兜底项已下线');
   assert.ok(out.criteria['其他'], '还有未列出的候选时必须给兜底项');
   assert.strictEqual(out.meta.folded, 405 - 80);
   assert.match(out.criteria['其他'], /325/);
@@ -116,7 +116,7 @@ test('最后一批不附「其他」项（避免无限展开）', () => {
   const last = Funnel.buildBoundedRefCriteria(snap, { goal: '', limit: 80, batch: 3, maxTranches: 3 });
   assert.strictEqual(last.criteria['其他'], undefined);
   assert.strictEqual(last.meta.hiddenMore, 405 - 240);
-  assert.ok(last.criteria['无需元素']);
+  assert.strictEqual(last.criteria['无需元素'], undefined);
 });
 
 test('maxTranches = 0 时完全不附「其他」项', () => {
@@ -268,16 +268,16 @@ test('已失败降权：avoidRefs 里的 ref 排到最后', () => {
 
 /* ---------- 边界 ---------- */
 
-test('快照里没有 ref 时：只给「无需元素」，不裁剪不报错', () => {
+test('快照里没有 ref 时：候选为空（「无需元素」下线后零候选），不裁剪不报错', () => {
   const out = Funnel.buildBoundedRefCriteria('- generic: 空白页', { goal: '随便', limit: 80, batch: 1, maxTranches: 3 });
-  assert.deepStrictEqual(keys(out.criteria), ['无需元素']);
+  assert.deepStrictEqual(keys(out.criteria), []);
   assert.strictEqual(out.meta.trimmed, false);
   assert.strictEqual(out.meta.totalRefs, 0);
 });
 
 test('目标为空时：退化为「可点击 + 快照顺序」，仍然完成裁剪', () => {
   const out = Funnel.buildBoundedRefCriteria(denseSnapshot(200, 0, ''), { goal: '', limit: 80, batch: 1, maxTranches: 3 });
-  assert.strictEqual(keys(out.criteria).length, 82);
+  assert.strictEqual(keys(out.criteria).length, 81);
   assert.ok(out.meta.top.every((x) => x.score === (x.interactive ? 20 : 0)));
 });
 
@@ -290,7 +290,7 @@ test('上限被设得过大时自动收紧到安全值并记录（绝不发出�
 
 test('isMoreChoice：认得兜底项', () => {
   assert.strictEqual(Funnel.isMoreChoice('其他'), true);
-  assert.strictEqual(Funnel.isMoreChoice('无需元素'), false);
+  assert.strictEqual(Funnel.isMoreChoice(null), false);
   assert.strictEqual(Funnel.isMoreChoice('e12'), false);
 });
 

@@ -51,6 +51,15 @@ function startMocks() {
     /* 弹窗步：快照被换成阻塞说明文本（auto-core DIALOG_SNAPSHOT_NOTE），只剩一道动作题 */
     if (snapshot.includes('原生对话框')) return { action: 'dialog-accept', unfinished: 0 };
 
+    /* 哨兵标签回归（S7）：动作不需要元素（dialog-dismiss）时仍回「其他」（REF_MORE）。
+     * 前端必须把参数归一为空并**重算标签** —— 否则时间线上会留下「dialog-dismiss【其他 ·
+     * 展开下一批】」，读起来像真的在展开候选批次。第二轮收尾。 */
+    if (goal.includes('哨兵标签回归')) {
+      const hist = JSON.stringify(state['已完成步骤'] || []);
+      if (/dialog-dismiss/.test(hist)) return { action: '任务已完成', unfinished: 0 };
+      return { action: 'dialog-dismiss', ref: '其他', unfinished: 1 };
+    }
+
     if (goal.includes('删除')) {
       const gone = !/listitem "邮件[^"]*8 月电子对账单/.test(snapshot);
       if (gone && /已删除 1 封/.test(snapshot)) return { action: '任务已完成', unfinished: 0 };
@@ -114,7 +123,12 @@ function startMocks() {
       answers['动作'] = { type: 'choice', choice: d.action, probabilities: probs(d.action, ['无操作', 'click', 'fill']), confidence: 0.82 };
     }
     if (q['参数']) {
-      answers['参数'] = { type: 'choice', choice: d.ref || '无需元素', probabilities: probs(d.ref || '无需元素', ['无需元素']), confidence: 0.78 };
+      /* 剧本动作带 ref 才答参数题：候选里只有真实 ref（「无需元素」已下线），
+       * 不作用于元素的动作（goto/无操作/终止…）不答，parseDecision 容忍缺失 */
+      if (d.ref) {
+        const other = Object.keys(q['参数'].criteria || {}).find((k) => k !== d.ref);
+        answers['参数'] = { type: 'choice', choice: d.ref, probabilities: probs(d.ref, other ? [other] : []), confidence: 0.78 };
+      }
     }
     if (q['文本']) {
       const others = Object.keys(q['文本'].criteria || {}).filter((k) => k !== d.text).slice(0, 2);
@@ -173,7 +187,7 @@ function startMocks() {
     const snapRefs = new Set((snapshot.match(/\[ref=([A-Za-z0-9_-]+)\]/g) || []).map((s) => s.slice(5, -1)));
     const trimmed = params.includes('其他') || params.length < snapRefs.size;
     params.forEach((k) => {
-      if (k === '无需元素' || k === '其他') return;
+      if (k === '其他') return;
       if (!snapRefs.has(k)) v.push('参数候选 ' + k + ' 不在快照 ref 集合内');
     });
     if (!trimmed) {

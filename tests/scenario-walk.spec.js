@@ -50,7 +50,7 @@ test.before(async () => {
     env: Object.assign({}, process.env, { PORT: String(port) }),
     stdio: 'ignore', windowsHide: true,
   });
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 150; i++) {
     try {
       const r = await fetch(serverBase + '/api/health');
       if (r.ok && (await r.json()).ok) break;

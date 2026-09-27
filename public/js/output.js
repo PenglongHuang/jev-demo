@@ -50,7 +50,7 @@ const Output = (() => {
 
   function renderError(msg, detail, title) {
     document.getElementById('paneAnswers').innerHTML =
-      '<div class="err" role="alert"><b>' + escapeHtml(title || '请求失败') + '</b><br />' +
+      '<div class="demo-err" role="alert"><b>' + escapeHtml(title || '请求失败') + '</b><br />' +
       escapeHtml(msg) +
       (detail ? '<br /><br /><span style="font-family:var(--mono);font-size:12px">' + escapeHtml(detail) + '</span>' : '') +
       '</div>';

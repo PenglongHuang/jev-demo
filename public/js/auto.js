@@ -23,6 +23,10 @@ const Auto = (() => {
     vars: document.getElementById('autoVars'),
     addVar: document.getElementById('autoAddVar'),
     browser: document.getElementById('autoBrowser'),
+    browserMode: document.getElementById('autoBrowserMode'),
+    cdpField: document.getElementById('autoCdpField'),
+    cdpTarget: document.getElementById('autoCdpTarget'),
+    cdpWarn: document.getElementById('autoCdpWarn'),
     screen: document.getElementById('autoScreen'),
     maxSteps: document.getElementById('autoMaxSteps'),
     screenshot: document.getElementById('autoScreenshot'),
@@ -37,18 +41,27 @@ const Auto = (() => {
     elapsed: document.getElementById('autoElapsed'),
     sessDd: document.getElementById('autoSessDd'),
     sessBtn: document.getElementById('autoSessBtn'),
+    /* Wave 0 冻结骨架：面板本身才是「开合开关」，#autoSessList 只是可滚的列表本体 */
+    sessPanel: document.getElementById('autoSessPanel'),
+    sessFilter: document.getElementById('sessFilter'),
     sessList: document.getElementById('autoSessList'),
+    sessFoot: document.getElementById('sessFoot'),
+    preflight: document.getElementById('autoPreflight'),
     presetCard: document.getElementById('presetCard'),
     mainGrid: document.getElementById('mainGrid'),
     apiSpec: document.getElementById('apiSpec'),
     modeSeg: document.getElementById('modeSeg'),
     editTask: document.getElementById('autoEditTask'),
     summaryBody: document.getElementById('taskSummaryBody'),
+    errBar: document.getElementById('autoErrorBar'),
+    errTitle: document.getElementById('autoErrorTitle'),
+    errBody: document.getElementById('autoErrorBody'),
+    errCopy: document.getElementById('autoErrorCopy'),
+    errClose: document.getElementById('autoErrorClose'),
     taskModal: document.getElementById('taskModal'),
     taskModalClose: document.getElementById('taskModalClose'),
     taskCancel: document.getElementById('taskCancel'),
     taskSave: document.getElementById('taskSave'),
-    taskError: document.getElementById('taskError'),
   };
 
   /* ---------- 状态 ---------- */
@@ -126,6 +139,136 @@ const Auto = (() => {
     return (END_STATES[m.endState] || END_STATES.error).label;
   }
 
+  /* 时间戳 → MM-DD HH:mm（会话列表与删除确认共用；解析不出来就留空，不显示 Invalid Date） */
+  function fmtWhen(iso) {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    const p = (n) => (n < 10 ? '0' + n : String(n));
+    return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+
+  /* 全量条目：会话根（本页这一轮）+ 全部落盘记录。与过滤无关 —— 过滤只作用于渲染。
+   * 拆开是因为过滤词一变就要按同一份数据重排，不能每次都去重算「当前会话」这条。 */
+  function sessEntries() {
+    const out = [];
+    if (runId) {
+      out.push({
+        isCur: view.sess === 'current', canDel: false,
+        m: {
+          id: runId, goal: runCfg && runCfg.goal, startedAt: runStartedAt,
+          endState: running ? 'running' : (els.runPill.dataset.state || 'error'),
+          stepCount: steps.length,
+        },
+      });
+    }
+    runsList.filter((m) => m.id !== runId).forEach((m) => {
+      out.push({ m, isCur: view.sess === m.id, canDel: true });
+    });
+    return out;
+  }
+
+  function mkSessItem(m, isCur, canDel) {
+    const row = el('div', 'sess-item' + (isCur ? ' cur' : ''));
+    const pick = el('button', 'pick');
+    pick.type = 'button';
+    pick.innerHTML = '<span class="sid"></span><span class="sg"></span><span class="st"></span>';
+    pick.querySelector('.sid').textContent = m.id || '—';
+    pick.querySelector('.sg').textContent = shortStr(m.goal || '（无目标）', 30);
+    pick.querySelector('.st').textContent = sessItemState(m, isCur) + ' · ' + (m.stepCount || 0) + ' 步';
+    pick.title = m.goal || '';
+    pick.onclick = () => { els.sessPanel.hidden = true; openSession(isCur ? 'current' : m.id); };
+    row.appendChild(pick);
+    if (canDel) {
+      const del = el('button', 'sess-del', '✕');
+      del.type = 'button'; del.title = '删除该会话记录';
+      del.onclick = async (e) => {
+        e.stopPropagation();
+        /* 自绘确认（原生 confirm 塞不下「11 步 · 任务已完成 · 09-26 23:06」这类上下文） */
+        const ok = await confirmDialog({
+          title: '删除会话 ' + m.id + '？',
+          text: (m.stepCount || 0) + ' 步 · ' + sessItemState(m, false)
+            + (fmtWhen(m.startedAt) ? ' · ' + fmtWhen(m.startedAt) : '')
+            + (m.goal ? ' · ' + shortStr(m.goal, 24) : ''),
+          okText: '删除',
+        });
+        if (!ok) return;
+        await fetch('/api/runs/' + m.id, { method: 'DELETE' });
+        if (view.sess === m.id) openSession('current');
+        else refreshRunsList();
+      };
+      row.appendChild(del);
+    }
+    els.sessList.appendChild(row);
+  }
+
+  /* 只有「按当前过滤词渲染」这一半：过滤词一变就重跑，不重新拉数据 */
+  function renderSessList() {
+    if (!els.sessList) return;
+    const q = (els.sessFilter ? els.sessFilter.value : '').trim().toLowerCase();
+    els.sessList.innerHTML = '';
+    const items = sessEntries().filter(({ m }) => !q
+      || String(m.id || '').toLowerCase().indexOf(q) !== -1
+      || String(m.goal || '').toLowerCase().indexOf(q) !== -1);
+    if (!items.length) {
+      els.sessList.appendChild(el('div', 'sess-empty', q ? '无匹配会话' : '暂无会话记录'));
+      return;
+    }
+    items.forEach(({ m, isCur, canDel }) => mkSessItem(m, isCur, canDel));
+  }
+
+  /* ---------- 记录清理（条目 8 的前端半边）：面板底部工具条 ---------- */
+  const RETENTION_DAYS = 30;
+  function staleRuns() {
+    const cut = Date.now() - RETENTION_DAYS * 86400000;
+    return runsList.filter((m) => {
+      const t = m.startedAt ? Date.parse(m.startedAt) : NaN;
+      return !isNaN(t) && t < cut;
+    });
+  }
+  /* 与列表同刷：列表每次重建都会换掉 runsList 的渲染结果，计数留在旧 DOM 里会过期 */
+  function renderSessFoot() {
+    if (!els.sessFoot) return;
+    const stale = staleRuns();
+    els.sessFoot.innerHTML = '';
+    const btn = el('button', 'chip', '🧹 清理 30 天前');
+    btn.type = 'button';
+    btn.disabled = !stale.length;
+    btn.title = stale.length
+      ? '删除 ' + stale.length + ' 条 ' + RETENTION_DAYS + ' 天前的会话记录（不可撤销）'
+      : '没有 ' + RETENTION_DAYS + ' 天前的会话记录';
+    btn.onclick = () => cleanStaleRuns(stale);
+    els.sessFoot.appendChild(btn);
+    if (!stale.length) els.sessFoot.appendChild(el('span', 'foot-note', '暂无可清理记录'));
+  }
+
+  async function cleanStaleRuns(stale) {
+    if (!stale.length) return;
+    const n = stale.length;
+    const ok = await confirmDialog({
+      title: '清理 ' + RETENTION_DAYS + ' 天前的会话记录？',
+      text: '将删除 ' + n + ' 条会话记录（不可撤销）',
+      okText: '删除',
+    });
+    if (!ok) return;
+    const before = new Date(Date.now() - RETENTION_DAYS * 86400000).toISOString();
+    let removed = n;
+    try {
+      const r = await fetch('/api/runs?before=' + encodeURIComponent(before), { method: 'DELETE' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      /* 服务端回的 deleted 是权威计数（本地列表可能比磁盘旧），拿不到才退回本地算的 N */
+      const d = await r.json().catch(() => null);
+      if (d && typeof d.deleted === 'number') removed = d.deleted;
+    } catch (e) {
+      toast('清理失败：' + (e && e.message ? e.message : e));
+      return;
+    }
+    toast(removed ? '已清理 ' + removed + ' 条' : '没有需要清理的记录');
+    /* 正在看的那条可能刚被清掉：退回当前会话，别让详情停在一条不存在的记录上 */
+    const cur = view.sess === 'current' ? null : viewRecord && viewRecord.meta;
+    if (cur && stale.some((m) => m.id === cur.id)) { await refreshRunsList(); openSession('current'); return; }
+    refreshRunsList();
+  }
+
   function renderSessDd() {
     const meta = view.sess === 'current'
       ? { id: runId, goal: runCfg && runCfg.goal }
@@ -133,34 +276,9 @@ const Auto = (() => {
     els.sessBtn.textContent = meta && meta.id
       ? '会话 ' + meta.id + (meta.goal ? ' · ' + shortStr(meta.goal, 12) : '')
       : '会话 —';
-    els.sessList.innerHTML = '';
-    const mkItem = (m, isCur, canDel) => {
-      const row = el('div', 'sess-item' + (isCur ? ' cur' : ''));
-      const pick = el('button', 'pick');
-      pick.type = 'button';
-      pick.innerHTML = '<span class="sid"></span><span class="sg"></span><span class="st"></span>';
-      pick.querySelector('.sid').textContent = m.id || '—';
-      pick.querySelector('.sg').textContent = shortStr(m.goal || '（无目标）', 30);
-      pick.querySelector('.st').textContent = sessItemState(m, isCur) + ' · ' + (m.stepCount || 0) + ' 步';
-      pick.title = m.goal || '';
-      pick.onclick = () => { els.sessList.hidden = true; openSession(isCur ? 'current' : m.id); };
-      row.appendChild(pick);
-      if (canDel) {
-        const del = el('button', 'sess-del', '✕');
-        del.type = 'button'; del.title = '删除该会话记录';
-        del.onclick = async (e) => {
-          e.stopPropagation();
-          if (!window.confirm('删除会话 ' + m.id + ' 的运行记录？')) return;
-          await fetch('/api/runs/' + m.id, { method: 'DELETE' });
-          if (view.sess === m.id) openSession('current');
-          else refreshRunsList();
-        };
-        row.appendChild(del);
-      }
-      els.sessList.appendChild(row);
-    };
-    if (runId) mkItem({ id: runId, goal: runCfg && runCfg.goal, endState: running ? 'running' : (els.runPill.dataset.state || 'error'), stepCount: steps.length }, view.sess === 'current', false);
-    runsList.filter((m) => m.id !== runId).forEach((m) => mkItem(m, view.sess === m.id, true));
+    renderSessList();
+    renderSessFoot();
+    updateExportBtn();   /* 导出跟随「你正在看的会话」，视图一变就跟着变 */
   }
 
   async function openSession(which) {
@@ -200,7 +318,6 @@ const Auto = (() => {
     const c = document.querySelector('input[name="autoCadence"]:checked');
     return c ? c.value : 'single';
   }
-  function shortUrl(u) { return String(u || '').replace(/^https?:\/\//, '').slice(0, 40); }
 
   /* ---------- 树视图数据访问器 ---------- */
   function viewedSteps() { return view.sess === 'current' ? steps : (viewRecord ? viewRecord.steps : []); }
@@ -222,8 +339,72 @@ const Auto = (() => {
   }
 
   /* ---------- 环境探测（设计 §4） ---------- */
-  /* 状态用顶栏胶囊的圆点表达（颜色跟着 .ok / .error 走），文案里不再带 ✅⚠ */
+  /* .warnbar 的显示由 class `show` 控制（CSS: `.warnbar{display:none}` /
+   * `.warnbar.show{display:block}`）—— 只翻 hidden 属性是看不见的。
+   * 两处警示条都走这里，免得再漏一个。 */
+  function setWarnbar(node, on) {
+    if (!node) return;
+    node.hidden = !on;
+    node.classList.toggle('show', on);
+  }
+
+  /* ---------- 错误条：让报错留在页面上、能被复制 ----------
+   * 以前出错只发一条 2.2 秒的 toast，看完就没了，想搜/想贴只能靠肉眼抄 —— 报错文案往往是
+   * 「拿去搜 / 贴给同事」的东西，所以摊在页面里，整段可选中，另配一键复制。
+   * 运行中的小提示（已更新、全屏未生效…）仍走 toast，别把页面刷成报错墙。 */
+  const ERR_COPY_IDLE = '⧉ 复制';
+  function showErr(title, text) {
+    if (!els.errBar) return;
+    els.errTitle.textContent = title || '✗ 出错';
+    els.errBody.textContent = String(text == null ? '' : text);
+    els.errCopy.textContent = ERR_COPY_IDLE;
+    setWarnbar(els.errBar, true);
+    /* 报错条在页面顶部，而用户可能正滚在运行流水里 —— 带进视野，否则等于没提示 */
+    try { els.errBar.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (_) { /* 老浏览器 */ }
+  }
+  function hideErr() {
+    if (els.errBar) setWarnbar(els.errBar, false);
+  }
+  function copyErr() {
+    const text = els.errBody.textContent || '';
+    const done = (ok) => {
+      els.errCopy.textContent = ok ? '✓ 已复制' : '已选中，Ctrl+C';
+      setTimeout(() => { els.errCopy.textContent = ERR_COPY_IDLE; }, 1600);
+    };
+    const selectAll = () => {                       /* 兜底：把文本选上，用户自己 Ctrl+C */
+      try {
+        const range = document.createRange();
+        range.selectNodeContents(els.errBody);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        done(false);
+      } catch (_) { done(false); }
+    };
+    /* navigator.clipboard 只在安全上下文可用（localhost / https 都算）；
+     * 被策略拒了也别静默失败 —— 退回到「选中文本」这条路。 */
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => done(true), selectAll);
+    } else {
+      selectAll();
+    }
+  }
+  if (els.errCopy) els.errCopy.addEventListener('click', copyErr);
+  if (els.errClose) els.errClose.addEventListener('click', hideErr);
+
+  /* 引擎探测结论（probeEngine 写、renderPreflight 读）：以前这个结论只写进顶栏胶囊，
+   * 「开跑前检查」就没得读 —— 用户只能点开始之后才被告知引擎不可用。 */
+  let engineProbe = { known: false, ok: false, text: '检测中…' };
+
   async function probeEngine() {
+    const ok = await probeEngineRaw();
+    engineProbe = { known: true, ok: ok, text: els.pill.textContent };
+    renderPreflight();
+    return ok;
+  }
+
+  /* 状态用顶栏胶囊的圆点表达（颜色跟着 .ok / .error 走），文案里不再带 ✅⚠ */
+  async function probeEngineRaw() {
     els.pill.textContent = '引擎检测中…';
     els.pill.className = 'status-pill';
     try {
@@ -233,20 +414,116 @@ const Auto = (() => {
       if (d.available) {
         els.pill.textContent = '引擎就绪 ' + (d.version || '');
         els.pill.className = 'status-pill ok';
-        els.installHint.hidden = true;
+        setWarnbar(els.installHint, false);
         return true;
       }
       const msg = d.reason === 'not-installed' ? '引擎未安装' : '引擎不可用';
       els.pill.textContent = msg;
       els.pill.className = 'status-pill error';
-      els.installHint.hidden = false;
+      setWarnbar(els.installHint, true);
       return false;
     } catch (_) {
       els.pill.textContent = '无后端服务';
       els.pill.className = 'status-pill error';
-      els.installHint.hidden = true;   /* 后端问题由顶部 warnbar 负责，不重复 */
+      setWarnbar(els.installHint, false);   /* 后端问题由顶部 warnbar 负责，不重复 */
       return false;
     }
+  }
+
+  /* ---------- 开跑前检查（条目 6） ----------
+   * 三个前置条件（引擎 / Jev Key / 任务目标 / 起始 URL）原本散在三处：引擎在顶栏、
+   * Key 要点了开始才校验、目标与 URL 在表单里 —— 用户能一路填到最后才被告知缺 Key。
+   * 这里只做「提前告知」：**绝不用它去 disable #autoStart** —— 「配置不合法也能点开始，
+   * 然后把原因摊进 #autoErrorBar」是已验收的契约（tests/e2e/run.js 的 S8）。 */
+  /* full：胶囊里放不下时的完整值（进 title，鼠标悬停仍能看到整条 URL） */
+  function pfItem(name, ok, detail, full) {
+    const n = el('div', 'pf-item ' + (ok ? 'ok' : 'bad'));
+    n.appendChild(el('b', null, name));
+    n.appendChild(document.createTextNode(' ' + detail));
+    n.title = name + '：' + (full || detail);
+    return n;
+  }
+
+  /* #autoPreflight 是 role="status" aria-live="polite" 的 live region：整块重建一次，
+   * 读屏就把四格全部重播一遍 —— 挂在 input 上会让用户每敲一个字符都被播报四格。
+   * 所以按「状态签名」短路：只有真正有变化（引擎结论变了 / 某格 ok↔bad 翻牌）才重建，
+   * 否则连 DOM 都不碰，live region 自然不播报。 */
+  let pfSig = null;
+  let pfUrlNode = null;   /* 起始 URL 那一格：title 里带完整 URL，签名不变时也要保持新鲜 */
+
+  function renderPreflight() {
+    if (!els.preflight) return;
+    const goalOk = Boolean(els.goal.value.trim());
+    const urlVal = els.url.value.trim();
+    const urlOk = /^https?:\/\//i.test(urlVal);
+    const keyOk = Boolean(Config.current.key && Config.current.key.trim());
+    /* 签名只含「会改变胶囊文字与配色」的东西。刻意不含 URL 原文：在 http:// 之后接着
+     * 敲字符时它每键都变，把它算进签名等于每键重建一次 live region（正是要灭掉的毛病）。
+     * 完整 URL 走 title（改属性不会触发 live region 播报）。 */
+    const sig = [
+      engineProbe.known ? (engineProbe.ok ? 'ok' : 'bad:' + engineProbe.text) : 'wait',
+      keyOk ? 'ok' : 'bad',
+      goalOk ? 'ok' : 'bad',
+      urlOk ? 'ok' : (urlVal ? 'bad' : 'empty'),
+    ].join('|');
+    if (sig === pfSig) {
+      if (pfUrlNode) pfUrlNode.title = '起始 URL：' + (urlVal || '未填写');
+      return;
+    }
+    pfSig = sig;
+    const items = [
+      pfItem('引擎', engineProbe.known && engineProbe.ok,
+        !engineProbe.known ? '检测中…' : (engineProbe.ok ? '就绪' : engineProbe.text)),
+      pfItem('Jev Key', keyOk, keyOk ? '已填写' : '未配置（点右上角「⚙ 配置」填写）'),
+      pfItem('任务目标', goalOk, goalOk ? '已填写' : '未填写'),
+      /* 这一格只说结论（已填 / 不是 http(s) 地址），整条 URL 留在 title：胶囊里塞不下，
+       * 也不该把 URL 原文当正文 —— 那会让「输入中」变成每次都变化的正文。 */
+      pfItem('起始 URL', urlOk, urlOk ? '已填写' : (urlVal ? '不是 http(s) 地址' : '未填写'), urlVal),
+    ];
+    pfUrlNode = items[3];
+    els.preflight.innerHTML = '';
+    items.forEach((n) => els.preflight.appendChild(n));
+  }
+
+  /* 文本框在 input 上的触发：尾部节流，别让连续输入期间反复重算 */
+  let pfTimer = null;
+  function schedulePreflight() {
+    if (pfTimer) clearTimeout(pfTimer);
+    pfTimer = setTimeout(() => { pfTimer = null; renderPreflight(); }, 350);
+  }
+
+  /* ---------- 「关闭浏览器」的可点性（条目 10） ----------
+   * **这个按钮永不禁用。** 页内状态刷新即丢：`runBrowserOpen` 归 false，而 cdp-probe 只认
+   * 用户自己默认 profile 里的调试端口 —— isolated / persistent 起的那只浏览器刷新后其实
+   * 还开着，此时禁用等于把用户**唯一**能关掉那个残留窗口的入口堵死，title 上那句
+   * 「当前没有开着的浏览器」也一样是谎（我们并不知道）。所以：不说谎的那一半交给服务端
+   * —— POST /api/browser/close 真没开时返回 {ok:true, closed:false, message:'当前没有开着的
+   * 浏览器（无需关闭）'}，前端原样转述（见 els.closeBrowser.onclick）。
+   * 这里只做 title：措辞一律不断言「有没有开着」，只用「若已开」这种条件句。 */
+  let runBrowserOpen = false;
+  let cdpBrowserOpen = false;
+
+  function updateCloseBtn() {
+    if (!els.closeBrowser) return;
+    els.closeBrowser.disabled = false;
+    if (els.browserMode.value === 'cdp' && cdpBrowserOpen) {
+      els.closeBrowser.title = '断开与浏览器的连接（CDP 直连不会关掉你自己的窗口）';
+      return;
+    }
+    els.closeBrowser.title = (running || runBrowserOpen)
+      ? '关闭本轮使用的浏览器（运行中关闭会让本轮运行失败）'
+      : '关闭本轮使用的浏览器（若已开）';
+  }
+
+  async function refreshBrowserState() {
+    const r = await apiJson('/api/browser/cdp-probe');
+    /* 只有 cdp 直连模式下探到的那个调试端口才代表「有我们能管的浏览器」：
+     * isolated / persistent 跑的是我们自己起的实例（由 runBrowserOpen 记着），
+     * 用户自己开着调试端口的浏览器不是我们的东西，不该凭它改写按钮措辞。
+     * 这是**有意的**判断，不是漏判：cdp-probe 只看用户默认 profile 里的
+     * DevToolsActivePort，与「本轮浏览器是否还开着」是两件事。 */
+    cdpBrowserOpen = Boolean(r && r.ok && r.available) && els.browserMode.value === 'cdp';
+    updateCloseBtn();
   }
 
   /* ---------- 变量池 ---------- */
@@ -255,7 +532,18 @@ const Auto = (() => {
     const nameInp = el('input'); nameInp.placeholder = '变量名（如 关键词 / Enter键）'; nameInp.value = name || '';
     const valInp = el('input'); valInp.placeholder = '取值（如 招商银行）'; valInp.value = value || '';
     const del = el('button', 'row-del', '×'); del.type = 'button'; del.title = '删除变量'; del.setAttribute('aria-label', '删除变量');
-    del.onclick = () => row.remove();
+    /* 删变量也要能撤销（与删问题同一套 5 秒安全网）：一行里可能刚手打完一长串取值 */
+    del.onclick = () => {
+      const parent = row.parentNode;
+      if (!parent) return;                 /* 已不在文档里（重复点）：没有再删一次的道理 */
+      const nm = nameInp.value.trim() || '未命名';
+      const next = row.nextSibling;        /* 记住原位，撤销时插回同一处 */
+      row.remove();
+      undoToast('已删除变量「' + nm + '」', () => {
+        if (next && next.parentNode === parent) parent.insertBefore(row, next);
+        else parent.appendChild(row);
+      });
+    };
     row.appendChild(nameInp); row.appendChild(valInp); row.appendChild(del);
     els.vars.appendChild(row);
     return row;
@@ -318,14 +606,35 @@ const Auto = (() => {
     els.vars.innerHTML = '';   /* 顺带清掉遗留的空变量行 */
     (s.vars.length ? s.vars : [{ name: '', value: '' }]).forEach((v) => addVarRow(v.name, v.value));
     renderSummary();
+    renderPreflight();   /* 目标/URL 是被程序写进去的，不会触发 input 事件 —— 检查条得手动跟上 */
     if (!quiet) toast('已填入「' + s.name + '」场景（离线可完整演示）');
   }
 
-  /* ---------- 任务配置：只读摘要 + 编辑弹窗 ----------
-   * 唯一数据源始终是弹窗里的那些输入框（id 没动，auto.js 其余部分照旧读 .value），
-   * 摘要只是它的投影。取消/✕/Esc/切模式一律用快照回滚，避免「摘要与实际值不一致」。 */
+  /* ---------- 任务配置：外层就地编辑 + 运行参数弹窗 ----------
+   * 任务目标 / 起始 URL / 输入变量就在外层表单里，随时可改（applyScenario 也写它们）；
+   * 弹窗只管运行参数（步数 / 节奏 / 内核 / 模式 / 窗口 / 截图），取消时用快照回滚这几个，
+   * **不碰**外层那三个 —— 不然"取消"会把用户在页面上刚敲的目标一起抹掉。
+   * 数据源始终是输入框本身（id 没动，auto.js 其余部分照旧读 .value）。 */
   let formSnapshot = null;
 
+  /* 浏览器模式：连接方式，与内核正交（详见 browser-driver.js 顶部「浏览器模式」）
+   *   isolated   — 每次全新实例，profile 不落盘（默认，最收敛）
+   *   persistent — 我们自己的窗口 + 落盘 profile（登录一次长期复用）
+   *   cdp        — attach 到你已开调试端口的浏览器，复用其真实登录态，
+   *                窗口尺寸/全屏一律不碰（那是你的窗口）
+   * 这两项存 localStorage：cdp 是「我先做了一次调试端口设置」的刻意选择，
+   * 刷新页面就丢会很难受。键名沿用 app.js 的 jev- 前缀约定。 */
+  const MODE_KEY = 'jev-auto-browser-mode';
+  const CDP_KEY = 'jev-auto-cdp-target';
+
+  function readStoredMode() {
+    try {
+      const m = localStorage.getItem(MODE_KEY);
+      return ['isolated', 'persistent', 'cdp'].includes(m) ? m : 'isolated';
+    } catch (_) { return 'isolated'; }   /* 隐私模式等读不到：回到最收敛的默认 */
+  }
+
+  /* 全部输入（含外层三字段）—— 场景载入、配置读写、校验都用这一份 */
   function readForm() {
     return {
       goal: els.goal.value,
@@ -334,27 +643,94 @@ const Auto = (() => {
       maxSteps: els.maxSteps.value,
       cadence: cadence(),
       browser: els.browser.value,
+      mode: els.browserMode.value,
+      cdp: els.cdpTarget.value.trim(),
       screen: els.screen.value,
       screenshot: els.screenshot.checked,
     };
   }
-  function writeForm(c) {
+  /* 运行参数：弹窗里那几个。取消弹窗只回滚这一份。 */
+  function readRunParams() {
+    return {
+      maxSteps: els.maxSteps.value,
+      cadence: cadence(),
+      browser: els.browser.value,
+      mode: els.browserMode.value,
+      cdp: els.cdpTarget.value.trim(),
+      screen: els.screen.value,
+      screenshot: els.screenshot.checked,
+    };
+  }
+  function writeRunParams(c) {
     if (!c) return;
-    els.goal.value = c.goal;
-    els.url.value = c.url;
-    els.vars.innerHTML = '';
-    (c.vars.length ? c.vars : [{ name: '', value: '' }]).forEach((v) => addVarRow(v.name, v.value));
     els.maxSteps.value = c.maxSteps;
     const radio = document.querySelector('input[name="autoCadence"][value="' + c.cadence + '"]');
     if (radio) radio.checked = true;
     els.browser.value = c.browser;
+    els.browserMode.value = c.mode;
+    els.cdpTarget.value = c.cdp || '';
     els.screen.value = c.screen;
     els.screenshot.checked = c.screenshot;
+    refreshModeFields();
+  }
+
+  /* 模式相关的界面反应：cdp 才显示端点输入与风险提示；窗口尺寸在 cdp 下无意义
+   * （我们不会去改用户的窗口），所以把那一栏禁用掉，而不是让它看起来还能选。 */
+  function refreshModeFields() {
+    const cdp = els.browserMode.value === 'cdp';
+    els.cdpField.hidden = !cdp;
+    setWarnbar(els.cdpWarn, cdp);
+    els.screen.disabled = cdp;
+    if (cdp) probeCdp();
+    renderPreflight();   /* 模式/端点变了，开跑前检查跟着重算（cdp 的起始 URL 也可能被改） */
+  }
+
+  /* CDP 预检：问一次后端「有没有开着调试端口、且真的在讲 DevTools」。
+   * 结果写进端点输入框的 placeholder 与警示条 —— 探到了就把端点摆出来（可留空直接用），
+   * 没探到就按原因说清楚下一步，而不是等 run 失败了再翻译报错。
+   * 端点示例用 127.0.0.1：Chrome 只绑 IPv4，写 localhost 可能先解析到 ::1 而连不上。 */
+  let cdpProbeToken = 0;
+  async function probeCdp() {
+    const mine = ++cdpProbeToken;
+    const r = await apiJson('/api/browser/cdp-probe');
+    if (mine !== cdpProbeToken || els.browserMode.value !== 'cdp') return;   /* 期间切走了 */
+    const title = els.cdpWarn.querySelector('.title');
+    if (r && r.ok && r.available) {
+      els.cdpTarget.placeholder = '留空则自动探测：' + r.channel + ' @ ' + r.endpoint;
+      /* 只说「端口在监听」：预检只做一次 TCP 连接（不做握手 —— 那会打掉你正要点的
+       * 「允许远程调试」弹窗），所以它证明不了对面真在讲 DevTools。残留的调试端口
+       * 也长这样，断言「已探到 chrome」会把人引到一个永远不会出现的弹框前面。 */
+      title.textContent = '⚠ CDP 直连会操作用你正在使用的浏览器（' + r.channel + ' 的调试端口在监听）'
+        + '—— 点「开始」后若浏览器弹出「允许远程调试」，请点允许';
+      return;
+    }
+    els.cdpTarget.placeholder = '留空即可；手填要 ws://127.0.0.1:9222/devtools/browser/<uuid>（http 形态在默认 profile 上会 404）';
+    /* reason 只有这两条（外加服务端侧的 no-driver / error，见 browser-driver.js 的 cdpProbe）：
+     * 「端口在监听但拒绝 DevTools」探不出来，那种情况由 attach 阶段的 403/404 翻译负责 */
+    const why = r && r.reason;
+    if (why === 'unreachable') {
+      title.textContent = '⚠ 记着调试端口，但连不上（那个浏览器多半已经关了）—— 重开一次，或手填端点';
+    } else {
+      title.textContent = '⚠ 没探到开着调试端口的浏览器 —— 先按下面的做法开一下，或手填端点';
+    }
+  }
+
+  function modeLabel() {
+    return modeLabelOf(els.browserMode.value);
+  }
+
+  /* 模式的中文名（记录详情里也要用 —— 那份 meta 是历史数据，不能读当前表单） */
+  function modeLabelOf(m) {
+    if (m === 'cdp') return 'CDP 直连（复用我的浏览器）';
+    if (m === 'persistent') return '持久登录（专用 profile）';
+    return '独立实例';
   }
 
   /* 窗口尺寸取选项当前文案 —— primeScreenOptions() 开机时会把它改成本机真实分辨率，
-   * 硬编码映射会立刻过期。去掉尾部括号说明后作为摘要值。 */
+   * 硬编码映射会立刻过期。去掉尾部括号说明后作为摘要值。
+   * cdp 模式不碰用户窗口，摘要里就别再报窗口尺寸了（那会承诺一件不会发生的事）。 */
   function screenLabel() {
+    if (els.browserMode.value === 'cdp') return '不改动你的窗口';
     const o = els.screen.options[els.screen.selectedIndex];
     const t = (o ? o.textContent : '').replace(/（[^）]*）/g, '').trim();
     return t || els.screen.value;
@@ -370,6 +746,8 @@ const Auto = (() => {
     return v;
   }
 
+  /* 外层摘要：主字段已经就地可编辑，这里只剩「一句话讲清现在会怎么跑」的运行参数，
+   * 加上「什么都没填」时的引导。URL 一改场景高亮就跟着变，所以它也在这里刷。 */
   function renderSummary() {
     const f = readForm();
     els.summaryBody.innerHTML = '';
@@ -377,29 +755,21 @@ const Auto = (() => {
 
     if (!f.goal.trim() && !f.url.trim()) {
       const p = el('div', 'ts-empty');
-      p.innerHTML = '尚未配置任务 —— 点右上「✎ 编辑配置」填写<b>任务目标</b>与<b>起始 URL</b>。';
+      /* 与 index.html、renderFlow() 同一条约束：空态文案**不得复述控件文案**
+       * （这里是第三处副本，禁用词表见 tests/e2e/run.js 的 S9.3 / S9.3b 探针；
+       * 评论里刻意不抄那几个词，免得被任何按字符串扫描的实现误伤）。
+       * 此处尤其危险 —— #taskSummary 在 DOM 里位于开始按钮之前，findLabel 取 refs[0]，
+       * 这段静态文本会抢在真按钮前面被点到（S8）。 */
+      p.innerHTML = '在上面填好<b>任务目标</b>与<b>起始 URL</b>（或点一个演示场景），然后点下面的开始按钮。';
       els.summaryBody.appendChild(p);
       return;
     }
-
-    const goal = tsRow('任务目标', 'clamp2', f.goal.trim() || '（未填写）');
-    if (f.goal.trim()) goal.title = f.goal.trim();
-
-    const url = tsRow('起始 URL', 'mono', f.url.trim() ? shortUrl(f.url.trim()) : '（未填写）');
-    if (f.url.trim()) url.title = f.url.trim();
-
-    const varsWrap = el('span');
-    if (f.vars.length) {
-      f.vars.forEach((v) => varsWrap.appendChild(el('span', 'ts-var', v.name + '=' + v.value)));
-    } else {
-      varsWrap.textContent = '（无）';
-    }
-    tsRow('输入变量', '', varsWrap);
 
     tsRow('运行参数', '', [
       f.maxSteps + ' 步',
       f.cadence === 'single' ? '单步确认' : '连续自动',
       f.browser === 'msedge' ? 'Edge' : 'Chrome',
+      modeLabel(),
       screenLabel(),
       f.screenshot ? '每步截图' : '不截图',
     ].join(' · '));
@@ -413,15 +783,14 @@ const Auto = (() => {
     return '';
   }
 
-  let lastFocus = null;   /* 关闭后把焦点还给「✎ 编辑配置」 */
+  let lastFocus = null;   /* 关闭后把焦点还给「⚙ 运行参数」 */
 
   function openTaskModal() {
-    formSnapshot = readForm();
+    formSnapshot = readRunParams();   /* 只快照弹窗里那几个，外层字段不受取消影响 */
     lastFocus = document.activeElement;
-    els.taskError.hidden = true;
-    els.taskError.textContent = '';
+    hideErr();                        /* 上一次的报错别跟新一次编辑混在一起 */
     els.taskModal.hidden = false;
-    setTimeout(() => els.goal.focus(), 50);
+    setTimeout(() => els.maxSteps.focus(), 50);
   }
   function closeTaskModal() {
     els.taskModal.hidden = true;
@@ -430,20 +799,18 @@ const Auto = (() => {
     lastFocus = null;
   }
   function cancelTaskModal() {
-    writeForm(formSnapshot);   /* 必须回滚后再置空快照 */
+    writeRunParams(formSnapshot);   /* 必须回滚后再置空快照 */
     closeTaskModal();
   }
   function saveTaskModal() {
-    const invalid = validateForm();
-    if (invalid) {
-      els.taskError.textContent = invalid;
-      els.taskError.hidden = false;
-      els.taskError.focus();
-      return;
-    }
     renderSummary();
+    /* cdp 是刻意选的外部浏览器，和端点一起记住（刷新后不用重挑） */
+    try {
+      localStorage.setItem(MODE_KEY, els.browserMode.value);
+      localStorage.setItem(CDP_KEY, els.cdpTarget.value.trim());
+    } catch (_) { /* 隐私模式等写不进去：不影响运行 */ }
     closeTaskModal();
-    toast('任务配置已更新');
+    toast('运行参数已更新');
   }
 
   /* ---------- 浏览器 / 窗口尺寸选项 ----------
@@ -514,7 +881,7 @@ const Auto = (() => {
     const entries = Object.keys(probs || {})
       .map((k) => ({ k, p: Number(probs[k]) || 0 }))
       .sort((a, b) => b.p - a.p);
-    const TOP = 6;
+    const TOP = 4;   /* 常显前 4 项：分布区压高度，其余进「展开全部」（原 6 行太高） */
     const row = (e) => {
       const hit = e.k === hitKey;
       return '<div class="bar-row' + (hit ? ' hit' : '') + '">' +
@@ -551,8 +918,13 @@ const Auto = (() => {
   function renderFlow() {
     const list = viewedSteps();
     if (!list.length) {
+      /* 空态文案与 index.html 中 #autoFlow 的 .out-empty **逐字一致**：同一句话有两份
+       * （这里 + index.html），改一处必须改另一处。禁用字串（打开浏览器并开始 / 运行参数 /
+       * 关闭浏览器 / 中止）会让 S8 的 findLabel(/打开浏览器并开始/) 在无障碍快照里先撞上
+       * 这段静态文本、点到非控件上 —— S9.3 就是这条的回归护栏。刻意不抽公共常量：
+       * 新增全局名字超出 Wave 0 冻结范围。 */
       els.flow.innerHTML = '<div class="out-empty"><div class="big" aria-hidden="true">▶</div>'
-        + '还没有步骤。配置好任务后点「▶ 打开浏览器并开始」。</div>';
+        + '还没有步骤。先在上方「任务配置」里填好任务目标与起始 URL（或直接点一个演示场景），然后点下面的开始按钮。</div>';
       return;
     }
     if (view.follow && view.sess === 'current') {
@@ -613,6 +985,7 @@ const Auto = (() => {
     const mk = (key, cls, html) => {
       const b = el('button', 'tn' + (cls ? ' ' + cls : ''));
       b.type = 'button'; b.setAttribute('role', 'treeitem'); b.dataset.key = key;
+      if (cls && cls.includes(' sel')) b.setAttribute('aria-selected', 'true');
       b.innerHTML = html;
       b.onclick = () => {
         if (key === 'sess') select('session', null, null, true);
@@ -622,14 +995,28 @@ const Auto = (() => {
       return b;
     };
     const sel = (on) => (on ? ' sel' : '');   /* 选中态只进 class，key 保持纯净可解析 */
-    tree.appendChild(mk('sess', sel(view.type === 'session'),
-      '<span class="dot ok"></span><span class="lb">会话 ' + escapeHtml(meta && meta.id || '—') + ' · ' + escapeHtml(shortStr((meta && meta.goal) || '', 14)) + '</span>'));
+    /* 会话根标记：空心 indigo 圆环（容器语义），运行中转琥珀脉冲 —— 不与步骤状态实心点混色 */
+    const sessRunning = view.sess === 'current' ? running : (meta && meta.endState) === 'running';
+    tree.appendChild(mk('sess', 'sess-row' + sel(view.type === 'session'),
+      '<span class="dot root' + (sessRunning ? ' run' : '') + '"></span>'
+      + '<span class="lb">会话 <span class="mono">' + escapeHtml(meta && meta.id || '—') + '</span> · ' + escapeHtml(shortStr((meta && meta.goal) || '', 14)) + '</span>'));
     list.forEach((st) => {
-      tree.appendChild(mk('s:' + st.n, 'kid' + sel(view.type === 'step' && view.n === st.n),
-        '<span class="dot ' + stepDot(st) + '"></span><span class="lb">步骤 ' + st.n + ' · ' + escapeHtml(st.label || '决策中…') + '</span>'
-        + (st.exec && st.exec.elapsedMs != null ? '<span class="dur">' + st.exec.elapsedMs + 'ms</span>' : '')));
-      AutoCore.actionsOf(st).forEach((a, i) => {
-        tree.appendChild(mk('a:' + st.n + ':' + i, 'act-kid' + sel(view.type === 'action' && view.n === st.n && view.i === i),
+      const acts = AutoCore.actionsOf(st);
+      /* 子行只在「本步有多次模型调用」时才出现：11 步的会话原本挂 11 条只写着
+       * 「Jev 首轮 · 3 题」的低信息量子行（1 会话 + 11 步骤 + 11 行动 = 23 行），
+       * 单次调用是常态，它不提供任何可比较的信息。has-acts 的 ::before 就是给子行
+       * 引出的那段导轨，没有子行时必须一并去掉，否则步骤行下面悬着一截断线。
+       * 判定必须是 > 1：单行动步骤的树节点仍是 .tn.kid（e2e 的 clickTreeNode 按文字找它）。 */
+      tree.appendChild(mk('s:' + st.n, 'kid' + (acts.length > 1 ? ' has-acts' : '') + sel(view.type === 'step' && view.n === st.n),
+        '<span class="dot ' + stepDot(st) + '"></span>'
+        /* 命令段（click 【e48 · …】）走等宽小字号，与中文 sans 区分；CJK 自动回退 */
+        + '<span class="lb"><b>步骤 ' + st.n + '</b> · <span class="mono">' + escapeHtml(st.label || '决策中…') + '</span></span>'
+        /* 耗时右对齐固定宽（无值占位）：右侧自成一条安静的数据列，标签区不随耗时跳动 */
+        + '<span class="dur">' + (st.exec && st.exec.elapsedMs != null ? st.exec.elapsedMs + 'ms' : '') + '</span>'));
+      if (acts.length <= 1) return;   /* 单次调用：步骤行自己就是这条调用，不另起子行 */
+      acts.forEach((a, i) => {
+        /* 末个行动标 last：导轨截止到行中线，与父步骤形成肘形收口 */
+        tree.appendChild(mk('a:' + st.n + ':' + i, 'act-kid' + (i === acts.length - 1 ? ' last' : '') + sel(view.type === 'action' && view.n === st.n && view.i === i),
           '<span class="k ' + (a.kind === 'llm' ? 'llm' : 'jev') + '">' + (a.kind === 'llm' ? 'LLM' : 'JEV') + '</span>'
           + '<span class="lb">' + escapeHtml(a.title) + '</span>'
           + '<span class="dot ' + AutoCore.actionStatus(a) + '"></span>'));
@@ -706,7 +1093,7 @@ const Auto = (() => {
   function sessionViewHtml() {
     const meta = view.sess === 'current'
       ? { goal: runCfg.goal, startUrl: runCfg.url, variables: runCfg.variables, maxSteps: runCfg.maxSteps,
-          browser: runCfg.browserUsed || runCfg.browser, screenshotOn: runCfg.screenshotOn,
+          browser: runCfg.browserUsed || runCfg.browser, mode: runCfg.mode, cdp: runCfg.cdp || null, screenshotOn: runCfg.screenshotOn,
           jevModel: Config.current.model,
           llmModel: Config.llm.configured() ? Config.llm.get().model : null }
       : viewRecord.meta;
@@ -714,6 +1101,7 @@ const Auto = (() => {
     const vars = (meta.variables || []).map((v) => '<span class="dec-chip"><i>' + escapeHtml(v.name) + '</i>' + escapeHtml(v.value) + '</span>').join('') || '<span class="muted">（无）</span>';
     return '<div class="fd-kv"><div class="fd-kv-k">任务目标</div><div class="fd-kv-v">' + escapeHtml(meta.goal || '') + '</div></div>'
       + '<div class="fd-kv"><div class="fd-kv-k">起始 URL</div><div class="fd-kv-v mono">' + escapeHtml(meta.startUrl || '') + '</div></div>'
+      + '<div class="fd-kv"><div class="fd-kv-k">浏览器</div><div class="fd-kv-v">' + escapeHtml((meta.browser || '—') + ' · ' + modeLabelOf(meta.mode) + (meta.cdp ? ' · ' + meta.cdp : '')) + '</div></div>'
       + '<div class="fd-kv"><div class="fd-kv-k">输入变量</div><div class="fd-kv-v">' + vars + '</div></div>'
       + '<div class="fd-kv"><div class="fd-kv-k">模型</div><div class="fd-kv-v mono">' + escapeHtml((meta.jevModel || '—') + (meta.llmModel ? ' · 生成 ' + meta.llmModel : '')) + '</div></div>'
       + '<div class="sec-t" style="margin-top:6px">步骤总览（点击行查看详情）</div>'
@@ -739,7 +1127,9 @@ const Auto = (() => {
     }
     if (st.annoError) html += '<div class="exec-line"><span class="exec-url">未标注：' + escapeHtml(st.annoError) + '</span></div>';
     html += shotHtml(st);
-    if (st.decision && st.response && !st.jevError) html += decisionSummaryHtml(st);
+    if (st.decision && st.response && !st.jevError) {
+      html += '<div class="sec"><div class="sec-head">本轮输出 · 决策摘要</div>' + decisionSummaryHtml(st) + '</div>';
+    }
     /* 行动列表 */
     const acts = AutoCore.actionsOf(st);
     html += '<div class="sec-t">本步行动 · ' + acts.length + ' 次模型调用</div><div class="alist">'
@@ -776,26 +1166,24 @@ const Auto = (() => {
       if (st.trim && st.trim.trimmed && st.payload && st.payload.questions && st.payload.questions['参数']) {
         html += '<div class="trim-note">' + escapeHtml(trimSummary(st)) + '</div>';
       }
-      if (st.decision && st.response && !st.jevError) html += decisionDetailsHtml(st);
+      /* 右侧一屏多块：输入/输出/原始报文各自成块带块头（.sec 面板），不再糊成一片 */
+      if (st.decision && st.response && !st.jevError) {
+        html += '<div class="sec"><div class="sec-head">本轮输出 · 决策与概率分布</div>' + decisionDetailsHtml(st) + '</div>';
+      }
       if (a.error) html += '<div class="step-err">' + escapeHtml(a.error) + '</div>';
       html += stateSectionHtml(a.payload.state);
-      html += questionsSectionHtml(st);
+      html += questionsSectionHtml(a.payload, st);
       html += trimDetailHtml(st);
-      html += rawBlock('① 发送的请求体（与真实请求同一对象）', relaxedStringify(a.payload))
+      html += '<div class="sec"><div class="sec-head">原始报文</div>'
+        + rawBlock('① 发送的请求体（与真实请求同一对象）', relaxedStringify(a.payload))
         + (a.response
           ? rawBlock('② Jev 响应', JSON.stringify({ model: a.response.model, answers: a.response.answers, usage: a.response.usage, _latency_ms: a.response._latency_ms }, null, 2))
-          : rawBlock('② Jev 响应', '（调用失败，无响应）'));
+          : rawBlock('② Jev 响应', '（调用失败，无响应）'))
+        + '</div>';
       return html;
     }
-    /* 补问行动 */
-    const rec = { payload: a.payload, response: a.response };
-    const settled = Boolean(a.param || a.action || a.text || a.error);
-    const hit = a.kind === 'action'
-      ? (a.action ? '已改为 ' + a.action : (a.error ? '失败：' + a.error : '未返回'))
-      : a.kind === 'text'
-        ? (a.text ? '已选定 ' + a.text : (a.error ? '失败：' + a.error : '未返回'))
-        : (a.param ? '命中 ' + a.param : (a.error ? '失败：' + a.error : '未命中'));
-    return followUpDetails(a.title, a.kind === 'param' ? '参数' : a.kind === 'action' ? '动作' : '文本', rec, hit, settled, 'fu:' + st.n + ':' + view.i);
+    /* 补问行动：结论行 + 问题块 + 作答概率分布 + 原始报文 —— 与首轮卡同构 */
+    return followUpViewHtml(st, a, 'fu:' + st.n + ':' + view.i);
   }
 
   function rawBlock(label, text) {
@@ -818,25 +1206,46 @@ const Auto = (() => {
       '<div class="meter-scale"><span>0 已完成</span><span>' + SCORE_MAX + ' 未完成</span></div>';
   }
 
+  /* ============ 决策区：摘要常显 + 明细折叠 ============ */
+  /* 补问的记录种类 → 它回传的题名（三类补问各只回一题） */
+  const FOLLOWUP_Q = { param: '参数', action: '动作', text: '文本' };
+  const Q_COLOR = { 动作: 'var(--violet)', 参数: '#7c3aed', 文本: '#0d9268' };
+
+  /* ref 短标签：剥掉「【可交互】」前缀并截断（「无需元素」的说明很长，只显示裸键） */
+  function shortRefLabel(key, refLabels) {
+    if (key === '无需元素' || !refLabels || !refLabels[key]) return key;
+    const clean = refLabels[key].replace(/^【[^】]*】\s*/, '');
+    return key + ' · ' + (clean.length > 24 ? clean.slice(0, 24) + '…' : clean);
+  }
+  /* 变量名 → 取值（查不到就原样显示名字：选项名 / 键名本来就不是变量，按字面值直传） */
+  function varLabelOf(name) {
+    const v = viewedVars().find((x) => x.name === name);
+    return v ? v.value : name;
+  }
+
+  /* 单张作答卡：题名 + 选中值 + 置信度 + 概率条。首轮网格与补问卡共用 ——
+   * 补问单题响应里的 probabilities 此前只躺在裸 JSON 里没人解析。 */
+  function choiceCardHtml(name, ans, chosenLabel, note) {
+    const x = ans || {};
+    const chosen = chosenLabel != null ? chosenLabel : (x.choice != null ? String(x.choice) : '—');
+    return '<div class="qcard">' +
+      '<div class="qcard-head"><span class="qcard-name">' + name + '</span>' +
+      '<span class="qcard-chosen">' + escapeHtml(chosen) + '</span>' +
+      (typeof x.confidence === 'number' ? '<span class="qcard-conf">置信度 ' + pct(x.confidence) + '</span>' : '') + '</div>' +
+      (x.probabilities ? barsHtml(x.probabilities, x.choice, Q_COLOR[name]) : '<div class="muted" style="font-size:12px">无概率数据</div>') +
+      (note ? '<div class="muted" style="font-size:12px">' + escapeHtml(note) + '</div>' : '') +
+      '</div>';
+  }
+
   function decisionSummaryHtml(step) {
     const a = (step.response && step.response.answers) || {};
     const d = step.decision || {};
     const refLabels = step.refLabels || {};
-    const varOf = (name) => {
-      const v = viewedVars().find((x) => x.name === name);
-      return v ? v.value : name;
-    };
-    /* 短标签：剥掉「【可交互】」前缀并截断（「无需元素」的说明很长，只显示裸键） */
-    const shortRef = (key) => {
-      if (key === '无需元素' || !refLabels[key]) return key;
-      const clean = refLabels[key].replace(/^【[^】]*】\s*/, '');
-      return key + ' · ' + (clean.length > 24 ? clean.slice(0, 24) + '…' : clean);
-    };
+    const shortRef = (key) => shortRefLabel(key, refLabels);
     const chip = (k, v, cls) => '<span class="dec-chip ' + (cls || '') + '"><i>' + k + '</i>' + escapeHtml(v) + '</span>';
     /* 复合置信度：本轮作答的各选择题 confidence 的最小值（首轮 动作/参数 + 已落定补问
      * 的作答题）。旧版只显示动作题 —— 文本题 47% 的摇摆会被 82% 的动作置信度盖住。 */
     const confOf = (ans) => (ans && typeof ans.confidence === 'number') ? ans.confidence : null;
-    const FOLLOWUP_Q = { param: '参数', action: '动作', text: '文本' };
     const confs = [];
     [a['动作'], a['参数']].forEach((ans) => { const c = confOf(ans); if (c != null) confs.push(c); });
     (step.followUps || []).forEach((r) => {
@@ -851,7 +1260,7 @@ const Auto = (() => {
     let html = '<div class="dec-sum">' +
       chip('动作', d.action || '—', 'act') +
       (d.param ? chip('参数', shortRef(d.param)) : '') +
-      (d.text != null && d.text !== '无' ? chip('文本', varOf(d.text)) : '');
+      (d.text != null && d.text !== AutoCore.TEXT_NONE ? chip('文本', varLabelOf(d.text)) : '');
     const u = a['未完成'];
     if (d.unfinished != null && u && u.score != null) {
       html += '<span class="dec-meter" title="score ' + u.score + ' / ' + SCORE_MAX + ' · 未完成度 ' + pct(d.unfinished) + '">' +
@@ -865,49 +1274,20 @@ const Auto = (() => {
     const a = (step.response && step.response.answers) || {};
     const d = step.decision || {};
     const refLabels = step.refLabels || {};
-    const varOf = (name) => {
-      const v = viewedVars().find((x) => x.name === name);
-      return v ? v.value : name;
-    };
-    const color = { 动作: 'var(--violet)', 参数: '#7c3aed', 文本: '#0d9268' };
-    const hit = { 动作: d.action, 参数: d.param, 文本: d.text };
     /* 参数若是补问回合定下来的，本轮的「参数」概率分布里没有它 —— 不能拿第一批的
-     * 概率条去解释第二批复问的答案，改成指向下方的补问记录 */
+     * 概率条去解释第二批复问的答案，改成指向那次补问行动 */
     const followUpRec = (step.followUps || []).find((r) => r.param && r.param === d.param);
-    /* 文本已移出首轮：它的答案与概率来自同一步的「文本」补问记录 */
-    const textRec = (step.followUps || []).find((r) => r.kind === 'text');
-    const shortRef = (key) => {
-      if (key === '无需元素' || !refLabels[key]) return key;
-      const clean = refLabels[key].replace(/^【[^】]*】\s*/, '');
-      return key + ' · ' + (clean.length > 24 ? clean.slice(0, 24) + '…' : clean);
-    };
+    /* 本网格只呈现首轮这一次调用的作答：「文本」已移入补问，它的答案与概率分布
+     * 在同一步的「文本补问」行动视图里（那里与本网格同构）。 */
     const chosenLabel = {
       动作: d.action || '—',
-      参数: d.param ? shortRef(d.param) + (followUpRec ? '（第 ' + followUpRec.batch + ' 批补问）' : '') : '—',
-      文本: d.text === '无' ? '无' : (d.text ? varOf(d.text) : '—'),
-    };
-    const confBadge = (ans) => {
-      const c = ans && typeof ans.confidence === 'number' ? ans.confidence : null;
-      return c != null ? '<span class="qcard-conf">置信度 ' + pct(c) + '</span>' : '';
+      参数: d.param ? shortRefLabel(d.param, refLabels) + (followUpRec ? '（第 ' + followUpRec.batch + ' 批补问）' : '') : '—',
     };
     let html = '<div class="qgrid">';
-    ['动作', '参数', '文本'].forEach((name) => {
-      const ans = (name === '文本' && textRec && textRec.response && textRec.response.answers)
-        ? (textRec.response.answers['文本'] || {})
-        : (a[name] || {});
-      const fromParamFollowUp = (name === '参数' && followUpRec);
-      const fromTextFollowUp = (name === '文本' && textRec);
-      /* 补问回合定下的 ref 不在本轮概率分布里，别错误高亮别项 */
-      const mark = (hit[name] != null && ans.probabilities && ans.probabilities[hit[name]] != null) ? hit[name] : null;
-      const followUpNote = fromParamFollowUp
-        ? '本行选项由第 ' + followUpRec.batch + ' 批补问确定，该题概率见下方「参数补问」记录'
-        : '本行选项由「文本」补问确定，该题概率见下方「文本补问」记录';
-      html += '<div class="qcard">' +
-        '<div class="qcard-head"><span class="qcard-name">' + name + '</span>' +
-        '<span class="qcard-chosen">' + escapeHtml(chosenLabel[name]) + '</span>' + confBadge(ans) + '</div>' +
-        (ans.probabilities ? barsHtml(ans.probabilities, mark, color[name]) : '<div class="muted" style="font-size:12px">无概率数据</div>') +
-        ((fromParamFollowUp || fromTextFollowUp) ? '<div class="muted" style="font-size:12px">' + followUpNote + '</div>' : '') +
-        '</div>';
+    ['动作', '参数'].forEach((name) => {
+      html += choiceCardHtml(name, a[name], chosenLabel[name],
+        (name === '参数' && followUpRec)
+          ? '本行选项由第 ' + followUpRec.batch + ' 批补问确定，该题概率见「参数补问」行动' : '');
     });
     const u = a['未完成'] || {};
     html += '<div class="qcard">' +
@@ -1004,6 +1384,13 @@ const Auto = (() => {
         '<span class="ref-label" title="' + escapeHtml(crit[ref]) + '">' + escapeHtml(refLabels[ref] || crit[ref]) + '</span></div>').join('');
       return '<div class="ref-scroll">' + rows + '</div>';
     }
+    if (name === '文本') {
+      /* 取值候选：变量 / 下拉框真实选项名 / 键名 / 标签页序号。首轮没有这一题 ——
+       * 只有「文本」补问卡渲染它，此前没有分支会掉进下面的量表分叉渲染成空块。 */
+      const chips = Object.keys(crit).map((k) =>
+        '<span class="crit-chip' + (k === AutoCore.TEXT_NONE ? ' violet' : '') + '" title="' + escapeHtml(crit[k]) + '">' + escapeHtml(k) + '</span>').join('');
+      return '<div class="crit-cloud">' + chips + '</div>';
+    }
     /* 未完成：等级量表（行数随 auto-core 的 SCORE_LEVELS 走） */
     const levels = Array.isArray(crit) ? crit : [];
     return '<div class="scale-row">' + levels.map((c, i) =>
@@ -1011,12 +1398,15 @@ const Auto = (() => {
       '</div>';
   }
 
-  function questionsSectionHtml(step) {
-    const qs = (step.payload && step.payload.questions) || {};
-    const ORDER = ['动作', '参数', '未完成'];   // 首轮 3 道；弹窗步只有「动作」1 道
+  /* 问题块：首轮与补问共用同一套渲染（payload 是「这一轮发出去的那份」）——
+   * 补问只含一道题，标题就把题数写成 1。 */
+  function questionsSectionHtml(payload, step) {
+    const qs = (payload && payload.questions) || {};
+    const ORDER = ['动作', '参数', '文本', '未完成'];   // 首轮 3 道（文本已移入补问）；弹窗步只有「动作」1 道
     const meta = {
       动作: Object.keys(qs['动作'] && qs['动作'].criteria || {}).length + ' 个候选',
       参数: Object.keys(qs['参数'] && qs['参数'].criteria || {}).length + ' 个候选 ref',
+      文本: Object.keys(qs['文本'] && qs['文本'].criteria || {}).length + ' 个候选',
       未完成: ((qs['未完成'] && qs['未完成'].criteria || []).length || AutoCore.SCORE_LEVELS) + ' 级分值',
     };
     const present = ORDER.filter((name) => qs[name]);
@@ -1035,7 +1425,6 @@ const Auto = (() => {
     return html;
   }
 
-  /* ③ 请求信息：外层统一折叠（输入 state + 首轮问题 + 补问记录 + 原始报文） */
   /* 参数题候选裁剪的摘要：让人一眼看出「本来多少个、给了 Jev 多少个、为什么」 */
   function trimSummary(step) {
     const m = step.trim;
@@ -1065,19 +1454,41 @@ const Auto = (() => {
       '<div class="ref-scroll">' + rows + '</div></div>';
   }
 
-  /* 补问记录：两类共用同一张卡 ——
-   *   kind='param'  候选裁剪展开下一批（「其他」）
-   *   kind='action' 动作与元素角色不兼容，重新问「动作」
-   * 结果落定前默认展开（用户能看见"正在补问"），落定后收起。 */
-  function followUpDetails(title, requestLabel, rec, hit, settled, dk) {
-    return '<details class="req-details"' + (dk ? ' data-dk="' + dk + '"' : '') + (settled ? '' : ' open') + '>' +
-      '<summary>' + escapeHtml(title) + '（' + escapeHtml(hit) + '）</summary>' +
+  /* 补问行动视图：与首轮卡同构 ——
+   *   结论行（已选定 X / 已改为 X / 命中 e5 / 失败：…）
+   *   问题块（本轮输入 · 1 道问题：instructions + 候选）
+   *   作答卡（本轮输出 · 作答与概率分布：选中值 + 置信度 + 概率条）
+   *   原始报文（折叠）
+   * 改版前这里只有两块裸 JSON：同一类「一次 Jev 调用」在 UI 上有两套渲染标准 ——
+   * 单题响应里的 probabilities 明明在，却只有首轮那张网格在渲染。 */
+  function followUpViewHtml(st, a, dk) {
+    const qname = FOLLOWUP_Q[a.kind] || '参数';
+    const settled = Boolean(a.param || a.action || a.text || a.error);
+    const hit = a.kind === 'action'
+      ? (a.action ? '已改为 ' + a.action : (a.error ? '失败：' + a.error : '未返回'))
+      : a.kind === 'text'
+        ? (a.text ? '已选定 ' + a.text : (a.error ? '失败：' + a.error : '未返回'))
+        : (a.param ? '命中 ' + a.param : (a.error ? '失败：' + a.error : '未命中'));
+    const ans = (a.response && a.response.answers && a.response.answers[qname]) || null;
+
+    let html = '<div class="fu-hit' + (a.error ? ' bad' : (settled ? '' : ' pend')) + '">' + escapeHtml(hit) + '</div>';
+    /* 不重复 state：补问发的是与本步首轮同一份 state */
+    html += questionsSectionHtml(a.payload, st);
+    if (ans) {
+      html += '<div class="sec"><div class="sec-head">本轮输出 · 作答与概率分布</div><div class="qgrid">'
+        + choiceCardHtml(qname, ans, a.kind === 'param' && a.param ? shortRefLabel(a.param, st.refLabels)
+          : (a.kind === 'text' && a.text ? varLabelOf(a.text) : null), '')
+        + '</div></div>';
+    }
+    if (a.error) html += '<div class="step-err">' + escapeHtml(a.error) + '</div>';
+    html += '<div class="sec"><div class="sec-head">原始报文</div>' +
+      '<details class="req-details" data-dk="' + dk + '"' + (settled ? '' : ' open') + '>' +
+      '<summary>① 发送的请求体（仅「' + escapeHtml(qname) + '」一题）· ② Jev 响应</summary>' +
       '<div class="req-inner">' +
-      '<div class="raw-label">① 发送的请求体（仅「' + requestLabel + '」一题）</div>' +
-      '<pre class="step-pre tall">' + escapeHtml(relaxedStringify(rec.payload)) + '</pre>' +
-      (rec.response ? '<div class="raw-label">② Jev 响应</div>' +
-        '<pre class="step-pre tall">' + escapeHtml(JSON.stringify(rec.response, null, 2)) + '</pre>' : '') +
-      '</div></details>';
+      rawBlock('① 发送的请求体', relaxedStringify(a.payload || null)) +
+      rawBlock('② Jev 响应', a.response ? JSON.stringify(a.response, null, 2) : '（调用失败，无响应）') +
+      '</div></details></div>';
+    return html;
   }
 
   /* 每次步骤对象变化后调用：渲染合并到下一帧（同一帧多次 touch 只重建一次），并节流落盘。
@@ -1259,6 +1670,7 @@ const Auto = (() => {
       action: step.decision.action, param: step.decision.param,
       snapshot: step.snapshot, variables: runCfg.variables,
       refLabel: refLabels[step.decision.param] || '',
+      tabs: step.pageInfo && Array.isArray(step.pageInfo.tabs) ? step.pageInfo.tabs : null,
     });
     if (!questions) return false;   // 无需文本不会进来；零候选 = 配置性缺失，由调用方记失败步
 
@@ -1291,6 +1703,8 @@ const Auto = (() => {
    * 像素，差一个 deviceScaleFactor，而那由窗口方案决定、不能假设 1:1。 */
   async function takeShot(step, name, ref) {
     const r = await apiJson('/api/browser/screenshot', { name, ref: ref || null });
+    /* 守卫拦下（专用标签页没了）：连图都不要取 —— 当前页可能是用户自己的页面 */
+    if (r.lostTab) return false;
     if (!r.ok || !r.dataUrl) return false;
     if (!r.rect || !r.viewport || !window.Anno) {
       step.screenshot = r.dataUrl;              /* 无元素可标（goto / press / 终止帧）就显示原图 */
@@ -1319,11 +1733,15 @@ const Auto = (() => {
 
   /* 本步要操作的元素的 ref（用于标注）：终止动作与「无操作」没有目标，返回 null。
    * 「生成输入」的目标是 decision.param，其余动作走 planExecution，但这里只需要 ref，
-   * 可以直接用 decision.param（与 planExecution 的 ref 同源）。 */
-  function assignRef(decision) {
+   * 可以直接用 decision.param（与 planExecution 的 ref 同源）。
+   * 判定必须走 isRefParam（refLabels = 当前快照解析出的全量 ref 表）：曾用
+   * /^e[A-Za-z0-9_-]+$/ 猜形状，切到第 N 个标签页后 playwright 把 ref 前缀变成 fN
+   * （e496 → f2e496），正则全部失配 → 这里静默返回 null，「被操作元素」的标注框
+   * 从切标签页之后每一步都消失，且不报任何错。 */
+  function assignRef(decision, refLabels) {
     if (!decision) return null;
     if (AutoCore.TERMINAL_TOOLS[decision.action] || decision.action === '无操作') return null;
-    return /^e[A-Za-z0-9_-]+$/.test(String(decision.param || '')) ? decision.param : null;
+    return AutoCore.isRefParam(decision.param, refLabels) ? decision.param : null;
   }
 
   /* ---------- 执行决策 ---------- */
@@ -1374,7 +1792,7 @@ const Auto = (() => {
       /* 用生成文本 fill 到目标 ref */
       const t0 = Date.now();
       const act = await apiJson('/api/browser/act', { command: 'fill', ref: decision.param, text: L.text });
-      step.exec = { cmd: cmdDisplay('fill', decision.param, L.text), elapsedMs: Date.now() - t0, ok: Boolean(act.ok), error: act.ok ? null : act.error };
+      step.exec = { cmd: cmdDisplay('fill', decision.param, L.text), elapsedMs: Date.now() - t0, ok: Boolean(act.ok), error: act.ok ? null : act.error, lostTab: Boolean(act.lostTab) };
       if (act.ok) step.generatedText = L.text;
       return {};
     }
@@ -1403,6 +1821,9 @@ const Auto = (() => {
       elapsedMs: Date.now() - t0,
       ok: Boolean(act.ok),
       error: act.ok ? null : act.error,
+      /* 专用标签页没了（driver 的守卫拦下）：这不是「这一步失败」，是整轮该停 ——
+       * 交给调用方收尾，别让它变成一条可重试的失败喂回给模型 */
+      lostTab: Boolean(act.lostTab),
     };
     return {};
   }
@@ -1430,14 +1851,15 @@ const Auto = (() => {
     const url = els.url.value.trim();
     const maxSteps = Math.max(1, Math.min(50, Number(els.maxSteps.value) || 15));
     const invalid = validateForm();
-    if (invalid) return toast(invalid);
-    if (!Config.current.key.trim()) return toast('请先在右上角「⚙ 配置」填写 Jev 的 API Key');
+    if (invalid) return showErr('✗ 任务配置不完整', invalid + '\n\n在上面补好「任务目标」与「起始 URL」再点开始。');
+    if (!Config.current.key.trim()) return showErr('✗ 缺少 API Key', '请先在右上角「⚙ 配置」填写 Jev 的 API Key。');
 
     /* 同步占坑（设计 §11：同会话仅一个循环）：必须在任何 await 之前，
      * 否则 probeEngine 的网络间隙内双击会并发两个 runLoop */
     running = true;
     els.start.disabled = true;
     els.editTask.disabled = true;   /* 运行中锁配置，避免改到一半参数与 runCfg 不一致 */
+    updateModeSegLock();            /* 中止口不能被 modeSeg 藏掉（见 updateModeSegLock） */
 
     let engineOk = false;
     try {
@@ -1447,9 +1869,35 @@ const Auto = (() => {
         running = false;
         els.start.disabled = false;
         els.editTask.disabled = false;
+        updateModeSegLock();
       }
     }
-    if (!engineOk) return toast('浏览器引擎不可用，请先按提示安装 playwright-cli');
+    if (!engineOk) return showErr('✗ 浏览器引擎不可用', 'playwright-jev-agent 需要全局安装 playwright-cli：npm i -g @playwright/cli（装好后刷新本页）。');
+
+    /* CDP 直连的前置条件先说清楚：没探到开着调试端口的浏览器、又没手填端点，
+     * 那 run 一定死在第一步 —— 与其等 attach 报错，不如现在告诉用户怎么做。
+     * 提示原文（做法就在里面）整段摊进错误条：那是要照着做的步骤，得能选中、能复制。
+     * 另外：端点框里若留着 http:// 形态（早先的占位符就是这么教的），探到了就就地换成
+     * 那条 ws —— Chrome 147+ 在默认 profile 上关了 /json 发现，http 形态 attach 必 404。 */
+    const mode = els.browserMode.value;
+    let cdpTarget = els.cdpTarget.value.trim();
+    if (mode === 'cdp') {
+      const probe = await apiJson('/api/browser/cdp-probe');
+      const usable = !!(probe && probe.ok && probe.available);
+      if (!cdpTarget && !usable) {
+        running = false;
+        els.start.disabled = false;
+        els.editTask.disabled = false;
+        updateModeSegLock();
+        return showErr('✗ CDP 直连没探到可用的浏览器',
+          '浏览器已开着调试端口、且端点框留空时才能自动探测。\n\n' + ((probe && probe.hint) || '没探到开着调试端口的浏览器。'));
+      }
+      if (cdpTarget && /^https?:\/\//i.test(cdpTarget) && usable && /^wss?:\/\//i.test(probe.endpoint || '')) {
+        cdpTarget = probe.endpoint;
+        els.cdpTarget.value = cdpTarget;            /* 框里显示的就是真正要用的那条，别骗人 */
+        toast('http 端点在这台浏览器上会 404，已换成探测到的 ws 端点');
+      }
+    }
 
     abortFlag = false; finished = false;
     steps = []; history = []; consecutiveFails = 0; unfinishedHistory = [];
@@ -1458,7 +1906,7 @@ const Auto = (() => {
     const plan = windowPlan();
     runCfg = {
       goal, url, maxSteps, variables: collectVars(), screenshotOn: els.screenshot.checked,
-      browser: els.browser.value, window: plan,
+      browser: els.browser.value, mode, cdp: cdpTarget, window: plan,
       paramTrim: Config.paramTrim.get(),
     };
     runId = AutoCore.newRunId();
@@ -1471,9 +1919,10 @@ const Auto = (() => {
     els.runPill.textContent = '运行中';
     els.runPill.dataset.state = 'running';
     renderFlow();
-    els.exportBtn.hidden = true;
+    updateExportBtn();
     setProgress(0);
     startTimer();
+    hideErr();   /* 新的一轮把上一轮的错误条收起来：留着会让人以为又错了 */
 
     try {
       await runLoop();
@@ -1483,6 +1932,9 @@ const Auto = (() => {
       els.start.disabled = false;
       els.editTask.disabled = false;
       els.stop.hidden = true;
+      updateModeSegLock();
+      /* 一轮结束：浏览器可能还开着（isolated 模式不自动关），重新判一次「关闭」是否可点 */
+      refreshBrowserState();
       /* 兜底：runLoop 抛异常时 finishRun 尚未执行，走同一条结论文案，
        * 不能再像以前那样把 pill 一律改写为「已结束」—— 那会盖掉真正的结论。 */
       if (!finished) finishRun({ done: false, state: 'error', reason: '运行异常中断' });
@@ -1517,26 +1969,45 @@ const Auto = (() => {
     els.progress.title = t.reason || '';
     els.elapsed.textContent = secs + 's';
     endText = steps.length + ' 步 · ' + s.label;
-    els.exportBtn.hidden = false;
+    updateExportBtn();
     saveRun(true);
-    toast(t.reason || s.label);
+    /* 出错类结束原因摊在错误条里（可复制、能搜），其余状态一句话 toast 就够 */
+    if (t.state === 'error' || t.state === 'fails' || t.state === 'giveup') {
+      showErr('✗ ' + s.label, (t.reason || s.label) + '\n\n本次会话：' + (runId || '—')
+        /* 导出按钮只在真有步骤时才出现，别指向一个不存在的按钮 */
+        + (steps.length ? '（点「⬇ 导出运行记录」可拿到完整过程）' : ''));
+    } else {
+      toast(t.reason || s.label);
+    }
   }
 
   async function runLoop() {
-    /* 打开浏览器（内核可选；窗口方案随请求带给 server：全屏=原生最大化，固定尺寸=resize）。
+    /* 打开浏览器（内核与模式可选；窗口方案随请求带给 server：全屏=原生最大化，固定尺寸=resize）。
      * 先静默关闭残留会话：上轮结束后浏览器可能还开着，已开会话上再 open 会报错；
-     * 顺带保证每轮拿到全新的内存态页面（如演示邮箱）。 */
-    await apiJson('/api/browser/close', {});
+     * 顺带保证每轮拿到全新的内存态页面（如演示邮箱）。
+     * **cdp 模式例外**：那里的「允许远程调试」授权是按连接给的，关掉就得让你重点一次；
+     * 复用自己的连接由 driver 处理（模式串了它会自己拆），所以这里不关。 */
+    if (runCfg.mode !== 'cdp') await apiJson('/api/browser/close', {});
     const opened = await apiJson('/api/browser/open', Object.assign(
-      { url: runCfg.url, browser: runCfg.browser }, runCfg.window));
+      { url: runCfg.url, browser: runCfg.browser, mode: runCfg.mode, cdp: runCfg.cdp }, runCfg.window));
     if (!opened.ok) {
       finishRun({ done: false, state: 'error', reason: '打开浏览器失败：' + opened.error });
       return;
     }
-    if (opened.fullscreen === false) toast('全屏未生效（已退化为最大化窗口）：' + (opened.fullscreenError || ''));
-    else if (opened.resized === false) toast('窗口尺寸调整失败：' + (opened.resizeError || ''));
+    /* cdp 不碰用户窗口，也就没有「全屏未生效 / 尺寸调整失败」可言 */
+    if (!opened.windowSkipped) {
+      if (opened.fullscreen === false) toast('全屏未生效（已退化为最大化窗口）：' + (opened.fullscreenError || ''));
+      else if (opened.resized === false) toast('窗口尺寸调整失败：' + (opened.resizeError || ''));
+    }
+    /* 手填的 http 端点 404 后回退到了端口文件里那条 ws（见 openCdp）：说一声 ——
+     * 端点是被换过的，别让人以为跑的是他填的那个 */
+    if (opened.swappedFrom) {
+      toast('手填的端点回 404（http 形态在默认 profile 上必 404），已自动改用 ' + opened.target);
+    }
     runCfg.browserUsed = opened.browser;
     runCfg.fullscreenUsed = opened.fullscreen === true;
+    runBrowserOpen = true;   /* 浏览器确实开着了（cdp 直连的那个也算「有开着的」）*/
+    updateCloseBtn();
 
     let lastResult = '';
     for (let n = 1; n <= runCfg.maxSteps; n++) {
@@ -1550,6 +2021,13 @@ const Auto = (() => {
       let dialogMode = false;
       let snapText = '';
       if (!snap.ok || typeof snap.snapshot !== 'string') {
+        /* CDP 守卫拦下（专用标签页被关/被切走）：这不是快照故障，是本轮该停。
+         * 必须判在 isModalSnapshotError 之前，否则会被归成「获取页面快照失败」，
+         * 结束原因里看不到真正的原因。 */
+        if (snap.lostTab) {
+          finishRun({ done: false, state: 'error', reason: snap.error || '专用标签页已不在（CDP 守卫停手）' });
+          return;
+        }
         const snapErr = String((snap && snap.error) || '无快照内容');
         if (!AutoCore.isModalSnapshotError(snapErr)) {
           finishRun({ done: false, state: 'error', reason: '获取页面快照失败：' + snapErr });
@@ -1560,14 +2038,37 @@ const Auto = (() => {
       } else {
         snapText = snap.snapshot;
       }
-      /* ② 当前页信息（工程自动执行；弹窗期间 tab-list 同样可能被拒，复用上一步的页面信息） */
+      /* ② 当前页信息 + 全部标签页（工程自动执行；弹窗期间 tab-list 同样可能被拒，
+       * 复用上一步的页面信息）。tabs 会让 state 多出「标签页」字段 —— target=_blank
+       * 的点击会开新 Tab 而快照不变，没有这个字段模型只会原地反复点（实测事故） */
       let pageInfo;
+      let tabNote = '';
       if (dialogMode) {
         const prev = steps[steps.length - 1];
-        pageInfo = prev ? prev.pageInfo : { url: runCfg.url, title: '' };
+        pageInfo = prev ? prev.pageInfo : { url: runCfg.url, title: '', tabs: null };
       } else {
         const info = await apiJson('/api/browser/page-info', {});
-        pageInfo = info.ok ? { url: info.url, title: info.title } : { url: runCfg.url, title: '' };
+        /* CDP 直连的守卫：driver 每步确认「当前标签页还是我们自己那一个」。
+         * 你手动关掉专用标签页后，playwright-cli 会把当前标签页挪到相邻页面 —— 那是
+         * 你自己的页面，宁可停手也不能在上面接着点。
+         * 结束原因直接用 driver 那句（它自带根因与下一步）：这里再拼前缀会出现
+         * 「专用标签页已不在：页面卡在原生弹窗上：…」这种自相矛盾的话。 */
+        if (!info.ok && info.lostTab) {
+          finishRun({ done: false, state: 'error', reason: info.error || '专用标签页已不在（CDP 守卫停手）' });
+          return;
+        }
+        pageInfo = info.ok
+          ? { url: info.url, title: info.title, tabs: Array.isArray(info.tabs) ? info.tabs : null }
+          : { url: runCfg.url, title: '', tabs: null };
+        /* Tab 数量在上一步之后变多了 → 很可能是上一步的点击开了新 Tab。
+         * 这条事实属于「上一步结果」，放进 state 让模型下一轮就能看到 */
+        const prevInfo = steps.length ? steps[steps.length - 1].pageInfo : null;
+        const prevTabs = prevInfo && Array.isArray(prevInfo.tabs) ? prevInfo.tabs : null;
+        if (prevTabs && pageInfo.tabs && pageInfo.tabs.length > prevTabs.length) {
+          tabNote = '注意：标签页从 ' + prevTabs.length + ' 个变成 ' + pageInfo.tabs.length
+            + ' 个 —— 上一步的点击很可能打开了新 Tab，而当前仍停在原页面。'
+            + '若目标内容在新 Tab，请用 tab-select 切换过去（序号见「标签页」）。';
+        }
       }
 
       /* ③④ 组装 state + 问题（前端是唯一构造者）并调用 Jev */
@@ -1580,7 +2081,8 @@ const Auto = (() => {
       const refRoles = dialogMode ? {} : AutoCore.refRoles(snapText);       // 动作 × 角色兼容性校验用
       const state = AutoCore.buildState({
         goal: runCfg.goal, url: pageInfo.url, title: pageInfo.title,
-        history, lastResult, snapshot: snapText,
+        history, lastResult: tabNote ? (lastResult + '\n' + tabNote) : lastResult,
+        snapshot: snapText, tabs: pageInfo.tabs,
       });
       /* 「参数」题候选：≤250 个 ref 原样透传，超限才按相关性裁剪（高级参数可关）；
        * 弹窗步没有快照，只问一道「动作」（dialog-accept / dialog-dismiss） */
@@ -1639,11 +2141,19 @@ const Auto = (() => {
       }
       touch();
 
-      /* ⑤b 候选裁剪的兜底项「其他」：同一步内补问下一批（最多 maxTranches 批） */
+      /* ⑤b 参数归一 + 候选裁剪的兜底项「其他」：同一步内补问下一批（最多 maxTranches 批）。
+       * 「无需元素」下线后，不作用于元素的动作（goto / press / 标签页…）即便选了参数，
+       * 也在这里剥掉 —— 决策记录、时间线标签、后续补问都不再消费它 */
       if (step.decision) {
         const norm = AutoCore.normalizeParam(step.decision);
-        if (norm.note) {
+        if (norm.param !== step.decision.param) {
           step.decision = Object.assign({}, step.decision, { param: norm.param });
+          /* label 在 ⑤ 是按**归一前**的原始参数算的。这里剥掉参数（「其他」配到不需要
+           * 元素的动作上等）后必须重算 —— 否则「其他 · 展开下一批」这种哨兵文案会留在
+           * 时间线上，读起来像真的在展开候选批次（实测事故：dialog-dismiss 步骤）。 */
+          step.label = AutoCore.describeDecision(step.decision, refLabels, runCfg.variables);
+        }
+        if (norm.note) {
           step.trimNote = norm.note;
         } else if (AutoCore.isRefMore(step.decision.param)) {
           if (!param.meta.trimmed) {
@@ -1704,7 +2214,8 @@ const Auto = (() => {
           step.exec = {
             ok: false, cmd: null,
             error: (last && last.error) || ('动作 ' + step.decision.action + ' 需要文本，但没有可问的候选（变量池为空'
-              + (step.decision.action === 'select' ? ' 且未能读出该下拉框的选项名单' : '') + '）'),
+              + (step.decision.action === 'select' ? ' 且未能读出该下拉框的选项名单'
+                : step.decision.action === 'tab-select' ? ' 且未能读到标签页列表' : '') + '）'),
           };
           /* 命令从未发出，元素本身没问题 —— 与 ⑤c 同理不背 failedRefs 的降权 */
           step.refNotTried = true;
@@ -1752,7 +2263,7 @@ const Auto = (() => {
       const noop = step.decision && step.decision.action === '无操作';
       /* 弹窗步不截图：modal state 下 screenshot 同样被拒，且没有页面元素可标 */
       if (runCfg.screenshotOn && !noop && !dialogMode) {
-        await takeShot(step, 'step-' + n, assignRef(step.decision));
+        await takeShot(step, 'step-' + n, assignRef(step.decision, refLabels));
       }
 
       /* ⑨ 执行 */
@@ -1760,8 +2271,18 @@ const Auto = (() => {
         const r = await executeDecision(step, step.decision, refLabels);
         if (r.terminal) { /* 上文已处理 terminal 路径，此处不会到 */ }
       }
+      /* 守卫在 act 里拦下（专用标签页没了）：整轮到此为止 —— 别把「在别人页面上动手」
+       * 记成一步可重试的失败，那只会诱导模型继续试 */
+      if (step.exec && step.exec.lostTab) {
+        finishRun({ done: false, state: 'error', reason: step.exec.error || '专用标签页已不在（CDP 守卫停手）' });
+        return;
+      }
       const ok = Boolean(step.exec && step.exec.ok);
-      if (!ok && !noop && !step.refNotTried && step.decision && /^e[A-Za-z0-9_-]+$/.test(String(step.decision.param || ''))) {
+      /* 失败记忆的键必须是「当前快照里真实存在的 ref」：曾用 /^e[A-Za-z0-9_-]+$/ 猜形状，
+       * 切到第 N 个标签页后 playwright 把 ref 前缀变成 fN（e496 → f2e496），正则全部失配，
+       * failedRefs 静默失效 —— 实测会话 r-0926-0046-qrys 就此重复点被遮挡元素到终止。 */
+      if (!ok && !noop && !step.refNotTried && step.decision
+          && AutoCore.isRefParam(step.decision.param, refLabels)) {
         failedRefs[step.decision.param] = 1;
       }
 
@@ -1770,7 +2291,9 @@ const Auto = (() => {
       history.push(step.historyLine);
       lastResult = ok
         ? (step.generatedText ? '成功（生成并填入：' + step.generatedText.slice(0, 60) + '）' : '成功')
-        : '失败：' + String((step.exec && step.exec.error) || '未知错误').slice(0, 120);
+        /* 与 historyLine 同一份摘要：这里的 slice(0,120) 会把排在末尾的遮挡根因再切一次，
+         * 「上一步结果」是模型下一轮唯一的失败线索，不能只剩「超时」 */
+        : '失败：' + AutoCore.briefError(step.exec && step.exec.error);
       consecutiveFails = (ok || noop || (step.exec && step.exec.skipped)) ? 0 : consecutiveFails + 1;
 
       touch();
@@ -1788,8 +2311,48 @@ const Auto = (() => {
   }
 
   /* ---------- 导出 ---------- */
+  /* 导出按钮跟随「你正在看的会话」：
+   *   当前会话 —— 维持旧行为（跑完才出现，导出模块级的当前 steps）
+   *   历史会话 —— 有步骤就出现，文案带上会话 id（验收看的就是导出的那一条） */
+  const EXPORT_CUR = '⬇ 导出运行记录';
+  function updateExportBtn() {
+    if (!els.exportBtn) return;
+    if (view.sess !== 'current') {
+      const rec = viewRecord;
+      const n = rec && rec.steps ? rec.steps.length : 0;
+      els.exportBtn.hidden = !n;
+      els.exportBtn.textContent = '⬇ 导出该会话记录 ' + ((rec && rec.meta && rec.meta.id) || '');
+      els.exportBtn.title = '下载该会话的完整 JSON 记录（每一步的请求体、响应、执行与截图）';
+      return;
+    }
+    els.exportBtn.hidden = !(steps.length && finished);
+    els.exportBtn.textContent = EXPORT_CUR;
+    els.exportBtn.title = '下载本次运行的完整 JSON 记录（每一步的请求体、响应、执行与截图）';
+  }
+
+  function downloadJson(name, obj) {
+    const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }
+
   /* 与落盘同一格式（AutoCore.buildRunRecord → { meta, steps }），文件即会话记录 */
   function exportRun() {
+    /* 历史会话：viewRecord 已经是 hydrate 过的 {meta, steps}，直接落盘形状导出，
+     * 不重跑 buildRunRecord（那是「正在跑的这一轮」的构造器，会读 runCfg） */
+    if (view.sess !== 'current') {
+      const rec = viewRecord;
+      if (!rec || !(rec.steps || []).length) return toast('这条会话没有可导出的步骤');
+      const id = (rec.meta && rec.meta.id) || 'session';
+      downloadJson('jev-auto-run-' + id + '.json', {
+        meta: rec.meta, steps: rec.steps, exportedAt: new Date().toISOString(),
+      });
+      toast('已导出会话记录 ' + id + '（' + rec.steps.length + ' 步）');
+      return;
+    }
     if (!steps.length || !runCfg || !runId) return toast('还没有可导出的运行记录');
     const record = AutoCore.buildRunRecord({
       id: runId, runCfg,
@@ -1800,16 +2363,21 @@ const Auto = (() => {
       exportedAt: new Date().toISOString(),
       steps,
     });
-    const blob = new Blob([JSON.stringify(record, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'jev-auto-run-' + runId + '.json';
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    downloadJson('jev-auto-run-' + runId + '.json', record);
     toast('已导出运行记录（' + steps.length + ' 步）');
   }
 
   /* ---------- 模式切换 ---------- */
+  /* 运行中锁死模式切换：switchMode 会把整个 #autoPanel 藏起来，而「■ 中止」就在面板里 ——
+   * 切到 Demo 就等于把中止口从用户手底下抽走。直接禁用比「点了再弹错误条」清楚。 */
+  function updateModeSegLock() {
+    if (!els.modeSeg) return;
+    Array.from(els.modeSeg.querySelectorAll('.seg-btn')).forEach((b) => {
+      b.disabled = running;
+      b.title = running ? '运行中不能切换模式，先点「■ 中止」' : '';
+    });
+  }
+
   function switchMode(mode) {
     cancelTaskModal();   /* 切走时丢弃未保存的编辑，杜绝「摘要与弹窗输入不一致」 */
     Array.from(els.modeSeg.querySelectorAll('.seg-btn')).forEach((b) => {
@@ -1835,9 +2403,28 @@ const Auto = (() => {
     els.stop.onclick = () => { abortFlag = true; toast('将在当前步骤后中止…'); };
     els.closeBrowser.onclick = async () => {
       const r = await apiJson('/api/browser/close', {});
-      toast(r.ok ? '浏览器已关闭' : '关闭失败：' + (r.error || ''));
+      /* 只说 server 说的那一句：cdp 是「已断开连接（你的浏览器仍在运行）」、本来就没开着
+       * 是「当前没有开着的浏览器（无需关闭）」—— 无条件报「浏览器已关闭」是谎话 */
+      if (r && r.message) toast(r.message);
+      else if (r && r.ok) toast(r.attached ? '已断开连接' : '浏览器已关闭');
+      else toast('关闭失败：' + ((r && r.error) || ''));
+      /* 关成功了（含「本来就没开」）才把「本轮浏览器开着」这条记忆清掉：失败了就还得留着，
+       * 否则 title 会退回「（若已开）」而在我们明明知道它没关掉时说含糊话 */
+      if (r && r.ok) runBrowserOpen = false;
+      updateCloseBtn();
+      refreshBrowserState();   /* cdp 模式下「断开」不等于「关了」—— 重探一次再定 title 措辞 */
     };
     els.addVar.onclick = () => addVarRow('', '');
+    els.browserMode.onchange = refreshModeFields;
+    /* 外层三个字段是「唯一数据源」，点开始直接读它们 —— 但场景高亮、运行参数摘要、
+     * 以及开跑前检查（目标/URL 两格）得跟着刷新。检查条走**尾部节流**：它是 live region，
+     * 每键重建会把四格重播一遍（见 renderPreflight 的签名短路）。 */
+    els.url.addEventListener('input', () => { renderSummary(); schedulePreflight(); });
+    els.goal.addEventListener('input', () => { renderSummary(); schedulePreflight(); });
+    /* 配置弹窗保存后「Jev Key」那一格要立刻翻牌。不动 app.js：在其 click 之后补一次
+     * 重渲染（setTimeout 0 保证排在 app.js 的保存逻辑之后，读到的是新值） */
+    const cfgSave = document.getElementById('configSave');
+    if (cfgSave) cfgSave.addEventListener('click', () => setTimeout(renderPreflight, 0));
     els.editTask.onclick = openTaskModal;
     els.taskModalClose.onclick = cancelTaskModal;
     els.taskCancel.onclick = cancelTaskModal;
@@ -1857,14 +2444,20 @@ const Auto = (() => {
       else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
     });
     els.exportBtn.onclick = exportRun;
-    /* 会话下拉：开合 + 点外收起；打开时拉最新列表 */
+    /* 会话下拉：开合 + 点外收起；打开时拉最新列表、清掉上次的过滤词并把焦点交给过滤框 ——
+     * 开合对象是 #autoSessPanel（列表本体只是它内部可滚的那一截，toggle 它永远不显示） */
     els.sessBtn.onclick = (e) => {
       e.stopPropagation();
-      els.sessList.hidden = !els.sessList.hidden;
-      if (!els.sessList.hidden) refreshRunsList();
+      const willOpen = els.sessPanel.hidden;
+      els.sessPanel.hidden = !willOpen;
+      if (!willOpen) return;
+      els.sessFilter.value = '';
+      els.sessFilter.focus();
+      refreshRunsList();
     };
+    els.sessFilter.addEventListener('input', renderSessList);
     document.addEventListener('click', (e) => {
-      if (!els.sessDd.contains(e.target)) els.sessList.hidden = true;
+      if (!els.sessDd.contains(e.target)) els.sessPanel.hidden = true;
     });
     /* 键盘 ←→ 在当前视图的步骤列表间移动（历史会话视图同样生效；
      * 输入控件聚焦、或编辑弹窗打开时不抢按键） */
@@ -1882,13 +2475,22 @@ const Auto = (() => {
   function init() {
     renderVars();
     primeScreenOptions();
+    /* 记住过浏览器模式/端点就恢复它们（cdp 是要先做调试端口设置的刻意选择，
+     * 刷新页面就丢会很难受）；没存过则维持 HTML 里的默认值 isolated。 */
+    els.browserMode.value = readStoredMode();
+    try { els.cdpTarget.value = localStorage.getItem(CDP_KEY) || ''; } catch (_) { /* 读不到就算了 */ }
+    refreshModeFields();
     /* 默认走一个场景：别让用户面对空白表单开场 */
     if (!els.goal.value.trim() && !els.url.value.trim() && SCENARIOS.length) {
       applyScenario(SCENARIOS[0].id, true);
     }
     renderSummary();
+    renderPreflight();
     bindEvents();
-    probeEngine();
+    updateModeSegLock();
+    updateCloseBtn();       /* 先落一个「空闲」的默认态，随后 refreshBrowserState 再按探测结果校正 */
+    probeEngine();          /* 完成后自己会再刷一次检查条（引擎那一格） */
+    refreshBrowserState();  /* 决定「关闭浏览器」开局是否可点（空闲时应为不可点） */
     refreshRunsList();
   }
 

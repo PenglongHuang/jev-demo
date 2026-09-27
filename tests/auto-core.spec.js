@@ -60,6 +60,30 @@ test('buildState：模板字段齐全，快照全量透传，历史默认取 8 �
   assert.match(st['已完成步骤'][0], /更早的 4 步已省略/);
   assert.strictEqual(st['已完成步骤'][9 - 1], '12. click【e12】成功');
   assert.strictEqual(st['上一步结果'], '成功');
+  /* 未传 tabs 时退化为「当前页单行」（老调用方零回归） */
+  assert.deepStrictEqual(st['标签页'],
+    ['【当前】Tab 0：灵犀邮箱 · 收件箱 — http://localhost:3000/demo/mailbox.html']);
+});
+
+test('buildState：多标签页逐个列出并提示切换动词；单 Tab 不加提示', () => {
+  const tabs = [
+    { index: 0, current: true, title: '百度一下，你就知道', url: 'https://www.baidu.com/' },
+    { index: 1, current: false, title: 'jev_百度搜索', url: 'https://www.baidu.com/s?wd=jev' },
+  ];
+  const multi = AutoCore.buildState({
+    goal: 'g', url: tabs[0].url, title: tabs[0].title, history: [], lastResult: '成功', snapshot: 's', tabs,
+  });
+  assert.deepStrictEqual(multi['标签页'].slice(0, 2), [
+    '【当前】Tab 0：百度一下，你就知道 — https://www.baidu.com/',
+    'Tab 1：jev_百度搜索 — https://www.baidu.com/s?wd=jev',
+  ]);
+  assert.match(multi['标签页'][2], /tab-select/, '多 Tab 必须提示切换动词');
+  assert.match(multi['标签页'][2], /tab-close/);
+
+  const single = AutoCore.buildState({
+    goal: 'g', url: 'u', title: 't', history: [], lastResult: '', snapshot: 's', tabs: [tabs[0]],
+  });
+  assert.strictEqual(single['标签页'].length, 1, '单 Tab 不附加切换提示');
 });
 
 test('buildState：首步无上一步结果时给出占位说明', () => {
@@ -90,7 +114,7 @@ test('buildQuestions：固定 3 道，动作 19+2+2、参数来自快照、未�
   const params = qs['参数'].criteria;
   assert.ok(params.e10.includes('【可交互】'));
   assert.ok(params.e10.includes('归档'));
-  assert.strictEqual(params['无需元素'].length > 0, true);
+  assert.strictEqual(params['无需元素'], undefined, '「无需元素」兜底项已下线：参数题只放真实 ref');
 
   assert.strictEqual(qs['未完成'].type, 'score');
   assert.strictEqual(AutoCore.SCORE_LEVELS, 2);
@@ -163,14 +187,14 @@ test('checkActionRole：check / uncheck 只认勾选框类角色，click 不受�
   assert.strictEqual(AutoCore.checkActionRole({ action: 'click', param: 'e10' }, roles).conflict, false);
 });
 
-test('checkActionRole：放行 fill / 未知角色 / 无需元素（宁可漏报，不误报白问一次）', () => {
+test('checkActionRole：放行 fill / 未知角色 / 未选元素（宁可漏报，不误报白问一次）', () => {
   const roles = { e10: 'button' };
   assert.strictEqual(AutoCore.checkActionRole({ action: 'fill', param: 'e10' }, roles).conflict, false);
   assert.strictEqual(AutoCore.checkActionRole({ action: 'type', param: 'e10' }, roles).conflict, false);
   assert.strictEqual(AutoCore.checkActionRole({ action: '生成输入', param: 'e10' }, roles).conflict, false);
   assert.strictEqual(AutoCore.checkActionRole({ action: 'select', param: 'e99' }, roles).conflict, false);
-  assert.strictEqual(AutoCore.checkActionRole({ action: 'select', param: '无需元素' }, roles).conflict, false);
-  assert.strictEqual(AutoCore.checkActionRole({ action: '任务已完成', param: '无需元素' }, roles).conflict, false);
+  assert.strictEqual(AutoCore.checkActionRole({ action: 'select', param: null }, roles).conflict, false);
+  assert.strictEqual(AutoCore.checkActionRole({ action: '任务已完成', param: null }, roles).conflict, false);
 });
 
 test('buildActionFollowUp：只问「动作」，候选去掉该元素上不可能的动作，且不带终止态', () => {
@@ -253,31 +277,35 @@ test('planExecution：常规动作映射到 op/ref/text', () => {
     AutoCore.planExecution({ action: 'fill', param: 'e3', text: '关键词' }, VARS),
     { kind: 'act', op: 'fill', ref: 'e3', text: '招商银行' });
   assert.deepStrictEqual(
-    AutoCore.planExecution({ action: 'goto', param: '无需元素', text: '关键词' }, VARS),
+    AutoCore.planExecution({ action: 'goto', param: null, text: '关键词' }, VARS),
     { kind: 'act', op: 'goto', ref: null, text: '招商银行' });
   assert.deepStrictEqual(
-    AutoCore.planExecution({ action: 'press', param: '无需元素', text: '回车' }, VARS),
+    AutoCore.planExecution({ action: 'press', param: null, text: '回车' }, VARS),
     { kind: 'act', op: 'press', ref: null, text: 'Enter' });
+  /* 不作用于元素的动作随手选了参数也不消费（「无需元素」下线后的替代语义） */
+  assert.deepStrictEqual(
+    AutoCore.planExecution({ action: 'goto', param: 'e10', text: '关键词' }, VARS),
+    { kind: 'act', op: 'goto', ref: null, text: '招商银行' });
 });
 
 test('planExecution：工程动作与终止动作', () => {
-  assert.deepStrictEqual(AutoCore.planExecution({ action: '无操作', param: '无需元素', text: '无' }, VARS), { kind: 'noop' });
+  assert.deepStrictEqual(AutoCore.planExecution({ action: '无操作', param: null, text: '无' }, VARS), { kind: 'noop' });
   assert.deepStrictEqual(AutoCore.planExecution({ action: '生成输入', param: 'e3', text: '无' }, VARS), { kind: 'llm', ref: 'e3' });
-  assert.deepStrictEqual(AutoCore.planExecution({ action: '任务已完成', param: '无需元素', text: '无' }, VARS), { kind: 'terminal', action: '任务已完成' });
+  assert.deepStrictEqual(AutoCore.planExecution({ action: '任务已完成', param: null, text: '无' }, VARS), { kind: 'terminal', action: '任务已完成' });
 });
 
 test('planExecution：可选文本动作（tab-close/tab-new/dialog-accept）选「无」是合法无参形态', () => {
-  assert.deepStrictEqual(AutoCore.planExecution({ action: 'dialog-accept', param: '无需元素', text: '无' }, VARS), { kind: 'act', op: 'dialog-accept', ref: null, text: null });
-  assert.deepStrictEqual(AutoCore.planExecution({ action: 'tab-close', param: '无需元素', text: '无' }, VARS), { kind: 'act', op: 'tab-close', ref: null, text: null });
-  assert.deepStrictEqual(AutoCore.planExecution({ action: 'tab-new', param: '无需元素', text: '无' }, VARS), { kind: 'act', op: 'tab-new', ref: null, text: null });
+  assert.deepStrictEqual(AutoCore.planExecution({ action: 'dialog-accept', param: null, text: '无' }, VARS), { kind: 'act', op: 'dialog-accept', ref: null, text: null });
+  assert.deepStrictEqual(AutoCore.planExecution({ action: 'tab-close', param: null, text: '无' }, VARS), { kind: 'act', op: 'tab-close', ref: null, text: null });
+  assert.deepStrictEqual(AutoCore.planExecution({ action: 'tab-new', param: null, text: '无' }, VARS), { kind: 'act', op: 'tab-new', ref: null, text: null });
   /* 带文本同样合法 */
-  assert.deepStrictEqual(AutoCore.planExecution({ action: 'dialog-accept', param: '无需元素', text: '好的' }, VARS), { kind: 'act', op: 'dialog-accept', ref: null, text: '好的' });
+  assert.deepStrictEqual(AutoCore.planExecution({ action: 'dialog-accept', param: null, text: '好的' }, VARS), { kind: 'act', op: 'dialog-accept', ref: null, text: '好的' });
 });
 
-test('planExecution：矛盾决策抛错（需 ref 却选无需元素 / 需文本却选无）', () => {
-  assert.throws(() => AutoCore.planExecution({ action: 'click', param: '无需元素', text: '无' }, VARS), /无需元素/);
+test('planExecution：矛盾决策抛错（需 ref 却未选元素 / 需文本却选无）', () => {
+  assert.throws(() => AutoCore.planExecution({ action: 'click', param: null, text: '无' }, VARS), /未.*选定元素/);
   assert.throws(() => AutoCore.planExecution({ action: 'fill', param: 'e3', text: '无' }, VARS), /文本/);
-  assert.throws(() => AutoCore.planExecution({ action: '生成输入', param: '无需元素', text: '无' }, VARS), /无需元素/);
+  assert.throws(() => AutoCore.planExecution({ action: '生成输入', param: null, text: '无' }, VARS), /未.*选定元素/);
 });
 
 /* ---------- shouldTerminate ---------- */
@@ -350,15 +378,59 @@ test('sanitizeLlmText：剥引号、去禁字符、压空白、截断', () => {
 test('formatHistoryStep：成功/失败两种形态', () => {
   assert.strictEqual(AutoCore.formatHistoryStep(2, 'click【e10 · 归档】', true, null), '2. click【e10 · 归档】成功');
   const err = 'Error: Ref e3 not found in the current page snapshot. Try capturing new snapshot.';
-  assert.strictEqual(   // 错误摘要截断到 80 字符（原文 81 字符，末尾句号被截掉）
+  assert.strictEqual(   // 短错误完整保留（旧版一刀切 80 字符会把末尾句号切掉）
     AutoCore.formatHistoryStep(3, 'fill【e3】', false, err),
-    '3. fill【e3】失败：' + err.slice(0, 80));
+    '3. fill【e3】失败：' + err);
+});
+
+test('briefError：保留 Playwright 的遮挡根因（会话 r-0926-0046-qrys 的失败形态）', () => {
+  /* 根因在日志行尾，前面是长元素标签；按字符截断只会留下「超时」 */
+  const raw = [
+    'TimeoutError: Timeout 5000ms exceeded.',
+    'Call log:',
+    "  - waiting for locator('aria-ref=f2e496')",
+    '    - locator resolved to <button type="button" class="Button Button--plain">…</button>',
+    '  - attempting click action',
+    '    - waiting for element to be visible, enabled and stable',
+    '    - element is visible, enabled and stable',
+    '    - scrolling into view if needed',
+    '    - done scrolling',
+    '    - <form class="nova-abc123" data-x="' + 'y'.repeat(200) + '">…</form> intercepts pointer events',
+  ].join('\n');
+  const brief = AutoCore.briefError(raw);
+  assert.match(brief, /intercepts pointer events/);
+  assert.match(brief, /^TimeoutError: Timeout 5000ms exceeded\./);
+  /* ANSI 转义必须清掉，且总体长度有上限 */
+  assert.ok(brief.length <= 300, '摘要应有长度上限，实际 ' + brief.length);
+});
+
+test('briefError：驱动层已折叠的「首行 | 根因」形态原样识别', () => {
+  const brief = AutoCore.briefError('TimeoutError: Timeout 5000ms exceeded. | - <div class="mask">…</div> intercepts pointer events');
+  assert.strictEqual(brief, 'TimeoutError: Timeout 5000ms exceeded. ｜ - <div class="mask">…</div> intercepts pointer events');
+});
+
+test('briefError：无根因时保留首行，不用「未知错误」兜掉真实原因', () => {
+  assert.strictEqual(AutoCore.briefError('Error: Ref e3 not found in the current page snapshot.'), 'Error: Ref e3 not found in the current page snapshot.');
+  assert.strictEqual(AutoCore.briefError(''), '未知错误');
+  assert.strictEqual(AutoCore.briefError(null), '未知错误');
+});
+
+test('isRefParam：按快照真实 ref 表判定，兼容 fN 前缀（会话 r-0926-0046-qrys 的根 bug）', () => {
+  /* 切到第二个标签页后 ref 从 e496 变成 f2e496 —— 旧正则 /^e[A-Za-z0-9_-]+$/ 失配，
+   * failedRefs 静默失效；改为查快照解析出的 ref 表 */
+  const refLabels = { f2e1: '', f2e496: '', f2e730: '' };
+  assert.strictEqual(AutoCore.isRefParam('f2e496', refLabels), true, 'fN 前缀 ref 必须被认可');
+  assert.strictEqual(AutoCore.isRefParam('e496', refLabels), false, '不在本例快照里的 ref 不应认可');
+  assert.strictEqual(AutoCore.isRefParam('其他', refLabels), false, '兜底项「其他」不是 ref');
+  assert.strictEqual(AutoCore.isRefParam('', refLabels), false);
+  assert.strictEqual(AutoCore.isRefParam(null, refLabels), false);
+  assert.strictEqual(AutoCore.isRefParam('f2e1', null), false);
 });
 
 test('describeDecision：时间线/历史用的短标签', () => {
   assert.strictEqual(AutoCore.describeDecision({ action: 'click', param: 'e10', text: '无' }, SAMPLE_REFS, VARS), 'click【e10 · 归档】');
   assert.strictEqual(AutoCore.describeDecision({ action: '生成输入', param: 'e3', text: '无' }, SAMPLE_REFS, VARS), '生成输入【e3 · 搜索邮件】');
-  assert.strictEqual(AutoCore.describeDecision({ action: '任务已完成', param: '无需元素', text: '无' }, SAMPLE_REFS, VARS), '任务已完成');
+  assert.strictEqual(AutoCore.describeDecision({ action: '任务已完成', param: null, text: '无' }, SAMPLE_REFS, VARS), '任务已完成');
 });
 
 /* ---------- 参数题候选裁剪（ref-funnel 接线） ---------- */
@@ -375,7 +447,7 @@ test('超限时「参数」题被裁剪：选项不超上限、带兜底项、in
 
   assert.strictEqual(pc.meta.trimmed, true);
   assert.strictEqual(pc.meta.totalRefs, 393);
-  assert.strictEqual(Object.keys(qs['参数'].criteria).length, 82);   // 80 + 无需元素 + 其他
+  assert.strictEqual(Object.keys(qs['参数'].criteria).length, 81);   // 80 + 其他（「无需元素」已下线）
   assert.ok(qs['参数'].criteria['其他'], '必须有兜底项');
   assert.ok(refKeys(qs['参数'].criteria).indexOf('e172') !== -1, '合格候选人的按钮要在第一批里');
   assert.match(qs['参数'].instructions, /折叠|批/);
@@ -388,6 +460,7 @@ test('未超限时零回归：「参数」题与旧行为逐字节一致，instr
   assert.strictEqual(pc.meta.trimmed, false);
   assert.strictEqual(JSON.stringify(qs['参数'].criteria), JSON.stringify(AutoCore.refCriteria(SAMPLE_SNAPSHOT)));
   assert.strictEqual(qs['参数'].criteria['其他'], undefined);
+  assert.strictEqual(qs['参数'].criteria['无需元素'], undefined);
   assert.ok(!/折叠/.test(qs['参数'].instructions));
 });
 
@@ -396,7 +469,7 @@ test('开关关掉时：即使超限也走全量（恢复裁剪功能上线前�
   const qs = AutoCore.buildQuestions({ snapshot: RESUME_SNAPSHOT, variables: [], param: pc });
   assert.strictEqual(pc.meta.trimmed, false);
   assert.strictEqual(pc.meta.enabled, false);
-  assert.strictEqual(Object.keys(qs['参数'].criteria).length, 394);
+  assert.strictEqual(Object.keys(qs['参数'].criteria).length, 393);
 });
 
 test('缺省（没传 paramTrim）时按默认开着处理', () => {
@@ -428,14 +501,22 @@ test('buildParamFollowUp：最后一批不附兜底项，并提示在本批内�
 test('isRefMore / describeDecision：认得兜底项', () => {
   assert.strictEqual(AutoCore.isRefMore('其他'), true);
   assert.strictEqual(AutoCore.isRefMore('e172'), false);
-  assert.strictEqual(AutoCore.isRefMore('无需元素'), false);
+  assert.strictEqual(AutoCore.isRefMore(null), false);
   assert.match(AutoCore.describeDecision({ action: 'click', param: '其他', text: '无' }, {}, VARS), /展开下一批/);
 });
 
-test('normalizeParam：动作不需要元素时，「其他」归一为「无需元素」并给出说明', () => {
-  const noRef = AutoCore.normalizeParam({ action: 'press', param: '其他' });
-  assert.strictEqual(noRef.param, '无需元素');
-  assert.match(noRef.note, /不需要元素/);
+test('normalizeParam：动作不需要元素时参数一律剥掉；需要元素时原样透传', () => {
+  /* 「其他」配到不需要元素的动作：归一为空并给说明（不报错、不展开下一批） */
+  const noRefMore = AutoCore.normalizeParam({ action: 'press', param: '其他' });
+  assert.strictEqual(noRefMore.param, null);
+  assert.match(noRefMore.note, /不需要作用于元素/);
+  /* 随手选了真实 ref（「无需元素」下线后参数题必答）：静默剥掉，不产生噪音说明 */
+  const noRefJunk = AutoCore.normalizeParam({ action: 'goto', param: 'e12' });
+  assert.strictEqual(noRefJunk.param, null);
+  assert.strictEqual(noRefJunk.note, '');
+  /* 答案缺失：同样归一为空 */
+  assert.strictEqual(AutoCore.normalizeParam({ action: '无操作', param: null }).param, null);
+  /* 需要元素的动作：原样透传，「其他」留给调用方展开下一批 */
   const needRef = AutoCore.normalizeParam({ action: 'click', param: '其他' });
   assert.strictEqual(needRef.param, '其他');
   assert.strictEqual(needRef.note, '');
@@ -446,7 +527,6 @@ test('normalizeParam：动作不需要元素时，「其他」归一为「无需
 
 test('parseParamAnswer：补问只回「参数」一题，不要求「动作」「未完成」', () => {
   assert.strictEqual(AutoCore.parseParamAnswer({ 参数: { type: 'choice', choice: 'e172' } }), 'e172');
-  assert.strictEqual(AutoCore.parseParamAnswer({ 参数: { type: 'choice', choice: '无需元素' } }), '无需元素');
   assert.throws(() => AutoCore.parseParamAnswer({}), /参数/);
   assert.throws(() => AutoCore.parseParamAnswer({ 参数: {} }), /参数/);
 });
@@ -565,7 +645,7 @@ test('buildTextFollowUp · select 读不到名单：退回变量池兜底，inst
 test('buildTextFollowUp · press：变量 ∪ 常用键名，撞名时变量优先', () => {
   const vars = [{ name: 'Enter', value: 'Return' }, { name: '翻页键', value: 'PageDown' }];
   const q = AutoCore.buildTextFollowUp({
-    action: 'press', param: '无需元素', snapshot: '', variables: vars, refLabel: '',
+    action: 'press', param: null, snapshot: '', variables: vars, refLabel: '',
   });
   const keys = Object.keys(q['文本'].criteria);
   assert.ok(keys.includes('Enter') && keys.includes('Escape') && keys.includes('PageDown'));
@@ -575,6 +655,44 @@ test('buildTextFollowUp · press：变量 ∪ 常用键名，撞名时变量优�
   assert.strictEqual(q['文本'].criteria['Enter'], '取值：Return', '撞名时变量优先（用户显式意图）');
   assert.strictEqual(q['文本'].criteria['翻页键'], '取值：PageDown');
   assert.strictEqual(q['文本'].criteria['Escape'].startsWith('键名：'), true);
+});
+
+test('buildTextFollowUp · tab-select：候选 = 真实标签页序号（工程自动注入），变量池不混入', () => {
+  /* 实测事故：候选来自变量池，模型选了「关键词」→ 拼出 tab-select "jev"，
+   * 被 driver 硬校验拦下（文本必须是非负整数）。序号只能由工程侧注入。 */
+  const q = AutoCore.buildTextFollowUp({
+    action: 'tab-select', param: null, snapshot: '', variables: ORDERS_VARS, refLabel: '',
+    tabs: [
+      { index: 0, current: false, title: '百度一下，你就知道', url: 'https://www.baidu.com/' },
+      { index: 1, current: true, title: 'jev_百度搜索', url: 'https://www.baidu.com/s?wd=jev' },
+    ],
+  });
+  assert.deepStrictEqual(Object.keys(q['文本'].criteria), ['0', '1'], '候选只有真实 Tab 序号');
+  assert.match(q['文本'].criteria['1'], /【当前】/);
+  assert.match(q['文本'].criteria['1'], /jev_百度搜索/);
+  assert.strictEqual(q['文本'].criteria['买家'], undefined, '变量池绝不混入：tab-select 只认序号');
+  assert.match(q['文本'].instructions, /tab-select/);
+  assert.match(q['文本'].instructions, /序号/);
+  assert.match(q['文本'].instructions, /必须从中选择/);
+});
+
+test('buildTextFollowUp · tab-select：读不到标签页列表 → null（宁记失败步也不让变量池瞎猜）', () => {
+  assert.strictEqual(AutoCore.buildTextFollowUp({
+    action: 'tab-select', param: null, snapshot: '', variables: ORDERS_VARS, refLabel: '', tabs: [],
+  }), null);
+  assert.strictEqual(AutoCore.buildTextFollowUp({
+    action: 'tab-select', param: null, snapshot: '', variables: ORDERS_VARS, refLabel: '',
+  }), null);
+});
+
+test('buildTextFollowUp · tab-close：候选 = 序号 + 「无」（缺省关当前 Tab），不再给变量池', () => {
+  const q = AutoCore.buildTextFollowUp({
+    action: 'tab-close', param: null, snapshot: '', variables: ORDERS_VARS, refLabel: '',
+    tabs: [{ index: 0, current: true, title: 'A', url: 'http://a' }, { index: 1, current: false, title: 'B', url: 'http://b' }],
+  });
+  assert.deepStrictEqual(Object.keys(q['文本'].criteria), ['0', '1', '无']);
+  assert.strictEqual(q['文本'].criteria['买家'], undefined);
+  assert.match(q['文本'].instructions, /关闭当前 Tab/);
 });
 
 test('buildTextFollowUp · fill：候选 = 变量池，instructions 带已定动作与目标元素', () => {
@@ -592,7 +710,8 @@ test('buildTextFollowUp · fill：候选 = 变量池，instructions 带已定动
 
 test('buildTextFollowUp · 可选文本动作附「无」，必填动作不附', () => {
   const opt = AutoCore.buildTextFollowUp({
-    action: 'tab-close', param: '无需元素', snapshot: '', variables: ORDERS_VARS, refLabel: '',
+    action: 'tab-close', param: null, snapshot: '', variables: ORDERS_VARS, refLabel: '',
+    tabs: [{ index: 0, current: true, title: 'A', url: 'http://a' }],
   });
   assert.strictEqual(opt['文本'].criteria['无'], '本动作不需要输入文本');
   const req = AutoCore.buildTextFollowUp({
@@ -612,13 +731,13 @@ test('buildTextFollowUp · 零候选与无需文本：返回 null（builder 不�
   }), null);
   /* 可选动作只剩「无」一项 → 没有可问的，也不问 */
   assert.strictEqual(AutoCore.buildTextFollowUp({
-    action: 'tab-close', param: '无需元素', snapshot: '', variables: [], refLabel: '',
+    action: 'tab-close', param: null, snapshot: '', variables: [], refLabel: '',
   }), null);
   /* 不需要文本的动作 → null（主循环用它当门闩） */
   assert.strictEqual(AutoCore.buildTextFollowUp({
     action: 'click', param: 'e10', snapshot: SAMPLE_SNAPSHOT, variables: ORDERS_VARS, refLabel: '',
   }), null);
-  assert.strictEqual(AutoCore.buildTextFollowUp({ action: '任务已完成', param: '无需元素', snapshot: '', variables: [], refLabel: '' }), null);
+  assert.strictEqual(AutoCore.buildTextFollowUp({ action: '任务已完成', param: null, snapshot: '', variables: [], refLabel: '' }), null);
 });
 
 test('parseTextAnswer：取「文本」选项；缺失抛错', () => {
@@ -635,15 +754,19 @@ test('文本补问 → 执行规划衔接：选项名 / 键名不在变量池时
     { kind: 'act', op: 'select', ref: 'e15', text: '已付款待发货' });
   /* press 补问选中的纯键名（非变量） → 字面值直传 */
   assert.deepStrictEqual(
-    AutoCore.planExecution({ action: 'press', param: '无需元素', text: 'PageDown' }, []),
+    AutoCore.planExecution({ action: 'press', param: null, text: 'PageDown' }, []),
     { kind: 'act', op: 'press', ref: null, text: 'PageDown' });
+  /* tab-select 补问选中的序号（字符串）→ 原样直传（driver 侧仍做非负整数硬校验） */
+  assert.deepStrictEqual(
+    AutoCore.planExecution({ action: 'tab-select', param: null, text: '1' }, []),
+    { kind: 'act', op: 'tab-select', ref: null, text: '1' });
   /* 变量名被选中 → 取变量的值 */
   assert.deepStrictEqual(
     AutoCore.planExecution({ action: 'fill', param: 'e14', text: '买家' }, ORDERS_VARS),
     { kind: 'act', op: 'fill', ref: 'e14', text: '王小明' });
   /* 可选动作选「无」→ 无参形态合法 */
   assert.deepStrictEqual(
-    AutoCore.planExecution({ action: 'tab-close', param: '无需元素', text: '无' }, []),
+    AutoCore.planExecution({ action: 'tab-close', param: null, text: '无' }, []),
     { kind: 'act', op: 'tab-close', ref: null, text: null });
 });
 
@@ -667,9 +790,12 @@ test('actionsOf：首轮 + 三类补问 + LLM 的顺序、标题与字段归一'
     ['main', 'param', 'action', 'text', 'llm']
   );
   assert.strictEqual(acts[0].title, 'Jev 首轮 · 3 题');
-  assert.strictEqual(acts[1].title, '参数补问 · 第 2 批');
-  assert.ok(/动作补问/.test(acts[2].title) && acts[2].from === 'select');
-  assert.ok(/文本补问/.test(acts[3].title) && acts[3].forAction === 'fill');
+  /* 补问标题与首轮同形状：种类 · 题数 · 上下文（补问恒为 1 题） */
+  assert.strictEqual(acts[1].title, '参数补问 · 1 题 · 第 2 批');
+  assert.strictEqual(acts[2].title, '动作补问 · 1 题 · 「select」与角色 button 冲突');
+  assert.strictEqual(acts[2].from, 'select');
+  assert.strictEqual(acts[3].title, '文本补问 · 1 题 · fill');
+  assert.strictEqual(acts[3].forAction, 'fill');
   assert.strictEqual(acts[4].title, 'LLM 生成输入');
   assert.strictEqual(acts[4].text, '招商银行');
   assert.strictEqual(acts[4].payload, null);          // LLM 的输入在 messages，不在 payload
@@ -751,6 +877,12 @@ test('buildRunRecord：meta 汇总正确、steps 序列化含 request/followUps/
   assert.strictEqual(rec.meta.jevCalls, 4);   /* 3 次首轮 + 1 次参数补问 */
   assert.strictEqual(rec.meta.llmCalls, 1);
   assert.strictEqual(rec.meta.endState, 'done');
+  /* 模式与 CDP 端点要落盘：一次 http 形态端点的失败排查全靠它（记录里没有就只能靠猜） */
+  assert.strictEqual(rec.meta.mode, 'isolated', 'runCfg 没写 mode 时按默认的独立实例记');
+  assert.strictEqual(rec.meta.cdp, null);
+  const cdpRec = AutoCore.buildRunRecord({ id: 'r-x', runCfg: Object.assign({}, runCfg, { mode: 'cdp', cdp: 'ws://127.0.0.1:9222/devtools/browser/abc' }), jevModel: 'j', llmModel: null, startedAt: 't' });
+  assert.strictEqual(cdpRec.meta.mode, 'cdp');
+  assert.strictEqual(cdpRec.meta.cdp, 'ws://127.0.0.1:9222/devtools/browser/abc');
   assert.strictEqual(rec.steps[1].request.state, steps[1].payload.state);   /* payload → request */
   assert.strictEqual(rec.steps[1].llm.response, steps[1].llm.raw);
   assert.strictEqual(rec.steps[1].followUps[0].request, steps[1].followUps[0].payload);

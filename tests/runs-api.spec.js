@@ -17,7 +17,7 @@ function startServer() {
   });
   const base = 'http://127.0.0.1:' + port;
   const wait = async () => {
-    for (let i = 0; i < 50; i++) {
+    for (let i = 0; i < 150; i++) {
       try { const r = await fetch(base + '/api/health'); if (r.ok) return base; }
       catch (_) { /* 未监听 */ }
       await new Promise((r) => setTimeout(r, 100));
@@ -110,6 +110,33 @@ test('索引缺失时从目录重建', async () => {
     const list = await req(srv.base, 'GET', '/api/runs');
     assert.ok(list.data.runs.some((x) => x.id === 'r-0101-0002-t002'));
   } finally { srv.child.kill(); }
+});
+
+test('读取失败但不是「文件没了」→ 503 且**不**剔除索引条目', async () => {
+  /* 复现手法：把 <id>.json 换成一个同名目录 → fs.readFile 回 EISDIR
+   * （线上等价物是 Windows 索引器/杀软抓着文件回 EBUSY/EPERM，或并发 PUT 正把
+   * 新 tmp 换上来）。这类失败是暂时的，一旦当成删除，会话就永久从下拉里消失。 */
+  const id = 'r-0101-0003-t003';
+  const file = path.join(RUNS_DIR, id + '.json');
+  fs.mkdirSync(RUNS_DIR, { recursive: true });
+  const srv = await startServer();
+  try {
+    await srv.wait();
+    assert.strictEqual((await req(srv.base, 'PUT', '/api/runs/' + id, rec(id))).status, 200);
+    fs.rmSync(file, { force: true });
+    fs.mkdirSync(file);
+
+    const got = await req(srv.base, 'GET', '/api/runs/' + id);
+    assert.strictEqual(got.status, 503, '暂时读不出来不是 404：' + JSON.stringify(got.data));
+    assert.match(got.data.error.message, /暂时|稍后/, '要说清是可重试的：' + got.data.error.message);
+
+    const list = await req(srv.base, 'GET', '/api/runs');
+    assert.ok(list.data.runs.some((x) => x.id === id), '索引条目必须还在（没被当幽灵剔除）');
+  } finally {
+    fs.rmSync(file, { force: true, recursive: true });
+    await req(srv.base, 'DELETE', '/api/runs/' + id).catch(() => {});
+    srv.child.kill();
+  }
 });
 
 test('index.json 是合法 JSON 但非数组：不崩进程，从目录重建', async () => {

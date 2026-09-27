@@ -16,6 +16,7 @@ const StateEditor = (() => {
   let entries = [];       // JSON 模式：[{ key, value: string }]
   let plainText = '';
   let plainTa = null;
+  let formGen = 0;        // renderForm 代际：撤销窗口内表单被重建 → 上一代的行不能再插回去
 
   autoGrow(rawTa, 460);
 
@@ -78,13 +79,31 @@ const StateEditor = (() => {
     val.value = entry.value;
     autoGrow(val, 480);
     row.querySelector('.row-del').addEventListener('click', () => {
+      const parent = row.parentNode;
+      if (!parent) return;            /* 已不在文档里（重复点）：没有再删一次的道理 */
+      const gen = formGen;            /* 记下这一代表单，撤销时用它判断表单是否已被重建 */
+      const next = row.nextSibling;   /* 原位恢复锚点：可能是下一行，也可能是「＋ 添加字段」按钮 */
+      const key = row.querySelector('.kv-key').value.trim();
       row.remove();
       updateMeta();
+      /* 撤销：插回活节点（不是 clone）—— 键、值、textarea 的 input 监听都还在 */
+      undoToast('已删除字段「' + (key || '未命名字段') + '」', () => {
+        /* 撤销窗口里 renderForm() 可能已经重跑过（载入预设 / 表单↔源码 来回切）：
+         * 那一代的行是重新从 entries 建出来的，这个字段本来就已经回来了。
+         * 旧行再插一次就会同 key 两行，发送时 collectObj(true) 抛「字段名重复」。
+         * 代际变了 ⇒ 幂等空操作，不插。 */
+        if (gen !== formGen) return;
+        const anchor = (next && next.parentNode === parent) ? next : parent.querySelector('.add-field');
+        if (anchor) parent.insertBefore(row, anchor);
+        else parent.appendChild(row);
+        updateMeta();
+      });
     });
     return row;
   }
 
   function renderForm() {
+    formGen++;   /* 每次重建都换一代：上一代捕获的「删除撤销」随之失效（见 kvRow 的 row-del） */
     formEl.innerHTML = '';
     if (plain) {
       const label = document.createElement('label');
@@ -124,6 +143,13 @@ const StateEditor = (() => {
       formEl.appendChild(tip);
     }
     updateMeta();
+    /* 行是「先建后插」的：kvRow() / 纯文本分支里的 autoGrow 在 isConnected=false 时
+     * 直接 return，插进 DOM 之后不会再有人触发 fit（只有用户敲字才跳高），
+     * 结果长快照被压成默认高度的小框 + 内部滚动条。这里统一补一次：
+     * 同步那次覆盖「元素已经可见」的常见路径；下一帧那次覆盖「源码 → 表单」切换
+     * —— 那条路径上 renderForm 跑的时候 formEl 还是 hidden，同步 fit 会被跳过。 */
+    fitTextareas(formEl);
+    requestAnimationFrame(() => fitTextareas(formEl));
   }
 
   /* 从 DOM 收集 KV（strict 时对空字段名 / 重复字段名抛错） */

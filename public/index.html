@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Jev 体验台 · System One 决策模型</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f46e5'/%3E%3Ctext x='16' y='22' font-size='17' fill='white' text-anchor='middle'%3E%E2%97%87%3C/text%3E%3C/svg%3E" />
-<link rel="stylesheet" href="styles.css?v=20260925a" />
+<link rel="stylesheet" href="styles.css?v=20260927a" />
 </head>
 <body>
 
@@ -30,6 +30,12 @@
     </nav>
 
     <div class="topbar-spacer"></div>
+    <!-- Demo 模式的主操作上顶栏：卡片里的「发送给 Jev」在 1366×768 下位于折线下方 200px
+         （实测 top=962），而那是最该随手可点的一个按钮。顶栏是 sticky，永远在视野里。
+         auto 模式隐藏它（app.js 按模式维护 hidden）—— 该模式的入口在任务配置里。 -->
+    <button class="btn-primary btn-send-top" id="sendTop" type="button" hidden title="发送给 Jev（同 Ctrl+Enter）">
+      发送给 Jev
+    </button>
     <span class="status-pill" id="browserPill" role="status" hidden>引擎检测中…</span>
     <button class="btn-ghost btn-config" id="openConfig" type="button" title="API 配置：提供商、Key、模型、接口地址">
       <span class="config-icon" aria-hidden="true">⚙</span>
@@ -58,19 +64,51 @@
         Demo 模式不受影响。
       </div>
 
-      <!-- 外层只读摘要：日常路径是「看一眼 → 点开始」，编辑走弹窗 -->
+      <!-- 错误条：常驻在页面里（不是 2 秒就消失的 toast），整段可选中、可一键复制。
+           出错时把「出错原因 / 配置不合法 / CDP 预检没过」的原文摊在这里 —— 那才是要拿去搜、
+           去贴给人的东西。运行过程中的小提示仍走 toast。 -->
+      <div class="errbar" id="autoErrorBar" role="alert" hidden>
+        <div class="err-head">
+          <span class="err-title" id="autoErrorTitle">✗ 出错</span>
+          <span class="spacer"></span>
+          <button class="chip" id="autoErrorCopy" type="button" title="复制完整信息到剪贴板">⧉ 复制</button>
+          <button class="chip" id="autoErrorClose" type="button" aria-label="关闭">✕</button>
+        </div>
+        <pre class="err-body" id="autoErrorBody"></pre>
+      </div>
+
+      <!-- 外层：三个主字段就地可编辑（日常唯一要动的东西）；运行参数走弹窗 -->
       <div class="task-summary" id="taskSummary">
         <div class="ts-head">
           <h3>任务配置</h3>
           <span class="spacer"></span>
           <button class="chip" id="autoEditTask" type="button" aria-haspopup="dialog"
-                  title="打开表单，编辑任务目标、起始 URL、输入变量与运行参数">✎ 编辑配置</button>
+                  title="打开表单，编辑步数上限、节奏、浏览器内核与模式、窗口尺寸">⚙ 运行参数</button>
         </div>
         <div class="ts-scenarios">
           <span class="ts-label">演示场景</span>
           <div class="chips" id="autoScenarios" role="group" aria-label="内置演示场景"></div>
         </div>
+        <div class="ts-edit auto-config">
+          <div class="field">
+            <label for="autoGoal">任务目标</label>
+            <textarea id="autoGoal" rows="3" placeholder="用一句完整的话说清要达成什么，例如：在收件箱里找到招商银行信用卡中心发来的 9 月电子对账单邮件，点击那一行的「归档」按钮" spellcheck="false"></textarea>
+          </div>
+          <div class="field">
+            <label for="autoUrl">起始 URL</label>
+            <input type="text" id="autoUrl" placeholder="http://localhost:3000/demo/mailbox.html" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label>输入变量 <span class="hint">fill / press / goto 等动作的文本来源，动作确定后经「文本」补问挑选（select 的选项名与 press 的常用键名自动加入候选）</span></label>
+            <div id="autoVars" class="vars-box"></div>
+            <button class="chip" id="autoAddVar" type="button">＋ 添加变量</button>
+          </div>
+        </div>
         <div class="ts-body" id="taskSummaryBody"></div>
+        <!-- 开跑前检查（Wave 0 冻结骨架）：内容由 auto.js 的 renderPreflight() 填。
+             只提前告知差什么，**不禁用**开始按钮 —— 否则「配置不合法 → 错误条」那条
+             已验收的 e2e 契约（S8）会被顺手改掉。 -->
+        <div class="preflight" id="autoPreflight" role="status" aria-live="polite"></div>
         <div class="btn-row">
           <button class="btn-ghost" id="autoCloseBrowser" type="button">关闭浏览器</button>
           <button class="btn-ghost" id="autoStop" type="button" hidden>■ 中止</button>
@@ -83,7 +121,14 @@
           <h2>运行流水</h2>
           <div class="sess-dd" id="autoSessDd">
             <button class="sess-btn" id="autoSessBtn" type="button" aria-haspopup="listbox" title="切换当前/历史会话">会话 —</button>
-            <div class="sess-list" id="autoSessList" hidden></div>
+            <!-- Wave 0 冻结：面板从「列表本体」改成「过滤框 + 列表 + 底部工具条」的容器。
+                 auto.js 里 els.sessList.hidden 的开关对象要同步改成 #autoSessPanel。 -->
+            <div class="sess-panel" id="autoSessPanel" hidden>
+              <input type="text" class="sess-filter" id="sessFilter" placeholder="按会话 id / 任务目标过滤…" spellcheck="false" />
+              <div class="sess-list" id="autoSessList"></div>
+              <!-- 面板底部工具条（Wave 0 冻结）：条目 8 的清理入口填这里，class 名不许改 -->
+              <div class="sess-foot" id="sessFoot"></div>
+            </div>
           </div>
           <span class="spacer"></span>
           <button class="chip" id="autoExport" type="button" hidden
@@ -95,9 +140,11 @@
           <span class="auto-elapsed" id="autoElapsed">0s</span>
         </div>
         <div id="autoFlow" class="auto-flow" aria-live="polite">
+          <!-- 空态正文在 auto.js 的 renderFlow() 里有一份**逐字**副本，改一处必须改另一处；
+               两边都不得复述控件文案（禁用词表见 tests/e2e/run.js 的 S9.3 探针）。 -->
           <div class="out-empty">
             <div class="big" aria-hidden="true">▶</div>
-            点右上「✎ 编辑配置」填好任务后，回到这里点「▶ 打开浏览器并开始」。<br />
+            还没有步骤。先在上方「任务配置」里填好任务目标与起始 URL（或直接点一个演示场景），然后点下面的开始按钮。<br />
             左侧是本会话的树：会话 → 步骤 → 每次模型调用（首轮 / 补问 / 生成输入）；
             右侧随选中节点展示环境、截图、决策与完整请求响应。
           </div>
@@ -106,30 +153,18 @@
       </div>
     </div>
 
-    <!-- ---- 编辑表单（居中模态）----
-         输入框本体留在这里，id 全部不变：auto.js 直接读 .value，
-         所以打开/关闭弹窗不影响运行循环。取消时用快照回滚，保证摘要与实际值一致。 -->
+    <!-- ---- 运行参数（居中模态）----
+         任务目标 / 起始 URL / 输入变量已经移到外层就地编辑；这里只剩"偶尔才调一次"的运行参数。
+         输入框 id 全部不变（auto.js 直接读 .value），取消时用快照回滚。
+         出错信息统一进外层的 #autoErrorBar（可复制），这里不再有就地报错条。 -->
     <div class="modal-backdrop" id="taskModal" hidden role="dialog" aria-modal="true" aria-labelledby="taskModalTitle">
       <div class="modal task-modal">
         <div class="modal-head">
-          <h3 id="taskModalTitle">编辑任务配置</h3>
+          <h3 id="taskModalTitle">运行参数</h3>
           <button class="modal-close" id="taskModalClose" type="button" aria-label="关闭">✕</button>
         </div>
         <div class="modal-body">
           <div class="auto-config">
-            <div class="field">
-              <label for="autoGoal">任务目标</label>
-              <textarea id="autoGoal" rows="2" placeholder="用一句完整的话说清要达成什么，例如：在收件箱里找到招商银行信用卡中心发来的 9 月电子对账单邮件，点击那一行的「归档」按钮" spellcheck="false"></textarea>
-            </div>
-            <div class="field">
-              <label for="autoUrl">起始 URL</label>
-              <input type="text" id="autoUrl" placeholder="http://localhost:3000/demo/mailbox.html" spellcheck="false" />
-            </div>
-            <div class="field">
-              <label>输入变量 <span class="hint">fill / press / goto 等动作的文本来源，动作确定后经「文本」补问挑选（select 的选项名与 press 的常用键名自动加入候选）</span></label>
-              <div id="autoVars" class="vars-box"></div>
-              <button class="chip" id="autoAddVar" type="button">＋ 添加变量</button>
-            </div>
             <div class="field field-row">
               <div class="inline-field">
                 <label for="autoMaxSteps">步数上限</label>
@@ -145,9 +180,21 @@
               <div class="inline-field">
                 <label for="autoBrowser">浏览器内核</label>
                 <select id="autoBrowser">
-                  <option value="chrome" selected>Chrome（独立实例）</option>
-                  <option value="msedge">Edge（独立实例）</option>
+                  <option value="chrome" selected>Chrome</option>
+                  <option value="msedge">Edge</option>
                 </select>
+              </div>
+              <div class="inline-field">
+                <label for="autoBrowserMode">浏览器模式</label>
+                <select id="autoBrowserMode">
+                  <option value="isolated" selected>独立实例 · 每次全新（不碰日常浏览器）</option>
+                  <option value="persistent">持久登录 · 专用 profile（登录一次长期复用）</option>
+                  <option value="cdp">复用我的浏览器 · CDP 直连（要开调试端口）</option>
+                </select>
+              </div>
+              <div class="inline-field" id="autoCdpField" hidden>
+                <label for="autoCdpTarget">CDP 端点 <span class="hint">留空＝自动探测（推荐）</span></label>
+                <input type="text" id="autoCdpTarget" placeholder="留空即可；手填要 ws://127.0.0.1:9222/devtools/browser/&lt;uuid&gt;（http 形态在默认 profile 上会 404）" />
               </div>
               <div class="inline-field">
                 <label for="autoScreen">窗口尺寸</label>
@@ -163,8 +210,11 @@
               </div>
               <label class="check-inline"><input type="checkbox" id="autoScreenshot" checked />每步截图</label>
             </div>
+            <div class="warnbar" id="autoCdpWarn" hidden>
+              <div class="title">⚠ CDP 直连会操作用你正在使用的浏览器</div>
+              <p>任务会 attach 到你已开着调试端口的浏览器，复用它的真实登录态：<strong>运行期间那个窗口会被占用</strong>，窗口尺寸不会被改动，任务只在自己新建的标签页里操作，已开的标签页不会被导航。做法：在该浏览器里访问 <code>chrome://inspect/#remote-debugging</code> 勾选「Allow remote debugging for this browser instance」（Chrome 136+ 默认禁止远程调试；<strong>不要</strong>给浏览器加 <code>--remote-debugging-port</code> 启动，默认 profile 上会被忽略），端点框留空即可。手填只认 <code>ws://127.0.0.1:&lt;端口&gt;/devtools/browser/&lt;uuid&gt;</code>（profile 目录里 <code>DevToolsActivePort</code> 的第二行）——<code>http://</code> 那种形态在默认 profile 上必定 404。</p>
+            </div>
           </div>
-          <p class="field-tip task-error" id="taskError" role="alert" tabindex="-1" hidden></p>
         </div>
         <div class="modal-foot">
           <button class="btn-ghost" id="taskCancel" type="button">取消</button>
@@ -326,7 +376,7 @@
         标签页、弹窗、Cookie/Storage、请求拦截、追踪录像、视口，以及 <code>任务已完成</code> / <code>放弃</code> 两个终止态。</li>
         <li><b>参数</b>（Choice）：<b>从 state 的快照里自动解析出的全部 ref</b>，无需手写。
         解析器逐行匹配 <code>[ref=xxx]</code>，取该行 ref 前的角色描述（并补上行尾冒号后的文字），
-        自动标注 <code>【可交互】</code> 或 <code>【容器/静态】</code>，末尾附「无需元素」兜底项。
+        自动标注 <code>【可交互】</code> 或 <code>【容器/静态】</code>。
         改了 state 里的快照后，发送时会自动重新解析。</li>
         <li><b>是否已完成</b>（Noul）：0~1 的目标达成概率，可直接和阈值比较。</li>
       </ul>
@@ -346,7 +396,7 @@
 
   <!-- ============ 配置弹窗 ============ -->
   <div class="modal-backdrop" id="configModal" hidden role="dialog" aria-modal="true" aria-labelledby="configTitle">
-    <div class="modal">
+    <div class="modal config-modal">
       <div class="modal-head">
         <h3 id="configTitle">API 配置</h3>
         <button class="modal-close" id="configClose" type="button" aria-label="关闭">✕</button>
@@ -377,44 +427,70 @@
           <input type="text" id="cfgModelInput" hidden aria-label="自定义模型名" placeholder="自定义模型名，如 jev-latest" spellcheck="false" />
           <p class="field-tip" id="cfgModelTip"></p>
         </div>
-        <div class="llm-slot">
-          <div class="llm-slot-title">生成模型 <span class="llm-slot-sub">playwright-jev-agent「生成输入」动作用 · OpenAI 兼容</span></div>
-          <div class="field">
-            <label for="cfgLlmBase">Base URL</label>
-            <input type="text" id="cfgLlmBase" placeholder="https://api.openai.com/v1" spellcheck="false" />
+        <!-- 两个可选分节做成可折叠：配置弹窗的正文比一屏高（实测 948px vs ~700px 可视），
+             展开状态下最下面的「高级参数」会落在折叠线以下 —— 用户会以为它被删了（真实反馈）。
+             折叠后标题行始终在屏内，且**标题上直接写着当前值**，没有任何东西被藏起来。 -->
+        <details class="llm-slot" id="cfgLlmSlot">
+          <summary class="llm-slot-title">生成模型 <span class="llm-slot-sub">playwright-jev-agent「生成输入」动作用 · OpenAI 兼容</span><span class="slot-state" id="cfgLlmState">未配置</span></summary>
+          <div class="slot-body">
+            <div class="field">
+              <label for="cfgLlmBase">Base URL</label>
+              <input type="text" id="cfgLlmBase" placeholder="https://api.openai.com/v1" spellcheck="false" />
+            </div>
+            <div class="field">
+              <label for="cfgLlmKey">API Key</label>
+              <input type="password" id="cfgLlmKey" placeholder="sk-…" autocomplete="off" spellcheck="false" />
+            </div>
+            <div class="field">
+              <label for="cfgLlmModel">模型名</label>
+              <input type="text" id="cfgLlmModel" placeholder="gpt-4o-mini / qwen-turbo / deepseek-chat…" spellcheck="false" />
+              <p class="field-tip">只存浏览器 localStorage，请求时经本地服务透传到 <code>&lt;base&gt;/chat/completions</code>。不填则「生成输入」动作会失败并提示；与上方 Jev 提供商相互独立。</p>
+            </div>
           </div>
-          <div class="field">
-            <label for="cfgLlmKey">API Key</label>
-            <input type="password" id="cfgLlmKey" placeholder="sk-…" autocomplete="off" spellcheck="false" />
+        </details>
+        <details class="llm-slot" id="cfgTrimSlot">
+          <summary class="llm-slot-title">高级参数 <span class="llm-slot-sub">仅影响 playwright-jev-agent 的「参数」题</span><span class="slot-state" id="cfgTrimState">智能裁剪 开 · 上限 80 · 批次 3</span></summary>
+          <div class="slot-body">
+            <label class="check-row" for="cfgTrimOn">
+              <input type="checkbox" id="cfgTrimOn" />
+              <span>参数候选智能裁剪<em>元素太多时，按相关性只把前 N 个候选给 Jev（关掉则全量发出，超过接口 255 个选项上限会直接报错）</em></span>
+            </label>
+            <div class="trim-fields">
+              <div class="field">
+                <label for="cfgTrimLimit">候选元素上限</label>
+                <input type="number" id="cfgTrimLimit" min="10" max="250" step="10" />
+                <p class="field-tip">一页元素数超过 250 个时才启用裁剪，届时按相关性取前 N 个（10–250，默认 80）。</p>
+              </div>
+              <div class="field">
+                <label for="cfgTrimBatches">最多候选批次数</label>
+                <input type="number" id="cfgTrimBatches" min="0" max="5" step="1" />
+                <p class="field-tip">Jev 在前 N 个里找不到目标时，会选「其他」让我们展开下一批；这里限总共最多给几批（0–5，默认 3，即首批 + 最多 2 次展开；0 = 不附「其他」项）。</p>
+              </div>
+            </div>
           </div>
-          <div class="field">
-            <label for="cfgLlmModel">模型名</label>
-            <input type="text" id="cfgLlmModel" placeholder="gpt-4o-mini / qwen-turbo / deepseek-chat…" spellcheck="false" />
-            <p class="field-tip">只存浏览器 localStorage，请求时经本地服务透传到 <code>&lt;base&gt;/chat/completions</code>。不填则「生成输入」动作会失败并提示；与上方 Jev 提供商相互独立。</p>
-          </div>
-        </div>
-        <div class="llm-slot">
-          <div class="llm-slot-title">高级参数 <span class="llm-slot-sub">仅影响 playwright-jev-agent 的「参数」题</span></div>
-          <label class="check-row" for="cfgTrimOn">
-            <input type="checkbox" id="cfgTrimOn" />
-            <span>参数候选智能裁剪<em>元素太多时，按相关性只把前 N 个候选给 Jev（关掉则全量发出，超过接口 255 个选项上限会直接报错）</em></span>
-          </label>
-          <div class="field">
-            <label for="cfgTrimLimit">候选元素上限</label>
-            <input type="number" id="cfgTrimLimit" min="10" max="250" step="10" />
-            <p class="field-tip">一页元素数超过 250 个时才启用裁剪，届时按相关性取前 N 个（10–250，默认 80）。</p>
-          </div>
-          <div class="field">
-            <label for="cfgTrimBatches">最多候选批次数</label>
-            <input type="number" id="cfgTrimBatches" min="0" max="5" step="1" />
-            <p class="field-tip">Jev 在前 N 个里找不到目标时，会选「其他」让我们展开下一批；这里限总共最多给几批（0–5，默认 3，即首批 + 最多 2 次展开；0 = 不附「其他」项）。</p>
-          </div>
-        </div>
+        </details>
       </div>
       <div class="modal-foot">
         <button class="btn-ghost" id="configTest" type="button">🔌 测试连通性</button>
         <button class="btn-ghost" id="configCancel" type="button">取消</button>
         <button class="btn-primary" id="configSave" type="button">保存并应用</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 通用确认弹窗骨架（Wave 0 冻结）：删除会话 / 清理记录等破坏性操作走这里。
+       原生 window.confirm 与本页自绘弹窗风格断层，且塞不下「这条 11 步、失败 3 次」这类信息。
+       逻辑在 util.js 的 confirmDialog()。 -->
+  <div class="modal-backdrop" id="confirmModal" hidden role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+    <div class="modal confirm-modal">
+      <div class="modal-head">
+        <h3 id="confirmTitle">确认</h3>
+        <button class="modal-close" id="confirmClose" type="button" aria-label="关闭">✕</button>
+      </div>
+      <div class="modal-body" id="confirmBody"></div>
+      <div class="modal-foot">
+        <button class="btn-ghost" id="confirmCancel" type="button">取消</button>
+        <button class="btn-primary" id="confirmOk" type="button">确认</button>
       </div>
     </div>
   </div>
@@ -426,12 +502,12 @@
 <script src="presets.js?v=20260924a"></script>
 <script src="js/util.js?v=20260924l"></script>
 <script src="js/ref-funnel.js?v=20260924j"></script>
-<script src="js/auto-core.js?v=20260925a"></script>
+<script src="js/auto-core.js?v=20260926a"></script>
 <script src="js/anno.js?v=20260924m"></script>
 <script src="js/state-editor.js?v=20260924a"></script>
 <script src="js/questions.js?v=20260924a"></script>
 <script src="js/output.js?v=20260924a"></script>
-<script src="js/app.js?v=20260924j"></script>
-<script src="js/auto.js?v=20260925b"></script>
+<script src="js/app.js?v=20260927a"></script>
+<script src="js/auto.js?v=20260926f"></script>
 </body>
 </html>

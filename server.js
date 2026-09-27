@@ -219,6 +219,20 @@ function runsIndexLoad() {
   return runsIndexCache;
 }
 
+/* 会话记录 API 契约（Wave 0 冻结）：
+ *   GET    /api/runs                  → { ok, runs:[索引条目] }               （已有）
+ *   GET    /api/runs/:id              → 记录全量 / 404 / 503                 （已有）
+ *   PUT    /api/runs/:id              → { ok:true }                          （已有）
+ *   DELETE /api/runs/:id              → { ok:true }（幂等）                  （已有）
+ *   DELETE /api/runs?before=<ISO8601> → { ok:true, deleted:N }               （条目 8）
+ *       只删 meta.startedAt 严格早于 before 的记录；before 缺失/空/不可解析 → 400。
+ *       绝不能把「参数没解析出来」当成「删全部」。
+ *   POST   /api/browser/close         → { ok, mode, attached, closed }        （条目 10）
+ *       closed=false 表示之前压根没有开着的浏览器 → 前端不得提示「浏览器已关闭」。
+ *
+ * 注意路由：本函数收到的是 pathname（server.js 顶部 req.url.split('?')[0]），
+ * 查询串要从 req.url 自己取，例如 new URL(req.url, 'http://x').searchParams.get('before')。
+ */
 function handleRuns(req, res, pathname) {
   applyCors(res);
   const rest = pathname.slice('/api/runs'.length).replace(/^\/+/, '');
@@ -226,13 +240,52 @@ function handleRuns(req, res, pathname) {
   const err = (code, msg) => sendJson(res, code, { ok: false, error: { message: msg } });
 
   if (req.method === 'GET' && !id) return sendJson(res, 200, { ok: true, runs: runsIndexLoad() });
+
+  if (req.method === 'DELETE' && !id) {
+    /* 条目 8：按时间边界批量清理。护栏 —— before 缺失 / 空串 / Date.parse 为 NaN 一律 400，
+     * 绝不能把「参数没解析出来」当成「删全部」。查询串要从 req.url 自己取：传进来的
+     * pathname 已被 split('?') 砍掉。 */
+    const beforeRaw = new URL(req.url, 'http://localhost').searchParams.get('before');
+    const beforeMs = beforeRaw ? Date.parse(beforeRaw) : NaN;
+    if (!beforeRaw || Number.isNaN(beforeMs)) {
+      return err(400, '查询参数 before 缺失或不是合法时间（ISO8601）：' + JSON.stringify(beforeRaw));
+    }
+    const idx = runsIndexLoad();
+    const doomed = idx.filter((x) => {
+      const t = Date.parse(x.startedAt);   /* 无 startedAt / 坏值 → NaN，绝不误删 */
+      return !Number.isNaN(t) && t < beforeMs;   /* 严格早于 */
+    });
+    if (!doomed.length) return sendJson(res, 200, { ok: true, deleted: 0 });   /* 幂等 */
+    const doomedIds = new Set(doomed.map((x) => x.id));
+    let pending = doomed.length;
+    let deleted = 0;
+    doomed.forEach((x) => {
+      fs.unlink(path.join(RUNS_DIR, x.id + '.json'), (e) => {
+        if (!e || e.code === 'ENOENT') deleted++;   /* ENOENT：索引里的幽灵条目，一并清理 */
+        if (--pending === 0) {                      /* 全部删完再重建索引，避免中间态落盘 */
+          runsIndexCache = runsIndexLoad().filter((y) => !doomedIds.has(y.id));
+          runsIndexSave();
+          sendJson(res, 200, { ok: true, deleted });
+        }
+      });
+    });
+    return;
+  }
+
   if (!RUN_ID_RE.test(id)) return err(400, '会话 id 不合法：' + id);
   const file = path.join(RUNS_DIR, id + '.json');
 
   if (req.method === 'GET') {
     fs.readFile(file, (e, data) => {
       if (e) {
-        /* 惰性自愈：索引里有但文件被手删（绕过 API）→ 顺手剔除幽灵条目再 404 */
+        /* 只有「文件确实不在了」才是幽灵条目，才顺手剔除（绕过 API 手删的情况）。
+         * 其它读错误（Windows 上索引器/杀软抓着文件 → EBUSY/EPERM；并发 autosave 的
+         * PUT 正把新 tmp 换上来；同名目录 → EISDIR）**不动索引** —— 那些是暂时的，
+         * 一旦当成删除，这个会话就永久从下拉里消失了（惰性重建只在 index.json 本身
+         * 读不出来时才跑，而记录文件还在磁盘上）。 */
+        if (e.code !== 'ENOENT') {
+          return err(503, '会话文件暂时读不出来（' + (e.code || e.message) + '），请稍后重试：' + id);
+        }
         const idx = runsIndexLoad();
         if (idx.some((x) => x.id === id)) {
           runsIndexCache = idx.filter((x) => x.id !== id);
@@ -318,8 +371,7 @@ function readJsonBody(req, res, cb) {
   });
 }
 
-function handleBrowser(req, res, action) {
-  const d = getDriver();
+async function handleBrowser(req, res, action) {  const d = getDriver();
   if (!d) {
     applyCors(res);
     return sendJson(res, 200, { ok: false, code: 'NO_DRIVER', error: { message: 'browser-driver 模块不可用' } });
@@ -330,6 +382,19 @@ function handleBrowser(req, res, action) {
     applyCors(res);
     return sendJson(res, 200, Object.assign({ ok: true, session: session }, d.status()));
   }
+  /* CDP 预检（只读）：默认 profile 里有没有 DevToolsActivePort，**并且真探一次端点** ——
+   * 只有文件不够（陈旧残留 / Chrome 136+ 绑了端口却拒绝 DevTools）。前端在选 cdp 模式时
+   * 先问一次，把「连不上」提前说清楚，而不是等 run 失败再翻译报错。 */
+  if (action === 'cdp-probe') {
+    applyCors(res);
+    let probe = { available: false, reason: 'no-driver', channel: null, endpoint: null, hint: '' };
+    try {
+      probe = d.cdpProbe ? await d.cdpProbe() : probe;
+    } catch (e) {
+      probe = { available: false, reason: 'error', channel: null, endpoint: null, hint: String(e && e.message || e) };
+    }
+    return sendJson(res, 200, Object.assign({ ok: true, session: session }, probe));
+  }
   if (req.method !== 'POST') return sendJson(res, 405, { ok: false, error: { message: 'Method Not Allowed' } });
 
   readJsonBody(req, res, async (payload) => {
@@ -337,17 +402,38 @@ function handleBrowser(req, res, action) {
     try {
       if (action === 'open') {
         const browser = ['chrome', 'msedge'].includes(payload.browser) ? payload.browser : undefined;
+        /* 浏览器模式（连接方式，与内核正交；前端 mode 指定，缺省 isolated）：
+         *   isolated   — 每次起一个干净实例（默认，最收敛）
+         *   persistent — 仍是我们自己起的窗口，但 profile 落盘（登录一次长期复用）
+         *   cdp        — attach 到用户已开着调试端口的浏览器，复用其真实登录态。
+         *                **窗口类动作在此模式下全部跳过**：那是用户的窗口与视口，
+         *                不是我们起的实例（driver 侧同样会拒绝，双层保险）。 */
+        const browserMode = payload.mode == null ? 'isolated' : String(payload.mode);
+        if (!['isolated', 'persistent', 'cdp'].includes(browserMode)) {
+          return sendJson(res, 200, { ok: false, error: '不支持的浏览器模式：' + JSON.stringify(browserMode.slice(0, 40)) + '（可选 isolated / persistent / cdp）' });
+        }
         /* 窗口模式三档（前端 windowMode 指定，缺省 max）：
          *   max  — 最大化：窗口铺满屏幕（保留浏览器工具栏，任务栏照常）★默认
          *   full — 真全屏：CDP fullscreen，连任务栏一起盖住、无工具栏
          *   size — 指定页面视口尺寸（resize）
          * native=true 时按物理像素渲染（忽略系统缩放），max/full 都适用。
          * 前端同时传 width/height 作目标尺寸参考（size 档直接用，其余用于校验）。 */
-        const mode = ['full', 'max', 'size'].includes(payload.windowMode) ? payload.windowMode : 'max';
-        const maximize = mode !== 'size';
+        const windowMode = ['full', 'max', 'size'].includes(payload.windowMode) ? payload.windowMode : 'max';
+        const attach = browserMode === 'cdp';
+        const maximize = !attach && windowMode !== 'size';
         const native = maximize && payload.native === true;
-        out = await d.open(session, String(payload.url || ''), { browser, maximize, native });
-        if (out && out.ok && mode === 'full') {
+        out = await d.open(session, String(payload.url || ''), {
+          browser: browser,
+          mode: browserMode,
+          cdp: payload.cdp == null ? undefined : String(payload.cdp),
+          maximize: maximize,
+          native: native,
+        });
+        if (attach) {
+          /* 附身模式：不碰用户的窗口几何，什么都不用校正 —— 直接把它标记出来，
+           * 前端据此提示「运行期间那个浏览器窗口会被占用」。 */
+          if (out && out.ok) out.windowSkipped = true;
+        } else if (out && out.ok && windowMode === 'full') {
           /* 真全屏：先按最大化开窗（CDP 全屏失败时仍是体面的最大化窗口），
            * 再经 CDP 切到 fullscreen 态，最后实测视口确认生效。 */
           const r = await d.fullscreen(session);
@@ -364,7 +450,7 @@ function handleBrowser(req, res, action) {
               }
             } catch (_) { /* 校验异常不推翻已生效的全屏 */ }
           }
-        } else if (out && out.ok && mode === 'max') {
+        } else if (out && out.ok && windowMode === 'max') {
           const ref = d._test.parseWindowSize(payload.width, payload.height);
           if (ref) {
             try {
@@ -399,13 +485,23 @@ function handleBrowser(req, res, action) {
          * 标注画在图上（public/js/anno.js），被驱动页面里不留痕迹。 */
         const ref = payload.ref ? String(payload.ref) : null;
         const pos = ref ? await d.rect(session, ref) : null;
-        out = await d.screenshot(session, session);
+        /* 文件名用前端给的每步名（step-1 / step-2…）：原先这里把 session 又当 name 传了一次，
+         * 于是全部截图都落到同一个 <session>.png 上、后一步覆盖前一步，driver 里
+         * 「文件保留在 data/ 便于排查留证」的意图落空。session 作兜底（并发会话不撞名）。 */
+        out = await d.screenshot(session, payload.name ? String(payload.name) : session);
         if (out && out.ok && pos && pos.ok) {
           out.rect = pos.rect;
           out.viewport = pos.viewport;
         }
       }
-      else if (action === 'close') out = await d.close(session);
+      else if (action === 'close') {
+        out = await d.close(session);
+        /* 附身模式只断开连接：用户那个浏览器不是我们起的，也不该被我们关掉 —— 说清楚，
+         * 免得「浏览器已关闭」的提示让人以为自己的窗口没了。 */
+        if (out && out.ok && out.attached) out.message = '已断开连接（你的浏览器仍在运行，标签页保留）';
+        /* 本来就没开着（driver 的 closed=false）→ 别说「已关闭」，如实告诉用户无需关闭。 */
+        else if (out && out.ok && !out.closed) out.message = '当前没有开着的浏览器（无需关闭）';
+      }
       else return sendJson(res, 404, { ok: false, error: { message: 'Unknown browser action' } });
     } catch (e) {
       out = { ok: false, error: String(e && e.message || e) };

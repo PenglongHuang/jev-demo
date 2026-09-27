@@ -76,6 +76,56 @@ const Config = (() => {
     if (badge) badge.textContent = PROVIDERS[current.provider]?.shortLabel || '官网';
   }
 
+  /* ---------- 可折叠分节：生成模型 / 高级参数 ----------
+   * 摘要行右侧那个胶囊写着节内的当前值 —— 收起也一眼看得见"里面是什么、现在是什么"，
+   * 这正是「高级参数怎么不见了」那类投诉的解药（原先它是被挤到弹窗折叠线以下了）。
+   * 展开状态记在 localStorage：常用的人不用每次重开。 */
+  const SLOT_KEY = 'jev-cfg-open';
+  function readSlotOpen() {
+    try { return JSON.parse(localStorage.getItem(SLOT_KEY) || '{}') || {}; } catch (_) { return {}; }
+  }
+  function applySlotOpen() {
+    const st = readSlotOpen();
+    [['cfgLlmSlot', 'llm'], ['cfgTrimSlot', 'trim']].forEach(([id, k]) => {
+      const d = document.getElementById(id);
+      if (d) d.open = Boolean(st[k]);
+    });
+  }
+  function bindSlotState() {
+    [['cfgLlmSlot', 'llm'], ['cfgTrimSlot', 'trim']].forEach(([id, k]) => {
+      const d = document.getElementById(id);
+      if (!d) return;
+      d.addEventListener('toggle', () => {
+        try {
+          const st = readSlotOpen();
+          st[k] = d.open;
+          localStorage.setItem(SLOT_KEY, JSON.stringify(st));
+        } catch (_) { /* 隐私模式：不记也行 */ }
+      });
+    });
+  }
+  /* 展开某一节（保存校验失败时用：报错指向节内的字段，却让它收着就白报了） */
+  function openSlot(kind) {
+    const d = document.getElementById(kind === 'llm' ? 'cfgLlmSlot' : 'cfgTrimSlot');
+    if (d && !d.open) { d.open = true; try { d.scrollIntoView({ block: 'nearest' }); } catch (_) {} }
+  }
+  function refreshSlotStates() {
+    const llm = document.getElementById('cfgLlmState');
+    if (llm) {
+      const base = document.getElementById('cfgLlmBase').value.trim();
+      const key = document.getElementById('cfgLlmKey').value.trim();
+      const model = document.getElementById('cfgLlmModel').value.trim();
+      llm.textContent = (base && key && model) ? '已配置 · ' + model : '未配置（点开填写）';
+    }
+    const trim = document.getElementById('cfgTrimState');
+    if (trim) {
+      const on = document.getElementById('cfgTrimOn').checked;
+      trim.textContent = on
+        ? '智能裁剪 开 · 上限 ' + document.getElementById('cfgTrimLimit').value + ' · 批次 ' + document.getElementById('cfgTrimBatches').value
+        : '智能裁剪 关（全量发送）';
+    }
+  }
+
   function init() {
     loadProvider(localStorage.getItem(STORAGE.provider) || 'official');
 
@@ -100,6 +150,14 @@ const Config = (() => {
       refreshFormForProvider(newId, false);
     });
     document.getElementById('configTest').addEventListener('click', testConnectivity);
+    /* 节内任何改动都刷新摘要行上的当前值 */
+    ['cfgLlmBase', 'cfgLlmKey', 'cfgLlmModel', 'cfgTrimOn', 'cfgTrimLimit', 'cfgTrimBatches'].forEach((id) => {
+      const n = document.getElementById(id);
+      if (!n) return;
+      n.addEventListener('input', refreshSlotStates);
+      n.addEventListener('change', refreshSlotStates);
+    });
+    bindSlotState();
   }
 
   function open() {
@@ -120,6 +178,8 @@ const Config = (() => {
     document.getElementById('cfgTrimOn').checked = current.paramTrim.on;
     document.getElementById('cfgTrimLimit').value = String(current.paramTrim.limit);
     document.getElementById('cfgTrimBatches').value = String(current.paramTrim.maxTranches);
+    applySlotOpen();
+    refreshSlotStates();
     refreshFormForProvider(draft.provider, true);
     document.getElementById('configModal').hidden = false;
     setTimeout(() => keyInp.focus(), 50);
@@ -257,13 +317,18 @@ const Config = (() => {
       localStorage.setItem(STORAGE.customEndpoint, url);
     }
 
-    /* 生成模型槽位（可选功能：playwright-jev-agent「生成输入」）：填了任一字段就要求整组完整 */
+    /* 生成模型槽位（可选功能：playwright-jev-agent「生成输入」）：填了任一字段就要求整组完整。
+     * 报错时把那节展开 —— 收着报错等于让用户对着空屏找字段。 */
     const llmBase = document.getElementById('cfgLlmBase').value.trim();
     const llmKey = document.getElementById('cfgLlmKey').value.trim();
     const llmModel = document.getElementById('cfgLlmModel').value.trim();
     if (llmBase || llmKey || llmModel) {
-      if (!llmBase || !llmKey || !llmModel) return toast('生成模型：Base URL、API Key、模型名 需整组填写');
+      if (!llmBase || !llmKey || !llmModel) {
+        openSlot('llm');
+        return toast('生成模型：Base URL、API Key、模型名 需整组填写');
+      }
       if (!/^(https:\/\/|http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\/?)/i.test(llmBase)) {
+        openSlot('llm');
         return toast('生成模型 Base URL 必须以 https:// 开头（本机调试可用 http://localhost）');
       }
     }
@@ -273,8 +338,14 @@ const Config = (() => {
     const trimLimit = Number(document.getElementById('cfgTrimLimit').value);
     const trimBatches = Number(document.getElementById('cfgTrimBatches').value);
     if (document.getElementById('cfgTrimOn').checked) {
-      if (!isFinite(trimLimit) || trimLimit < 10 || trimLimit > 250) return toast('候选元素上限需在 10–250 之间（接口硬上限 255）');
-      if (!isFinite(trimBatches) || trimBatches < 0 || trimBatches > 5) return toast('最多候选批次数需在 0–5 之间');
+      if (!isFinite(trimLimit) || trimLimit < 10 || trimLimit > 250) {
+        openSlot('trim');
+        return toast('候选元素上限需在 10–250 之间（接口硬上限 255）');
+      }
+      if (!isFinite(trimBatches) || trimBatches < 0 || trimBatches > 5) {
+        openSlot('trim');
+        return toast('最多候选批次数需在 0–5 之间');
+      }
     }
     localStorage.setItem(STORAGE.paramTrim, JSON.stringify(normalizeTrim({
       on: document.getElementById('cfgTrimOn').checked,
@@ -428,6 +499,7 @@ const PresetTabs = (() => {
 /* ---------- 主应用 ---------- */
 const App = (() => {
   const sendBtn = document.getElementById('send');
+  const sendTopBtn = document.getElementById('sendTop');   // 顶栏主操作（条目 4，仅 Demo 模式）
   let userActed = false;   // 用户已手动选择场景后，启动时的自动恢复不再覆盖
 
   /* ---------- API 地址探测 ---------- */
@@ -600,11 +672,27 @@ const App = (() => {
     }
   }
 
+  /* setBusy 同时管两个发送按钮的启停（#send 的文案由 sendLabel 管，#sendTop 文案恒定） */
   function setBusy(b) {
     sendBtn.disabled = b;
+    if (sendTopBtn) sendTopBtn.disabled = b;
     document.getElementById('spin').style.display = b ? 'inline-block' : 'none';
     document.getElementById('sendLabel').textContent = b ? '请求中…' : '发送给 Jev';
     if (b) setStatus('请求中', 'busy');
+  }
+
+  /* ---------- 顶栏主操作：只跟模式走 ----------
+   * 卡片里的「发送给 Jev」在 1366×768 下位于折线下方（实测 top=962），而顶栏是 sticky、
+   * 永远在视野里 —— 所以 Demo 模式把同一个动作再挂一个到顶栏。auto 模式隐藏它：
+   * 那个模式的入口在「任务配置」里，顶栏留着反而误导。
+   * 模式状态不在这个文件里（switchMode 在 auto.js 的 Auto IIFE 内），所以只读 DOM 上
+   * 已生效的 .seg-btn.active —— 顺序上 auto.js 的监听器先跑完，冒泡到这里的永远是最终态。 */
+  function currentMode() {
+    const active = document.querySelector('#modeSeg .seg-btn.active');
+    return (active && active.dataset.mode) || 'demo';
+  }
+  function syncSendTop() {
+    if (sendTopBtn) sendTopBtn.hidden = currentMode() !== 'demo';
   }
 
   /* ---------- 启动自检 ---------- */
@@ -647,6 +735,10 @@ const App = (() => {
   /* ---------- 事件绑定 ---------- */
   function bindEvents() {
     sendBtn.onclick = send;
+    if (sendTopBtn) sendTopBtn.onclick = send;
+    /* 切模式时同步顶栏按钮。#modeSeg 的 click 在 auto.js 的 per-button 监听器之后到达这里
+       （冒泡），读到的是已经切换完的 active 态；auto.js 不需要知道这件事。 */
+    document.getElementById('modeSeg').addEventListener('click', syncSendTop);
 
     document.addEventListener('keydown', (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && !sendBtn.disabled) {
@@ -692,6 +784,7 @@ const App = (() => {
   function init() {
     Config.init();
     bindEvents();
+    syncSendTop();   // 首屏默认就是 Demo 模式：不在这里同步一次，顶栏按钮会永远是 hidden
     Questions.initDragAndDrop();
     PresetTabs.build();
     PresetTabs.loadFirst();
