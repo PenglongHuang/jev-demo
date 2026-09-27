@@ -3,34 +3,11 @@ const test = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const RUNS_DIR = path.join(ROOT, 'data', 'runs');
 const AutoCore = require('../public/js/auto-core.js');
-
-function startServer() {
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: Object.assign({}, process.env, { PORT: String(port) }),
-    stdio: 'ignore', windowsHide: true,
-  });
-  const base = 'http://127.0.0.1:' + port;
-  const wait = async () => {
-    for (let i = 0; i < 150; i++) {
-      try { const r = await fetch(base + '/api/health'); if (r.ok) return base; }
-      catch (_) { /* 未监听 */ }
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    throw new Error('server 未就绪');
-  };
-  return { child, base, wait };
-}
-
-const req = (base, method, p, body) => fetch(base + p, {
-  method, headers: body ? { 'Content-Type': 'application/json' } : {},
-  body: body ? JSON.stringify(body) : undefined,
-}).then(async (r) => ({ status: r.status, data: await r.json().catch(() => null) }));
+const { startServer, req } = require('./helpers/server.js');
 
 const rec = (id, over) => Object.assign({
   meta: { id, goal: '整理邮箱', endState: 'done', stepCount: 1, startedAt: '2026-09-25T11:00:00Z', endedAt: '2026-09-25T11:01:00Z' },

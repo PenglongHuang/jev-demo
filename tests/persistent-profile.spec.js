@@ -11,10 +11,10 @@ const test = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const driver = require(path.join(ROOT, 'browser-driver.js'));
+const { startServer } = require('./helpers/server.js');
 const PROFILE_DIR = path.join(ROOT, 'data', driver._test.PROFILE_DIR);
 const SENTINEL = path.join(PROFILE_DIR, 'jev-profile-sentinel.txt');
 const SESSION = 'jevprof' + Date.now().toString(36);
@@ -29,16 +29,10 @@ test.before(async () => {
   engineOk = Boolean(st.available);
   if (!engineOk) { skipReason = 'playwright-cli 不可用'; return; }
 
-  const port = 36000 + Math.floor(Math.random() * 20000);
-  serverBase = 'http://127.0.0.1:' + port;
-  serverChild = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: Object.assign({}, process.env, { PORT: String(port) }),
-    stdio: 'ignore', windowsHide: true,
-  });
-  for (let i = 0; i < 150; i++) {
-    try { const r = await fetch(serverBase + '/api/health'); if (r.ok) break; } catch (_) { /* 未监听 */ }
-    await new Promise((r) => setTimeout(r, 100));
-  }
+  const srv = startServer(36000);
+  serverChild = srv.child;
+  serverBase = srv.base;
+  await srv.wait();
 });
 
 test.after(async () => {

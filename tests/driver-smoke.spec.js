@@ -8,11 +8,11 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const net = require('net');
-const { spawn } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const driver = require(path.join(ROOT, 'browser-driver.js'));
 const { parseSnapshotRefs } = require(path.join(ROOT, 'public', 'js', 'util.js'));
+const { startServer } = require('./helpers/server.js');
 
 const SESSION = 'jevsmoke' + Date.now().toString(36);
 /* 冒烟用哪个内核：默认跟随应用默认（chrome），JEVDEMO_BROWSER=msedge 可覆盖。
@@ -25,20 +25,10 @@ let engineOk = false;
 
 test.before(async () => {
   /* 起静态服务复用 server.js（随机端口） */
-  const port = 31000 + Math.floor(Math.random() * 8000);
-  serverBase = 'http://127.0.0.1:' + port;
-  serverChild = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: Object.assign({}, process.env, { PORT: String(port) }),
-    stdio: 'ignore', windowsHide: true,
-  });
-  for (let i = 0; i < 150; i++) {
-    try {
-      const r = await fetch(serverBase + '/api/health');
-      if (r.ok && (await r.json()).ok) break;
-    } catch (_) { /* 尚未监听 */ }
-    await new Promise((r) => setTimeout(r, 100));
-    if (i === 49) throw new Error('冒烟前置：server 未就绪');
-  }
+  const srv = startServer(31000);
+  serverChild = srv.child;
+  serverBase = srv.base;
+  await srv.wait();
   const st = await driver.status();
   engineOk = Boolean(st.available);
 });

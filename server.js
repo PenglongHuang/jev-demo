@@ -409,8 +409,9 @@ async function handleBrowser(req, res, action) {  const d = getDriver();
          *                **窗口类动作在此模式下全部跳过**：那是用户的窗口与视口，
          *                不是我们起的实例（driver 侧同样会拒绝，双层保险）。 */
         const browserMode = payload.mode == null ? 'isolated' : String(payload.mode);
-        if (!['isolated', 'persistent', 'cdp'].includes(browserMode)) {
-          return sendJson(res, 200, { ok: false, error: '不支持的浏览器模式：' + JSON.stringify(browserMode.slice(0, 40)) + '（可选 isolated / persistent / cdp）' });
+        /* 白名单取自 driver 的 MODES（唯一权威）：加模式只改那一处，这里不再抄字面量 */
+        if (!d.MODES || !d.MODES[browserMode]) {
+          return sendJson(res, 200, { ok: false, error: '不支持的浏览器模式：' + JSON.stringify(browserMode.slice(0, 40)) + '（可选 ' + Object.keys(d.MODES || {}).join(' / ') + '）' });
         }
         /* 窗口模式三档（前端 windowMode 指定，缺省 max）：
          *   max  — 最大化：窗口铺满屏幕（保留浏览器工具栏，任务栏照常）★默认

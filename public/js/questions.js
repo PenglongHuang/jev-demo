@@ -426,22 +426,14 @@ const Questions = (() => {
     });
 
     el.querySelector('.q-del').onclick = () => {
-      const parent = el.parentNode;
-      if (!parent) return;             /* 已不在文档里（重复点）：没有再删一次的道理 */
       const gen = listGen;             /* 记下这一代列表，撤销时用它判断列表是否已被重建 */
-      const next = el.nextSibling;     /* 原位恢复锚点：null 表示它是最后一条（撤销时 append 回去） */
       const name = el.querySelector('[data-f="name"]').value.trim() || '未命名问题';
-      el.remove();
       /* 撤销：插回同一个活节点（不是 clone）—— 里面的输入值、事件监听、
-       * q-crit 结构与 dataset 全都还在，撤销后可以继续编辑。 */
-      undoToast('已删除问题「' + name + '」', () => {
-        /* 与 state 字段同一条不变量：撤销窗口里若 Questions.clear()/restoreAll()
-         * 重建过列表（例如再点一次预设），这条问题已经回来了；
-         * 旧节点再插一次就是重名问题，buildQuestions 会抛「问题 id 重复」。代际变了就不插。 */
-        if (gen !== listGen) return;
-        if (next && next.parentNode === parent) parent.insertBefore(el, next);
-        else parent.appendChild(el);
-      });
+       * q-crit 结构与 dataset 全都还在，撤销后可以继续编辑。
+       * stillValid：撤销窗口里若 Questions.clear()/restoreAll() 重建过列表
+       * （例如再点一次预设），这条问题已经回来了；旧节点再插一次就是重名问题，
+       * buildQuestions 会抛「问题 id 重复」。代际变了就不插。 */
+      removeWithUndo(el, '已删除问题「' + name + '」', { stillValid: () => gen === listGen });
     };
     el.querySelector('[data-f="type"]').onchange = () => syncCriteria(el, true);
     el.querySelector('[data-f="name"]').addEventListener('input', () => refreshQHead(el));

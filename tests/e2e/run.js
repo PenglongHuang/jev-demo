@@ -114,6 +114,18 @@ const api = (p, body) => fetch(ORIGIN + p, {
   body: body ? JSON.stringify(body) : undefined,
 }).then((r) => r.json());
 
+/* 页内取值唯一通道：把一段 JS 交给 playwright-cli 的 eval，结果走 base64 标记回来。
+ * 标记通道是为了避开 CLI 的引号封装与 stdout 转义歧义。pageApi（页内发请求）与
+ * uiProbe（页内读 DOM）都走它 —— 此前两处各写一遍这 10 行，通道一旦要修就会漏一处。 */
+async function evalInPage(js, label) {
+  const out = await rawExec(['eval', js, '--json']);
+  const env = driver._test.parseEnvelope({ code: 0, stdout: out, stderr: '' });
+  if (!env.ok) throw new Error(label + ' eval 失败：' + env.error);
+  const m = String(env.result).match(/E2ERES([A-Za-z0-9+/=]*)E2ERES/);
+  if (!m) throw new Error(label + ' 无标记输出：' + String(env.result).slice(0, 160));
+  return Buffer.from(m[1], 'base64').toString('utf8');
+}
+
 async function pageApi(path, bodyObj) {
   /* 请求体以单引号 JS 字面量嵌入（值仅含 ASCII 安全字符），页内再 JSON.stringify，
    * 避免外层 CLI 引号封装与双引号冲突；响应走 base64 通道避开转义歧义 */
@@ -121,13 +133,9 @@ async function pageApi(path, bodyObj) {
   const js = "fetch('" + path + "',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(" + lit + ")})"
     + ".then(function(r){return r.text()})"
     + ".then(function(t){return 'E2ERES'+btoa(unescape(encodeURIComponent(t)))+'E2ERES'})";
-  const out = await rawExec(['eval', js, '--json']);
-  const env = driver._test.parseEnvelope({ code: 0, stdout: out, stderr: '' });
-  if (!env.ok) throw new Error('pageApi eval 失败：' + env.error);
-  const m = String(env.result).match(/E2ERES([A-Za-z0-9+/=]*)E2ERES/);
-  if (!m) throw new Error('pageApi 无标记输出：' + String(env.result).slice(0, 160));
-  try { return JSON.parse(Buffer.from(m[1], 'base64').toString('utf8')); }
-  catch (e) { throw new Error('pageApi 返回非 JSON：' + Buffer.from(m[1], 'base64').toString('utf8').slice(0, 160)); }
+  const text = await evalInPage(js, 'pageApi');
+  try { return JSON.parse(text); }
+  catch (e) { throw new Error('pageApi 返回非 JSON：' + text.slice(0, 160)); }
 }
 
 async function taskSnapshot() {
@@ -156,12 +164,7 @@ async function uiProbe(expr) {
   const js = "Promise.resolve().then(function(){return (" + expr + ")})"
     + ".then(function(r){return 'E2ERES'"
     + "+btoa(unescape(encodeURIComponent(JSON.stringify(r))))+'E2ERES'})";
-  const out = await rawExec(['eval', js, '--json']);
-  const env = driver._test.parseEnvelope({ code: 0, stdout: out, stderr: '' });
-  if (!env.ok) throw new Error('uiProbe eval 失败：' + env.error);
-  const m = String(env.result).match(/E2ERES([A-Za-z0-9+/=]*)E2ERES/);
-  if (!m) throw new Error('uiProbe 无标记输出：' + String(env.result).slice(0, 160));
-  return JSON.parse(Buffer.from(m[1], 'base64').toString('utf8'));
+  return JSON.parse(await evalInPage(js, 'uiProbe'));
 }
 
 /* 按标题点树上的行动节点（多个命中取最后一个），等两帧让详情重建完 */

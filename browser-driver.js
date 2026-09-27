@@ -372,9 +372,6 @@ function resolveHttpTarget(target, dirs) {
   return null;
 }
 
-/* 先自己解析内核名对应的候选端点（coreBundle 的 channel 形态会拼出 404 的 ws 地址，
- * 所以驱动侧一律自己读端口文件拼端点，内核名只作兜底 —— 见 cdpCandidates） */
-
 /* ---------------- CDP 预检：端口文件 + 真探一次端点 ----------------
  * 失败率最高的一步是「浏览器压根没开调试端口」，UI 事先说清楚比事后翻译报错有用。
  * 但**不能只看端口文件**：它是磁盘残留物 —— 浏览器异常退出会留下陈旧端口，Chrome 136+
@@ -407,13 +404,17 @@ function cdpAttachConfig() {
   return { browser: { cdpTimeout: 0 } };
 }
 
+/* 端口文件第二行的 ws 路径形态。拼错就是 404，所以读进来与拼端点时都按它校验 ——
+ * 同一条正则只能有一处定义（早先 parseDevToolsActivePort 与 wsEndpointForPortPath 各写一遍）。 */
+const WS_BROWSER_PATH_RE = /^\/devtools\/browser\/[A-Za-z0-9._-]+$/;
+
 /* 端口文件两行：端口 + ws 路径（/devtools/browser/<uuid>） */
 function parseDevToolsActivePort(content) {
   const lines = String(content == null ? '' : content).split(/\r?\n/);
   const port = parseDevToolsPort(lines[0]);
   if (!port) return null;
   const wsPath = String(lines[1] || '').trim();
-  return { port: port, wsPath: /^\/devtools\/browser\/[A-Za-z0-9._-]+$/.test(wsPath) ? wsPath : null };
+  return { port: port, wsPath: WS_BROWSER_PATH_RE.test(wsPath) ? wsPath : null };
 }
 
 function wsEndpointForPortPath(port, wsPath) {
@@ -421,7 +422,7 @@ function wsEndpointForPortPath(port, wsPath) {
   if (!isFinite(p) || p < 1 || p > 65535) return null;
   const w = String(wsPath == null ? '' : wsPath).trim();
   /* 只认 DevTools 那一种形态；其它（含空）一律当没读到 —— 拼错就是 404 */
-  if (!/^\/devtools\/browser\/[A-Za-z0-9._-]+$/.test(w)) return null;
+  if (!WS_BROWSER_PATH_RE.test(w)) return null;
   return 'ws://127.0.0.1:' + Math.floor(p) + w;
 }
 
@@ -443,7 +444,9 @@ function probeTcp(port) {
   });
 }
 
-/* 一个内核名的候选端点，按可靠性排序：ws（端口文件第二行）→ http 发现 */
+/* 一个内核名的候选端点，按可靠性排序：ws（端口文件第二行）→ http 发现。
+ * 一并回传解析出的 info：调用方（cdpProbe）还要用 info.port 探活，
+ * 早先它自己又 readFileSync + parse 了一遍同一个文件。 */
 function cdpCandidates(file) {
   let info = null;
   try { info = parseDevToolsActivePort(fs.readFileSync(file, 'utf8')); } catch (_) { info = null; }
@@ -453,10 +456,8 @@ function cdpCandidates(file) {
   if (ws) list.push(ws);                 /* 权威形态：带 UUID，Chrome 147+ 只剩它能用 */
   const httpEnd = httpEndpointForPort(info.port);
   if (httpEnd) list.push(httpEnd);
-  return list.length ? list : null;
+  return list.length ? { info: info, list: list } : null;
 }
-
-/* 一个内核名名下的候选端点就在 cdpCandidates 里（ws 优先，http 兜底） */
 
 /* cdpProbe 的 reason 取值域**只有这两个**（外加 server 侧的 no-driver / error，
  * 见 server.js 的 cdp-probe 分支）：
@@ -472,13 +473,12 @@ async function cdpProbe(dirs) {
   const list = Array.isArray(dirs) ? dirs : cdpUserDataDirs(process.platform, process.env);
   let sawPortFile = false;
   for (let i = 0; i < list.length; i++) {
-    const candidates = cdpCandidates(list[i].file);
-    if (!candidates) continue;
+    const cand = cdpCandidates(list[i].file);
+    if (!cand) continue;
     sawPortFile = true;
-    const info = parseDevToolsActivePort(fs.readFileSync(list[i].file, 'utf8'));
-    const probe = await probeTcp(info.port);
+    const probe = await probeTcp(cand.info.port);
     if (probe.ok) {
-      return { available: true, reason: null, channel: list[i].channel, endpoint: candidates[0], hint: cdpProbeHint() };
+      return { available: true, reason: null, channel: list[i].channel, endpoint: cand.list[0], hint: cdpProbeHint() };
     }
   }
   return {
@@ -779,16 +779,30 @@ function humanProfileError(raw) {
   return null;
 }
 
-/* attach 失败一律是人话 + 下一步怎么做：CDP 模式没有「换个内核重试」这回事 ——
- * 用户开的是哪个浏览器就是哪个，替他换一个等于换掉他的登录态。 */
-function humanCdpError(target, raw) {
-  const s = String(raw || '');
-  if (CDP_CHANNELS.indexOf(target) >= 0) {
-    return '连不上正在运行的 ' + target + '：它得先开着调试端口。在该浏览器里访问 chrome://inspect/#remote-debugging 勾选'
-      + '「Allow remote debugging for this browser instance」（Chrome 136+ 默认禁止），或带 --remote-debugging-port=9222 重新启动后'
-      + '把端点（http://127.0.0.1:9222 或带 UUID 的 ws:// 地址）填进「CDP 端点」。原始错误：' + s.slice(0, 200);
-  }
-  return '连不上 CDP 端点 ' + String(target).slice(0, 80) + '：确认浏览器还在运行、端口没变。原始错误：' + s.slice(0, 200);
+/* 建立我们自己的专用标签页：列基线 → 新建 → 打标记，三步全过才写 sessionState。
+ * 这是「绝不碰你自己标签页」的守卫，**只能有一份实现** —— 新 attach 与复用已有连接
+ * 两条路都走这里（此前各写一遍，收紧守卫时只改一处就会漏掉另一处）。
+ *
+ * 失败只回报 stage，**收场策略留给调用方**：两条路有意不同，不能统一 ——
+ *   新 attach 失败 → 拆掉刚建的 daemon，不然留个半开状态；
+ *   复用失败      → **不能拆**。Chrome 144+ 的授权是按连接给的，拆了用户得回浏览器
+ *                   再点一次「允许远程调试」；连接还活着，原地重试更划算。
+ * 返回 { ok:true } 或 { ok:false, stage:'tab-new'|'mark', error? }。 */
+async function startOwnTab(session, plan) {
+  /* 此刻列出来的都是**用户的**标签页（我们自己的那个还没建 / 刚关掉），
+   * 记下来当 tab-select 的禁选基线 */
+  const pre = await exec(session, ['tab-list']);
+  const preExisting = pre.ok ? parseTabs(pre.result).map((t) => t.url) : [];
+
+  const tab = await exec(session, plan.commands[1]);   // ['tab-new', url]
+  if (!tab.ok) return { ok: false, stage: 'tab-new', error: tab.error };
+
+  const token = newTabToken(session);
+  const marked = await exec(session, ['eval', tabMarkSnippet(token)]);
+  if (!marked.ok || !tabGuardOk(token, marked.result)) return { ok: false, stage: 'mark' };
+
+  sessionState.set(session, { mode: 'cdp', tabToken: token, preExisting: preExisting });
+  return { ok: true };
 }
 
 /* CDP 复用：会话已经附身且 daemon 还活着时，**绝不再 attach 一次**。
@@ -802,20 +816,16 @@ async function reuseCdpTab(session, plan) {
   const cur = await exec(session, ['eval', TAB_READ_SNIPPET]);
   if (cur.ok && tabGuardOk(st.tabToken, cur.result)) await exec(session, ['tab-close']);
 
-  /* 我们自己的标签页还没建：此刻列出来的都是**用户的**（我们上轮那个刚关掉），
-   * 记下来当 tab-select 的禁选基线。 */
-  const pre = await exec(session, ['tab-list']);
-  const preExisting = pre.ok ? parseTabs(pre.result).map((t) => t.url) : [];
-
-  const tab = await exec(session, plan.commands[1]);   // ['tab-new', url]
-  if (!tab.ok) return { ok: false, error: '复用已有 CDP 连接时新建标签页失败：' + tab.error };
-
-  const token = newTabToken(session);
-  const marked = await exec(session, ['eval', tabMarkSnippet(token)]);
-  if (!marked.ok || !tabGuardOk(token, marked.result)) {
-    return { ok: false, error: '复用已有 CDP 连接时没能标记专用标签页，已停手（不碰你的标签页）' };
+  const t = await startOwnTab(session, plan);
+  if (!t.ok) {
+    /* 失败**不拆连接**（见 startOwnTab 的注释）：授权按连接给，拆了用户得再点一次允许。 */
+    return {
+      ok: false,
+      error: t.stage === 'tab-new'
+        ? '复用已有 CDP 连接时新建标签页失败：' + t.error
+        : '复用已有 CDP 连接时没能标记专用标签页，已停手（不碰你的标签页）',
+    };
   }
-  sessionState.set(session, { mode: 'cdp', tabToken: token, preExisting: preExisting });
   return { ok: true, browser: plan.browser, mode: 'cdp', attached: true, reused: true, maximized: false, native: false };
 }
 
@@ -846,23 +856,16 @@ async function openCdp(session, plan, extraArgs, fallbackPlan) {
   if (!attach.ok) return { ok: false, error: humanCdpAttachError(attach.error) };
 
   /* 我们自己的标签页还没建：此刻列出来的都是**用户的**，记下来当 tab-select 的禁选基线 */
-  const pre = await exec(session, ['tab-list']);
-  const preExisting = pre.ok ? parseTabs(pre.result).map((t) => t.url) : [];
-
-  const tab = await exec(session, plan.commands[1]);
-  if (!tab.ok) {
-    await exec(session, ['close']);
-    return { ok: false, error: '已连上浏览器，但新建专用标签页失败（为免动到你已开的标签页，已断开）：' + tab.error };
+  const t = await startOwnTab(session, plan);
+  if (!t.ok) {
+    await exec(session, ['close']);   /* 新 attach 出来的 daemon 不留半开（见 startOwnTab 的注释） */
+    return {
+      ok: false,
+      error: t.stage === 'tab-new'
+        ? '已连上浏览器，但新建专用标签页失败（为免动到你已开的标签页，已断开）：' + t.error
+        : '连上了浏览器，但没能标记专用标签页 —— 无法保证只操作我们自己的标签页，已断开',
+    };
   }
-
-  const token = newTabToken(session);
-  const marked = await exec(session, ['eval', tabMarkSnippet(token)]);
-  if (!marked.ok || !tabGuardOk(token, marked.result)) {
-    await exec(session, ['close']);
-    return { ok: false, error: '连上了浏览器，但没能标记专用标签页 —— 无法保证只操作我们自己的标签页，已断开' };
-  }
-
-  sessionState.set(session, { mode: 'cdp', tabToken: token, preExisting: preExisting });
   return {
     ok: true, browser: plan.browser, mode: 'cdp', attached: true, target: plan.target,
     maximized: false, native: false, swappedFrom: swappedFrom,
@@ -1227,6 +1230,9 @@ module.exports = {
   rect,
   screenshot,
   close,
+  /* 模式白名单的唯一权威：server.js 校验 open 的 mode 就用它（别再抄一份字面量）。
+   * 前端那份在 index.html 的 <option> 里（前端够不着这个模块）。 */
+  MODES,
   set dataDir(v) { dataDir = v; },
   get dataDir() { return dataDir; },
   _test: { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, MODES, CDP_CHANNELS, PROFILE_DIR, CDP_TARGET_MAX, openPlan, validateCdpTarget, newTabToken, tabMarkSnippet, tabGuardOk, ownTabRefusal, markOwnTab, tabSelectRefusal, isHttpDiscoveryDead, MODAL_GUARD_RE, MODAL_SAFE_COMMANDS, TAB_MARK_SNIPPET: tabMarkSnippet, TAB_READ_SNIPPET, parseDevToolsPort, parseDevToolsActivePort, wsEndpointForPortPath, cdpUserDataDirs, channelPortFile, httpEndpointForPort, httpTargetPort, resolveHttpTarget, cdpProbe, cdpProbeHint, humanCdpProbeError, humanCdpAttachError, cdpAttachConfig, probeTcp, CDP_CONFIG_FILE, reuseCdpTab, CDP_ATTACH_TIMEOUT_MS, cdpRefusal, sessionState, parseEnvelope, unwrapResult, treeToSnapshotYaml, uploadPathAllowed, parseWindowSize, buildMaximizedConfig, FULLSCREEN_SNIPPET, RECT_SNIPPET, parseTabs, summarizeError, clipMiddle, MAXIMIZED_CONFIG_FILE },

@@ -79,24 +79,17 @@ const StateEditor = (() => {
     val.value = entry.value;
     autoGrow(val, 480);
     row.querySelector('.row-del').addEventListener('click', () => {
-      const parent = row.parentNode;
-      if (!parent) return;            /* 已不在文档里（重复点）：没有再删一次的道理 */
       const gen = formGen;            /* 记下这一代表单，撤销时用它判断表单是否已被重建 */
-      const next = row.nextSibling;   /* 原位恢复锚点：可能是下一行，也可能是「＋ 添加字段」按钮 */
       const key = row.querySelector('.kv-key').value.trim();
-      row.remove();
-      updateMeta();
-      /* 撤销：插回活节点（不是 clone）—— 键、值、textarea 的 input 监听都还在 */
-      undoToast('已删除字段「' + (key || '未命名字段') + '」', () => {
-        /* 撤销窗口里 renderForm() 可能已经重跑过（载入预设 / 表单↔源码 来回切）：
-         * 那一代的行是重新从 entries 建出来的，这个字段本来就已经回来了。
-         * 旧行再插一次就会同 key 两行，发送时 collectObj(true) 抛「字段名重复」。
-         * 代际变了 ⇒ 幂等空操作，不插。 */
-        if (gen !== formGen) return;
-        const anchor = (next && next.parentNode === parent) ? next : parent.querySelector('.add-field');
-        if (anchor) parent.insertBefore(row, anchor);
-        else parent.appendChild(row);
-        updateMeta();
+      /* 撤销：插回活节点（不是 clone）—— 键、值、textarea 的 input 监听都还在。
+       * stillValid：撤销窗口里 renderForm() 可能已经重跑过（载入预设 / 表单↔源码
+       * 来回切），那一代的行是重新从 entries 建出来的，这个字段本来就已经回来了；
+       * 旧行再插一次就会同 key 两行，发送时 collectObj(true) 抛「字段名重复」。
+       * fallbackAnchor：原锚点没了就插在「＋ 添加字段」按钮之前。 */
+      removeWithUndo(row, '已删除字段「' + (key || '未命名字段') + '」', {
+        stillValid: () => gen === formGen,
+        fallbackAnchor: (parent) => parent.querySelector('.add-field'),
+        onChange: updateMeta,
       });
     });
     return row;

@@ -214,6 +214,49 @@ function undoToast(msg, onUndo, ms) {
   return dismiss;
 }
 
+/* ===================== 删除 + 撤销（删除类操作的安全网） =====================
+ * 三处可删除列表（变量池 / 问题列表 / state 字段）共用同一套「删掉 + 5 秒撤销」：
+ * 删除前抓住原位锚点，撤销时插回**同一个活节点**（不是 clone）—— 里面的输入值、
+ * 事件监听、dataset 全都还在，撤销后可以接着编辑。
+ *
+ * opts.stillValid：可选。撤销窗口里容器可能已被重建（再点一次预设 / 表单↔源码来回切），
+ *   那一代的节点是重新从数据建出来的，这个条目本来就已经回来了 —— 旧节点再插一次
+ *   就成了重复条目（buildQuestions 抛「问题 id 重复」/ collectObj 抛「字段名重复」）。
+ *   代际变了就退化成幂等空操作，不插。
+ * opts.fallbackAnchor：可选，容器内没有原锚点时（如同级的锚点也被删了）的兜底插入点，
+ *   收 parent 返回一个节点（例：parent => parent.querySelector('.add-field')）。
+ * opts.onChange：可选，删除后与撤销后各跑一次（如 state-editor 的 updateMeta）。 */
+function removeWithUndo(node, msg, opts) {
+  const o = opts || {};
+  const parent = node.parentNode;
+  if (!parent) return;                 /* 已不在文档里（重复点）：没有再删一次的道理 */
+  const next = node.nextSibling;       /* 记住原位，撤销时插回同一处 */
+  node.remove();
+  if (o.onChange) o.onChange();
+  undoToast(msg, () => {
+    if (o.stillValid && !o.stillValid()) return;
+    const tip = (next && next.parentNode === parent) ? next
+      : (o.fallbackAnchor ? o.fallbackAnchor(parent) : null);
+    if (tip) parent.insertBefore(node, tip);
+    else parent.appendChild(node);
+    if (o.onChange) o.onChange();
+  });
+}
+
+/* Tab 键圈在容器里不外溢（#taskModal 任务弹窗、#confirmModal 确认框共用）。
+ * 焦点跑到背后页面上是最不该发生的事：Tab 到一半回车就可能落在被遮挡的按钮上 ——
+ * 对破坏性操作的确认框尤其如此。不可见 / 禁用的节点不参与回绕。 */
+function trapTab(e, root) {
+  const nodes = Array.from(root.querySelectorAll(
+    'button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
+  )).filter((n) => !n.disabled && n.offsetParent !== null);
+  if (!nodes.length) return;
+  const first = nodes[0];
+  const last = nodes[nodes.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+}
+
 /* ===================== 居中确认（替代 window.confirm） =====================
  * 复用既有的 .modal-backdrop / .modal 视觉（与「运行参数」「API 配置」同一套）。
  * 骨架 #confirmModal 在 index.html；这里只负责填充与开关。
@@ -246,16 +289,7 @@ function confirmDialog(opts) {
     function onKey(e) {
       if (e.key === 'Escape') { finish(false); return; }
       if (e.key !== 'Tab') return;
-      /* Tab 圈在弹窗里 —— 与 #taskModal 同一套做法。这是**破坏性操作的确认框**，
-       * 焦点跑到背后的页面上是最不该发生的事（Tab 到一半回车就可能落在「删除」上）。 */
-      const nodes = Array.from(back.querySelectorAll(
-        'button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
-      )).filter((n) => !n.disabled && n.offsetParent !== null);
-      if (!nodes.length) return;
-      const first = nodes[0];
-      const last = nodes[nodes.length - 1];
-      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      trapTab(e, back);   /* 这是**破坏性操作的确认框**，焦点绝对不能跑到背后页面上 */
     }
     document.addEventListener('keydown', onKey);
     okBtn.onclick = () => finish(true);

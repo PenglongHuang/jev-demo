@@ -6,11 +6,11 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
-const { spawn } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const driver = require(path.join(ROOT, 'browser-driver.js'));
 const { parseSnapshotRefs } = require(path.join(ROOT, 'public', 'js', 'util.js'));
+const { startServer } = require('./helpers/server.js');
 
 const SESSION = 'jevwalk' + Date.now().toString(36);
 const BROWSER = process.env.JEVDEMO_BROWSER || 'chrome';
@@ -44,20 +44,10 @@ function refOf(re, from) {
 const countMail = () => (snap.match(/- listitem "邮件/g) || []).length;
 
 test.before(async () => {
-  const port = 32000 + Math.floor(Math.random() * 6000);
-  serverBase = 'http://127.0.0.1:' + port;
-  serverChild = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: Object.assign({}, process.env, { PORT: String(port) }),
-    stdio: 'ignore', windowsHide: true,
-  });
-  for (let i = 0; i < 150; i++) {
-    try {
-      const r = await fetch(serverBase + '/api/health');
-      if (r.ok && (await r.json()).ok) break;
-    } catch (_) { /* 尚未监听 */ }
-    await new Promise((r) => setTimeout(r, 100));
-    if (i === 49) throw new Error('走查前置：server 未就绪');
-  }
+  const srv = startServer(32000);
+  serverChild = srv.child;
+  serverBase = srv.base;
+  await srv.wait();
   engineOk = Boolean((await driver.status()).available);
 });
 

@@ -81,25 +81,23 @@ const Config = (() => {
    * 这正是「高级参数怎么不见了」那类投诉的解药（原先它是被挤到弹窗折叠线以下了）。
    * 展开状态记在 localStorage：常用的人不用每次重开。 */
   const SLOT_KEY = 'jev-cfg-open';
-  function readSlotOpen() {
-    try { return JSON.parse(localStorage.getItem(SLOT_KEY) || '{}') || {}; } catch (_) { return {}; }
-  }
+  const SLOTS = [['cfgLlmSlot', 'llm'], ['cfgTrimSlot', 'trim']];
   function applySlotOpen() {
-    const st = readSlotOpen();
-    [['cfgLlmSlot', 'llm'], ['cfgTrimSlot', 'trim']].forEach(([id, k]) => {
+    const st = readJson(SLOT_KEY, {}) || {};
+    SLOTS.forEach(([id, k]) => {
       const d = document.getElementById(id);
       if (d) d.open = Boolean(st[k]);
     });
   }
   function bindSlotState() {
-    [['cfgLlmSlot', 'llm'], ['cfgTrimSlot', 'trim']].forEach(([id, k]) => {
+    SLOTS.forEach(([id, k]) => {
       const d = document.getElementById(id);
       if (!d) return;
       d.addEventListener('toggle', () => {
         try {
-          const st = readSlotOpen();
+          const st = readJson(SLOT_KEY, {}) || {};
           st[k] = d.open;
-          localStorage.setItem(SLOT_KEY, JSON.stringify(st));
+          writeJson(SLOT_KEY, st);
         } catch (_) { /* 隐私模式：不记也行 */ }
       });
     });

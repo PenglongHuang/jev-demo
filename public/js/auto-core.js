@@ -136,17 +136,18 @@
     var o = ctx || {};
     var trim = normalizeTrim(o.paramTrim);
     var batch = Math.max(1, parseInt(o.batch, 10) || 1);
-    var refs = U.parseSnapshotRefs(o.snapshot);
 
     if (!trim.on) {
       return {
         criteria: refCriteria(o.snapshot),
         meta: {
-          enabled: false, trimmed: false, totalRefs: refs.length,
+          enabled: false, trimmed: false, totalRefs: U.parseSnapshotRefs(o.snapshot).length,
           limit: trim.limit, batch: batch, maxTranches: trim.maxTranches
         }
       };
     }
+    /* trim 路径不在这里数 ref：buildBoundedRefCriteria 自己解析一次并回填 meta.totalRefs。
+     * 早先这里无条件先解析一遍，默认（trim 开）路径下结果直接被丢掉 —— 大页面白扫一次全量快照。 */
     var out = Funnel.buildBoundedRefCriteria(o.snapshot, {
       goal: o.goal, avoidRefs: o.avoidRefs, limit: trim.limit, batch: batch, maxTranches: trim.maxTranches
     });
@@ -445,7 +446,7 @@
     if (!keys.length || (TEXT_OPTIONAL_ACTIONS[action] && keys.length === 1 && keys[0] === TEXT_NONE)) return null;
 
     var target = '';
-    if (o.refLabel) target = '，目标元素 ' + o.param + '「' + String(o.refLabel).replace(/^【[^】]*】\s*/, '') + '」';
+    if (o.refLabel) target = '，目标元素 ' + o.param + '「' + stripRefPrefix(o.refLabel) + '」';
     else if (o.param) target = '，目标元素 ' + o.param;
     var instructions = '已确定动作 ' + action + target + '。'
       + (action === 'select'
@@ -677,8 +678,17 @@
   }
 
   /* ---------------- 展示辅助（时间线 / 历史） ---------------- */
+  /* ref 标签剥掉「【可交互】」这类前缀。候选标签的形态只有这里这一种，
+   * 时间线 / 详情 chip / 补问说明三处共用同一条正则 —— 早先各写一遍。 */
+  function stripRefPrefix(refLabel) {
+    return String(refLabel || '').replace(/^【[^】]*】\s*/, '');
+  }
+
+  /* ref 标签 → 短文本：剥前缀后，带引号名字的（如 button "提交"）只取引号里的部分，
+   * 都没有就截断。auto.js 的 refChipLabel 是另一个展示面（「键 · 文本」且截断更长），
+   * 两者格式**有意不同**：这里是时间线里嵌进句子的短语，那里是详情区的独立 chip。 */
   function shortRefLabel(refLabel) {
-    var s = String(refLabel || '').replace(/^【[^】]*】\s*/, '');
+    var s = stripRefPrefix(refLabel);
     var m = s.match(/"([^"]+)"/);
     if (m) return m[1];
     return s.slice(0, 14) || '（无描述）';
@@ -882,6 +892,7 @@
     extractRefContext: extractRefContext,
     sanitizeLlmText: sanitizeLlmText,
     describeDecision: describeDecision,
+    stripRefPrefix: stripRefPrefix,
     formatHistoryStep: formatHistoryStep,
     briefError: briefError,
     isRefParam: isRefParam,

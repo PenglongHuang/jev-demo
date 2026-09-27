@@ -2,10 +2,8 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
-const { spawn } = require('child_process');
-const path = require('path');
 
-const ROOT = path.join(__dirname, '..');
+const { startServer } = require('./helpers/server.js');
 
 /* ---------------- 本机 mock 上游（OpenAI 兼容 /chat/completions） ---------------- */
 function startMock() {
@@ -35,26 +33,6 @@ function startMock() {
 }
 
 /* ---------------- 起真实 server.js ---------------- */
-function startServer() {
-  const port = 30000 + Math.floor(Math.random() * 20000);
-  const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: Object.assign({}, process.env, { PORT: String(port) }),
-    stdio: 'ignore',
-    windowsHide: true,
-  });
-  const base = 'http://127.0.0.1:' + port;
-  const wait = async () => {
-    for (let i = 0; i < 150; i++) {
-      try {
-        const r = await fetch(base + '/api/health');
-        if (r.ok && (await r.json()).ok) return base;
-      } catch (_) { /* 尚未监听 */ }
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    throw new Error('server 未能在 5s 内就绪');
-  };
-  return { child, base, wait };
-}
 
 test('POST /api/llm：校验、透传、错误映射', async (t) => {
   const mock = await startMock();
@@ -87,17 +65,10 @@ test('POST /api/llm：校验、透传、错误映射', async (t) => {
   /* 1c. 自定义 Jev 上游：无页面 Key 时不放行自定义地址（防服务端 env Key 外送到任意 URL） */
   {
     /* 起一个带 env Key 的实例才能命中该分支 */
-    const port2 = 30000 + Math.floor(Math.random() * 20000);
-    const child2 = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-      env: Object.assign({}, process.env, { PORT: String(port2), TYPESAFE_API_KEY: 'sk-operator-secret' }),
-      stdio: 'ignore', windowsHide: true,
-    });
-    t.after(() => child2.kill());
-    for (let i = 0; i < 150; i++) {
-      try { const h = await fetch('http://127.0.0.1:' + port2 + '/api/health'); if (h.ok) break; } catch (_) { /* retry */ }
-      await new Promise((rs) => setTimeout(rs, 100));
-    }
-    const r2 = await fetch('http://127.0.0.1:' + port2 + '/api/systemone', {
+    const srv2 = startServer(30000, { TYPESAFE_API_KEY: 'sk-operator-secret' });
+    t.after(() => srv2.child.kill());
+    await srv2.wait();
+    const r2 = await fetch(srv2.base + '/api/systemone', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Endpoint': 'https://collector.example.com/v1/systemone' },
       body: JSON.stringify({ state: 'x', questions: { a: { type: 'noul', name: 'a', instructions: 'i' } } }),

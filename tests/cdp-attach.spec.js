@@ -18,6 +18,7 @@ const { spawn } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const driver = require(path.join(ROOT, 'browser-driver.js'));
+const { startServer } = require('./helpers/server.js');
 const { parseDevToolsPort } = driver._test;
 
 const SESSION = 'jevcdp' + Date.now().toString(36);
@@ -54,16 +55,10 @@ test.before(async () => {
   if (!exe) { skipReason = '找不到 Chrome / Edge 可执行文件'; return; }
 
   /* 静态页服务（起点 URL 必须是 http(s)，driver 会挡掉 about:blank） */
-  const port = 35000 + Math.floor(Math.random() * 20000);
-  serverBase = 'http://127.0.0.1:' + port;
-  serverChild = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: Object.assign({}, process.env, { PORT: String(port) }),
-    stdio: 'ignore', windowsHide: true,
-  });
-  for (let i = 0; i < 150; i++) {
-    try { const r = await fetch(serverBase + '/api/health'); if (r.ok) break; } catch (_) { /* 未监听 */ }
-    await new Promise((r) => setTimeout(r, 100));
-  }
+  const srv = startServer(35000);
+  serverChild = srv.child;
+  serverBase = srv.base;
+  await srv.wait();
 
   /* 临时身份的浏览器：自有 user-data-dir（Chrome 136+ 只对默认目录禁用远程调试），
    * 端口交 0 让系统分配，实际端口由它自己写进 DevToolsActivePort —— 正好复用

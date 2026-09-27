@@ -5,33 +5,8 @@
  * tests/cdp-attach.spec.js（JEVDEMO_CDP=1 时启用）与 tests/driver-smoke.spec.js。 */
 const test = require('node:test');
 const assert = require('node:assert');
-const path = require('path');
-const { spawn } = require('child_process');
 
-const ROOT = path.join(__dirname, '..');
-
-function startServer() {
-  const port = 33000 + Math.floor(Math.random() * 20000);
-  const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: Object.assign({}, process.env, { PORT: String(port) }),
-    stdio: 'ignore', windowsHide: true,
-  });
-  const base = 'http://127.0.0.1:' + port;
-  const wait = async () => {
-    for (let i = 0; i < 150; i++) {
-      try { const r = await fetch(base + '/api/health'); if (r.ok) return base; }
-      catch (_) { /* 未监听 */ }
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    throw new Error('server 未就绪');
-  };
-  return { child, base, wait };
-}
-
-const req = (base, method, p, body) => fetch(base + p, {
-  method, headers: body ? { 'Content-Type': 'application/json' } : {},
-  body: body ? JSON.stringify(body) : undefined,
-}).then(async (r) => ({ status: r.status, data: await r.json().catch(() => null) }));
+const { startServer, req } = require('./helpers/server.js');
 
 test('GET /api/browser/cdp-probe：只读预检，返回可用的 channel/endpoint 与做法提示', async () => {
   const srv = await startServer();

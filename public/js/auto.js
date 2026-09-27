@@ -80,7 +80,6 @@ const Auto = (() => {
   let startTs = 0;
   let timerId = null;
   let finished = false;
-  let endText = '';          // 结束结论（导出记录用；展示只走状态条）
 
   /* ---------- 会话落盘（设计 §5） ---------- */
   let runId = null;            // 本轮会话 id（start 时生成）
@@ -105,11 +104,8 @@ const Auto = (() => {
           endReason: final ? endReasonText : null,
           steps,
         });
-        const r = await fetch('/api/runs/' + runId, {
-          method: 'PUT', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(record),
-        });
-        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const r = await apiJson('/api/runs/' + runId, record, { method: 'PUT' });
+        if (!r.ok) throw new Error(apiErrText(r));
         saveFailedOnce = false;
         if (final) refreshRunsList();
       } catch (e) {
@@ -123,11 +119,8 @@ const Auto = (() => {
   }
 
   async function refreshRunsList() {
-    try {
-      const r = await fetch('/api/runs', { cache: 'no-store' });
-      const d = await r.json();
-      runsList = (d && d.runs) || [];
-    } catch (_) { runsList = []; }
+    const d = await apiJson('/api/runs', null, { cache: 'no-store' });
+    runsList = (d && d.runs) || [];
     renderSessDd();
   }
 
@@ -192,7 +185,10 @@ const Auto = (() => {
           okText: '删除',
         });
         if (!ok) return;
-        await fetch('/api/runs/' + m.id, { method: 'DELETE' });
+        const r = await apiJson('/api/runs/' + m.id, null, { method: 'DELETE' });
+        /* 早先这里完全不看响应：删失败（服务在跑但磁盘写不进去）会静默无提示，
+         * 用户以为删掉了、刷新一下又回来了 */
+        if (!r.ok) toast('删除失败：' + apiErrText(r));
         if (view.sess === m.id) openSession('current');
         else refreshRunsList();
       };
@@ -252,16 +248,10 @@ const Auto = (() => {
     if (!ok) return;
     const before = new Date(Date.now() - RETENTION_DAYS * 86400000).toISOString();
     let removed = n;
-    try {
-      const r = await fetch('/api/runs?before=' + encodeURIComponent(before), { method: 'DELETE' });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      /* 服务端回的 deleted 是权威计数（本地列表可能比磁盘旧），拿不到才退回本地算的 N */
-      const d = await r.json().catch(() => null);
-      if (d && typeof d.deleted === 'number') removed = d.deleted;
-    } catch (e) {
-      toast('清理失败：' + (e && e.message ? e.message : e));
-      return;
-    }
+    const r = await apiJson('/api/runs?before=' + encodeURIComponent(before), null, { method: 'DELETE' });
+    if (!r.ok) { toast('清理失败：' + apiErrText(r)); return; }
+    /* 服务端回的 deleted 是权威计数（本地列表可能比磁盘旧），拿不到才退回本地算的 N */
+    if (typeof r.deleted === 'number') removed = r.deleted;
     toast(removed ? '已清理 ' + removed + ' 条' : '没有需要清理的记录');
     /* 正在看的那条可能刚被清掉：退回当前会话，别让详情停在一条不存在的记录上 */
     const cur = view.sess === 'current' ? null : viewRecord && viewRecord.meta;
@@ -287,16 +277,15 @@ const Auto = (() => {
       renderSessDd(); renderFlow();
       return;
     }
-    try {
-      const r = await fetch('/api/runs/' + which, { cache: 'no-store' });
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      viewRecord = hydrateRecord(await r.json());
-      view.sess = which; view.type = 'session'; view.follow = false;
-      renderSessDd(); renderFlow();
-    } catch (e) {
-      toast('历史会话读取失败：' + (e && e.message ? e.message : e));
+    const r = await apiJson('/api/runs/' + which, null, { cache: 'no-store' });
+    if (!r.ok) {
+      toast('历史会话读取失败：' + apiErrText(r));
       refreshRunsList();
+      return;
     }
+    viewRecord = hydrateRecord(r);
+    view.sess = which; view.type = 'session'; view.follow = false;
+    renderSessDd(); renderFlow();
   }
 
   /* 树视图状态：sess='current' 看本页运行，否则为历史会话 id；type= session|step|action */
@@ -534,15 +523,8 @@ const Auto = (() => {
     const del = el('button', 'row-del', '×'); del.type = 'button'; del.title = '删除变量'; del.setAttribute('aria-label', '删除变量');
     /* 删变量也要能撤销（与删问题同一套 5 秒安全网）：一行里可能刚手打完一长串取值 */
     del.onclick = () => {
-      const parent = row.parentNode;
-      if (!parent) return;                 /* 已不在文档里（重复点）：没有再删一次的道理 */
       const nm = nameInp.value.trim() || '未命名';
-      const next = row.nextSibling;        /* 记住原位，撤销时插回同一处 */
-      row.remove();
-      undoToast('已删除变量「' + nm + '」', () => {
-        if (next && next.parentNode === parent) parent.insertBefore(row, next);
-        else parent.appendChild(row);
-      });
+      removeWithUndo(row, '已删除变量「' + nm + '」');
     };
     row.appendChild(nameInp); row.appendChild(valInp); row.appendChild(del);
     els.vars.appendChild(row);
@@ -627,10 +609,17 @@ const Auto = (() => {
   const MODE_KEY = 'jev-auto-browser-mode';
   const CDP_KEY = 'jev-auto-cdp-target';
 
+  /* 合法模式的唯一来源是 #autoBrowserMode 里的真实 option（index.html）——
+   * 早先这里和 server 各硬编码了一份 ['isolated','persistent','cdp']，加模式要记得改三处。
+   * 前端这份的意义只在于「localStorage 里的脏值不要用」，所以按 DOM 校验最省心。 */
+  function validModes() {
+    return els.browserMode ? Array.from(els.browserMode.options).map((o) => o.value) : [];
+  }
+
   function readStoredMode() {
     try {
       const m = localStorage.getItem(MODE_KEY);
-      return ['isolated', 'persistent', 'cdp'].includes(m) ? m : 'isolated';
+      return validModes().includes(m) ? m : 'isolated';
     } catch (_) { return 'isolated'; }   /* 隐私模式等读不到：回到最收敛的默认 */
   }
 
@@ -859,20 +848,39 @@ const Auto = (() => {
   }
 
   /* ---------- API 封装（本模式只服务同源后端） ---------- */
-  async function apiJson(path, body, extraHeaders) {
+  /* ---------- 统一的后端调用 ----------
+   * 永远返回对象而不是抛错，调用方只看 .ok。多数端点回的是 {ok,...} 信封，
+   * 但 GET /api/runs/:id 直接回记录本体（没有 ok），所以这里按 HTTP 状态回填一次，
+   * 调用方不必为它破例。
+   * opt.method 缺省按有没有 body 推断（PUT/DELETE 这类必须显式给）；
+   * opt.cache 用于 GET 的 no-store。 */
+  function errText(e) {
+    if (!e) return '';
+    /* server 的 error 有两种形状：{message} 对象（err()）与纯字符串（NO_DRIVER 分支） */
+    return typeof e === 'string' ? e : (e.message || JSON.stringify(e));
+  }
+  function apiErrText(r) { return errText(r && r.error) || ('HTTP ' + ((r && r.status) || '失败')); }
+
+  async function apiJson(path, body, opt) {
+    const o = opt || {};
     try {
       const res = await fetch(path, {
-        method: body ? 'POST' : 'GET',
-        headers: Object.assign({ 'Content-Type': 'application/json' }, extraHeaders || {}),
+        method: o.method || (body ? 'POST' : 'GET'),
+        headers: Object.assign({ 'Content-Type': 'application/json' }, o.headers || {}),
+        cache: o.cache,
         body: body ? JSON.stringify(body) : undefined,
       });
       const text = await res.text();
       let data = null;
       try { data = JSON.parse(text); } catch (_) { /* 走 HTTP 状态分支 */ }
-      if (data) return data;
-      return { ok: false, error: 'HTTP ' + res.status + '：' + text.slice(0, 200) };
+      if (data) {
+        if (data.ok === undefined) data.ok = res.ok;
+        data.status = res.status;
+        return data;
+      }
+      return { ok: false, status: res.status, error: 'HTTP ' + res.status + '：' + text.slice(0, 200) };
     } catch (e) {
-      return { ok: false, error: '连不上本地服务：' + (e && e.message ? e.message : String(e)) };
+      return { ok: false, status: 0, error: '连不上本地服务：' + (e && e.message ? e.message : String(e)) };
     }
   }
 
@@ -1211,10 +1219,12 @@ const Auto = (() => {
   const FOLLOWUP_Q = { param: '参数', action: '动作', text: '文本' };
   const Q_COLOR = { 动作: 'var(--violet)', 参数: '#7c3aed', 文本: '#0d9268' };
 
-  /* ref 短标签：剥掉「【可交互】」前缀并截断（「无需元素」的说明很长，只显示裸键） */
-  function shortRefLabel(key, refLabels) {
-    if (key === '无需元素' || !refLabels || !refLabels[key]) return key;
-    const clean = refLabels[key].replace(/^【[^】]*】\s*/, '');
+  /* ref chip 标签：「键 · 短文本」。与 auto-core.shortRefLabel **有意不同**：那个是嵌进
+   * 时间线句子的短语（剥前缀 + 优先取引号内文本 + 截断 14），这里是详情区的独立 chip
+   * （保留键名、截断 24）。共用的只有「剥掉【可交互】前缀」这一步。 */
+  function refChipLabel(key, refLabels) {
+    if (!refLabels || !refLabels[key]) return key;
+    const clean = AutoCore.stripRefPrefix(refLabels[key]);
     return key + ' · ' + (clean.length > 24 ? clean.slice(0, 24) + '…' : clean);
   }
   /* 变量名 → 取值（查不到就原样显示名字：选项名 / 键名本来就不是变量，按字面值直传） */
@@ -1241,7 +1251,7 @@ const Auto = (() => {
     const a = (step.response && step.response.answers) || {};
     const d = step.decision || {};
     const refLabels = step.refLabels || {};
-    const shortRef = (key) => shortRefLabel(key, refLabels);
+    const shortRef = (key) => refChipLabel(key, refLabels);
     const chip = (k, v, cls) => '<span class="dec-chip ' + (cls || '') + '"><i>' + k + '</i>' + escapeHtml(v) + '</span>';
     /* 复合置信度：本轮作答的各选择题 confidence 的最小值（首轮 动作/参数 + 已落定补问
      * 的作答题）。旧版只显示动作题 —— 文本题 47% 的摇摆会被 82% 的动作置信度盖住。 */
@@ -1281,7 +1291,7 @@ const Auto = (() => {
      * 在同一步的「文本补问」行动视图里（那里与本网格同构）。 */
     const chosenLabel = {
       动作: d.action || '—',
-      参数: d.param ? shortRefLabel(d.param, refLabels) + (followUpRec ? '（第 ' + followUpRec.batch + ' 批补问）' : '') : '—',
+      参数: d.param ? refChipLabel(d.param, refLabels) + (followUpRec ? '（第 ' + followUpRec.batch + ' 批补问）' : '') : '—',
     };
     let html = '<div class="qgrid">';
     ['动作', '参数'].forEach((name) => {
@@ -1476,7 +1486,7 @@ const Auto = (() => {
     html += questionsSectionHtml(a.payload, st);
     if (ans) {
       html += '<div class="sec"><div class="sec-head">本轮输出 · 作答与概率分布</div><div class="qgrid">'
-        + choiceCardHtml(qname, ans, a.kind === 'param' && a.param ? shortRefLabel(a.param, st.refLabels)
+        + choiceCardHtml(qname, ans, a.kind === 'param' && a.param ? refChipLabel(a.param, st.refLabels)
           : (a.kind === 'text' && a.text ? varLabelOf(a.text) : null), '')
         + '</div></div>';
     }
@@ -1587,6 +1597,34 @@ const Auto = (() => {
     }
   }
 
+  /* ---------- 追问的公共骨架 ----------
+   * 三处补问（参数批次 / 动作冲突 / 文本）走的是同一套流程：建请求 → 记一条 followUps
+   * → 发 → 校验答案落在候选里 → 交给各自的 apply 落定。此前三处各写一遍这 12 行，
+   * 连「Jev 返回了不在候选里的…」都在各自漂移；现在只有这一份。
+   * opt = { qname 题名（同时是 rec 上要校验的那道题）, noun 报错里的名词（缺省同 qname）,
+   *         parse 从 answers 取答案, apply 落定并返回是否成功 } */
+  function parseErrText(e) { return (e && e.message) || String(e); }
+
+  async function askFollowUp(step, rec, questions, opt) {
+    const payload = { state: step.payload.state, model: Config.current.model, questions };
+    rec.payload = payload;
+    step.followUps.push(rec);
+    touch();
+
+    const jev = await callJev(payload);
+    if (!jev.ok) { rec.error = jev.error; return false; }
+    rec.response = jev.data;
+
+    let value;
+    try { value = opt.parse(jev.data.answers || {}); }
+    catch (e) { rec.error = '决策解析失败：' + parseErrText(e); return false; }
+    if (!questions[opt.qname].criteria[value]) {
+      rec.error = 'Jev 返回了不在候选里的' + (opt.noun || opt.qname) + '：' + value;
+      return false;
+    }
+    return opt.apply(value);
+  }
+
   /* ---------- 候选裁剪：Jev 选了「其他」时补问下一批 ----------
    * 只补问「参数」一题（动作已定，不重发整组问题以免连带动摇动作决策），
    * 每一步最多展开 maxTranches 批；每批的请求/响应都留在步骤卡里。 */
@@ -1601,26 +1639,20 @@ const Auto = (() => {
         paramCriteria: pc, action: step.decision.action, batch,
         totalRefs: pc.meta.totalRefs, limit: pc.meta.limit,
       });
-      const payload = { state: step.payload.state, model: Config.current.model, questions };
-      const rec = { kind: 'param', batch, payload, response: null, error: null, param: null };
-      step.followUps.push(rec);
-      touch();
-
-      const jev = await callJev(payload);
-      if (!jev.ok) { rec.error = jev.error; return false; }
-      rec.response = jev.data;
-
-      let param;
-      try { param = AutoCore.parseParamAnswer(jev.data.answers || {}); }
-      catch (e) { rec.error = '决策解析失败：' + ((e && e.message) || String(e)); return false; }
-      if (!pc.criteria[param]) { rec.error = 'Jev 返回了不在候选里的元素：' + param; return false; }
-      rec.param = param;
-
-      if (!AutoCore.isRefMore(param)) {
-        step.decision = Object.assign({}, step.decision, { param: param });
-        return true;
-      }
-      if (batch === trim.maxTranches) { rec.error = '本批仍选了「其他」，但已是最后一批'; }
+      const rec = { kind: 'param', batch, payload: null, response: null, error: null, param: null };
+      const done = await askFollowUp(step, rec, questions, {
+        qname: '参数', noun: '元素', parse: AutoCore.parseParamAnswer,
+        apply: (param) => {
+          rec.param = param;
+          if (!AutoCore.isRefMore(param)) {
+            step.decision = Object.assign({}, step.decision, { param: param });
+            return true;
+          }
+          if (batch === trim.maxTranches) { rec.error = '本批仍选了「其他」，但已是最后一批'; }
+          return false;   /* 没落定：继续展开下一批（已是最后一批时循环自然结束） */
+        },
+      });
+      if (done) return true;
     }
     return false;
   }
@@ -1633,30 +1665,24 @@ const Auto = (() => {
    * 与 resolveMoreBatches 的分工：那个改「参数」，这个改「动作」。 */
   async function resolveActionConflict(step, conflict, refRoles) {
     const questions = AutoCore.buildActionFollowUp(conflict);
-    const payload = { state: step.payload.state, model: Config.current.model, questions };
     const rec = {
-      kind: 'action', payload, response: null, error: null, action: null,
+      kind: 'action', payload: null, response: null, error: null, action: null,
       from: conflict.action, role: conflict.role, ref: conflict.ref, why: conflict.why,
     };
-    step.followUps.push(rec);
-    touch();
-
-    const jev = await callJev(payload);
-    if (!jev.ok) { rec.error = jev.error; return false; }
-    rec.response = jev.data;
-
-    let action;
-    try { action = AutoCore.parseActionAnswer(jev.data.answers || {}); }
-    catch (e) { rec.error = '决策解析失败：' + ((e && e.message) || String(e)); return false; }
-    if (!questions['动作'].criteria[action]) { rec.error = 'Jev 返回了不在候选里的动作：' + action; return false; }
-    rec.action = action;
-
-    /* 补问后仍不兼容（例如又选了另一个该元素上不可能的动作）：不发命令，记失败步 */
-    const next = Object.assign({}, step.decision, { action });
-    const again = AutoCore.checkActionRole(next, refRoles);
-    if (again.conflict) { rec.error = '补问后仍选了不兼容的动作：' + action; return false; }
-    step.decision = next;
-    return true;
+    return askFollowUp(step, rec, questions, {
+      qname: '动作', parse: AutoCore.parseActionAnswer,
+      apply: (action) => {
+        rec.action = action;
+        /* 补问后仍不兼容（例如又选了另一个该元素上不可能的动作）：不发命令，记失败步 */
+        const next = Object.assign({}, step.decision, { action });
+        if (AutoCore.checkActionRole(next, refRoles).conflict) {
+          rec.error = '补问后仍选了不兼容的动作：' + action;
+          return false;
+        }
+        step.decision = next;
+        return true;
+      },
+    });
   }
 
   /* ---------- 文本补问：动作 + 参数落定后，同一步内补问「文本」一题 ----------
@@ -1674,33 +1700,29 @@ const Auto = (() => {
     });
     if (!questions) return false;   // 无需文本不会进来；零候选 = 配置性缺失，由调用方记失败步
 
-    const payload = { state: step.payload.state, model: Config.current.model, questions };
     /* 注意字段名：补问渲染用 r.action 判断「动作补问已落定」，text 记录的动作只是
      * 上下文 —— 建记录时就填 action 会让详情在补问飞行中渲染一次「未返回」后
      * 再也不刷新。上下文用独立的 forAction。 */
-    const rec = { kind: 'text', payload, response: null, error: null, text: null, forAction: step.decision.action };
-    step.followUps.push(rec);
-    touch();
-
-    const jev = await callJev(payload);
-    if (!jev.ok) { rec.error = jev.error; return false; }
-    rec.response = jev.data;
-
-    let text;
-    try { text = AutoCore.parseTextAnswer(jev.data.answers || {}); }
-    catch (e) { rec.error = '决策解析失败：' + ((e && e.message) || String(e)); return false; }
-    if (!questions['文本'].criteria[text]) { rec.error = 'Jev 返回了不在候选里的文本：' + text; return false; }
-    rec.text = text;
-
-    step.decision = Object.assign({}, step.decision, { text });
-    return true;
+    const rec = { kind: 'text', payload: null, response: null, error: null, text: null, forAction: step.decision.action };
+    return askFollowUp(step, rec, questions, {
+      qname: '文本', parse: AutoCore.parseTextAnswer,
+      apply: (text) => {
+        rec.text = text;
+        step.decision = Object.assign({}, step.decision, { text });
+        return true;
+      },
+    });
   }
 
   /* ---------- 截图（操作前，带元素标注） ----------
    * 图来自 server 的 screenshot（动作前拍），标注在这里用 canvas 画到图上 ——
    * 被驱动的浏览器窗口里不留任何痕迹，标注只存在于可视化页面展示的这张图里。
-   * 几何换算（CSS 像素 → 图像像素）由 anno.js 负责：截图是设备像素、元素矩形是 CSS
-   * 像素，差一个 deviceScaleFactor，而那由窗口方案决定、不能假设 1:1。 */
+   * 几何换算（CSS 像素 → 图像像素）由 anno.js 负责，**比例不用画布尺寸反推**：
+   * driver 调 screenshot 时不带 --hires（css 档），2026-09-28 真机实测图内容与 CSS 像素
+   * 严格 1:1；画布尺寸 = 视口宽 / 页面缩放，是画布比例不是内容比例，拿它换算会在页面
+   * 缩放不是 100% 时整片偏移（详见 anno.js 文件头 3）。r.viewport 仍进记录（排查用），
+   * 但不参与换算。 */
+  const SHOT_SCALE_CSS = 1;
   async function takeShot(step, name, ref) {
     const r = await apiJson('/api/browser/screenshot', { name, ref: ref || null });
     /* 守卫拦下（专用标签页没了）：连图都不要取 —— 当前页可能是用户自己的页面 */
@@ -1711,7 +1733,7 @@ const Auto = (() => {
       step.anno = null;
       return true;
     }
-    const composed = await Anno.compose(r.dataUrl, r.rect, r.viewport, step.n);
+    const composed = await Anno.compose(r.dataUrl, r.rect, SHOT_SCALE_CSS, step.n);
     step.screenshot = composed.dataUrl;
     if (composed.box) {
       const b = composed.box;
@@ -1746,10 +1768,11 @@ const Auto = (() => {
 
   /* ---------- 执行决策 ---------- */
   async function executeDecision(step, decision, refLabels) {
-    /* 终止动作 */
+    /* 终止动作：调用方在 ⑦ 就拦下并 return 了，正常流程到不了这里。
+     * 留这道保险是为了将来多一个调用方时，终止动作不会被当成浏览器命令发出去。 */
     if (AutoCore.TERMINAL_TOOLS[decision.action]) {
       step.terminal = decision.action;
-      return { terminal: decision.action };
+      return;
     }
     /* 无操作 */
     if (decision.action === '无操作') {
@@ -1780,7 +1803,7 @@ const Auto = (() => {
       try {
         r = await callLlm({ model: llmCfg.model, messages: m.messages, temperature: m.temperature, max_tokens: m.max_tokens }, llmCfg);
       } catch (e) {
-        L.error = '生成模型调用失败：' + ((e && e.message) || String(e));
+        L.error = '生成模型调用失败：' + parseErrText(e);
         step.exec = { ok: false, error: L.error, elapsedMs: 0, cmd: null };
         return {};
       }
@@ -1801,7 +1824,7 @@ const Auto = (() => {
     try {
       plan = AutoCore.planExecution(decision, runCfg.variables);
     } catch (e) {
-      step.exec = { ok: false, error: (e && e.message) || String(e), cmd: null };
+      step.exec = { ok: false, error: parseErrText(e), cmd: null };
       return {};
     }
     /* select 选项预检：目标选项不在下拉框名单内就不发命令（实测事故：把「搜索
@@ -1968,7 +1991,6 @@ const Auto = (() => {
     els.progress.textContent = '共 ' + steps.length + ' 步';
     els.progress.title = t.reason || '';
     els.elapsed.textContent = secs + 's';
-    endText = steps.length + ' 步 · ' + s.label;
     updateExportBtn();
     saveRun(true);
     /* 出错类结束原因摊在错误条里（可复制、能搜），其余状态一句话 toast 就够 */
@@ -2101,7 +2123,7 @@ const Auto = (() => {
 
       const step = {
         n, label: null, decision: null, payload, response: null, jevError: null,
-        exec: null, llm: null, screenshot: null, terminal: null, annotated: null,
+        exec: null, llm: null, screenshot: null, terminal: null,
         pageInfo, snapshot: snapText, refLabels, historyLine: null, generatedText: null,
         trim: param.meta, followUps: [], trimNote: null,
       };
@@ -2128,7 +2150,7 @@ const Auto = (() => {
           step.decision = AutoCore.parseDecision(jev.data.answers || {});
         }
       } catch (e) {
-        step.exec = { ok: false, error: '决策解析失败：' + ((e && e.message) || String(e)), cmd: null };
+        step.exec = { ok: false, error: '决策解析失败：' + parseErrText(e), cmd: null };
         step.label = '决策解析失败';   /* label 初始为 null，此路径不经过 ⑤b-⑤d 的赋值 */
       }
 
@@ -2268,8 +2290,7 @@ const Auto = (() => {
 
       /* ⑨ 执行 */
       if (step.decision && !step.exhausted) {
-        const r = await executeDecision(step, step.decision, refLabels);
-        if (r.terminal) { /* 上文已处理 terminal 路径，此处不会到 */ }
+        await executeDecision(step, step.decision, refLabels);
       }
       /* 守卫在 act 里拦下（专用标签页没了）：整轮到此为止 —— 别把「在别人页面上动手」
        * 记成一步可重试的失败，那只会诱导模型继续试 */
@@ -2435,13 +2456,7 @@ const Auto = (() => {
       if (e.key === 'Escape') { cancelTaskModal(); return; }
       if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); saveTaskModal(); return; }
       if (e.key !== 'Tab') return;
-      const nodes = Array.from(els.taskModal.querySelectorAll(
-        'button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
-      )).filter((n) => !n.disabled && n.offsetParent !== null);
-      if (!nodes.length) return;
-      const first = nodes[0]; const last = nodes[nodes.length - 1];
-      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      trapTab(e, els.taskModal);
     });
     els.exportBtn.onclick = exportRun;
     /* 会话下拉：开合 + 点外收起；打开时拉最新列表、清掉上次的过滤词并把焦点交给过滤框 ——
