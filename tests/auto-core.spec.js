@@ -994,3 +994,42 @@ test('stepDurationLine：部分补问缺 ms 时说明测到几次', () => {
   };
   assert.equal(AutoCore.stepDurationLine(half), 'Jev 3.0s · 2 次调用（1 次未计时） · 占 38%');
 });
+
+/* ---------- 构成条与对账（spec 2026-09-28 §6.5 §6.6） ---------- */
+
+test('breakdownSegs：四段比例和为 100，零宽段不出现，颜色走既有 token', () => {
+  const segs = AutoCore.breakdownSegs(AutoCore.durationView(LIVE_STEP));
+  assert.deepEqual(segs.map((s) => s.key), ['jev', 'llm', 'act', 'other']);
+  assert.equal(segs.reduce((a, s) => a + s.n, 0), 100);
+  assert.equal(segs[0].n, 65);          /* 6500/9950 */
+  assert.equal(segs.find((s) => s.key === 'act').n, 14);
+  assert.equal(segs.find((s) => s.key === 'llm').color, '#0d9268');
+});
+
+test('breakdownSegs：段宽为 0 的段不产生（不画空段）；无步耗时 → null', () => {
+  const noLlm = AutoCore.durationView({
+    n: 1, ms: 1000, jevMs: 600, payload: { questions: { 动作: {} } }, response: {}, exec: { ok: true, elapsedMs: 400 },
+  });
+  const segs = AutoCore.breakdownSegs(noLlm);
+  assert.deepEqual(segs.map((s) => s.key), ['jev', 'act']);
+  assert.equal(segs[0].n + segs[1].n, 100);
+  assert.equal(AutoCore.breakdownSegs(AutoCore.durationView({ n: 1 })), null);
+});
+
+test('sumStepMs：总和 + 测到几步（老记录混排）', () => {
+  const r = AutoCore.sumStepMs([{ ms: 1000 }, { ms: 2000 }, { exec: { ok: true } }, { ms: 0 }]);
+  assert.equal(r.sumMs, 3000);
+  assert.equal(r.measured, 3);
+  assert.equal(r.total, 4);
+});
+
+test('reconcile：平账 / 超差 / 缺数据', () => {
+  const ok = AutoCore.reconcile({ wallMs: 67070, prepMs: 3100, sumStepMs: 63900, tailMs: 70 });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.calcMs, 67070);
+  assert.equal(ok.deltaMs, 0);
+  const bad = AutoCore.reconcile({ wallMs: 67070, prepMs: 3100, sumStepMs: 1000, tailMs: 70 });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.deltaMs, 62900);
+  assert.equal(AutoCore.reconcile({ wallMs: 67070, prepMs: null, sumStepMs: 1, tailMs: 1 }), null);
+});

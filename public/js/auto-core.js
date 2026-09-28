@@ -870,6 +870,57 @@
     return 'Jev ' + formatMs(d.jevMs) + ' · ' + d.jevCalls + ' 次调用' + miss + pct;
   }
 
+  /* 构成条的四段（颜色沿用界面既有 token：Jev 紫 / LLM 绿 / 动作 靛 / 其它 灰）。
+   * 比例四舍五入后把差额补进最大的一段，保证和恰好 100 —— 否则条尾会留一条缝。 */
+  const SEG_COLORS = { jev: '#7c3aed', llm: '#0d9268', act: '#4f46e5', other: '#cbd0da' };
+
+  function breakdownSegs(d) {
+    if (!d || d.stepMs == null || d.stepMs <= 0) return null;
+    const parts = [
+      { key: 'jev', ms: d.jevMs || 0 }, { key: 'llm', ms: d.llmMs || 0 },
+      { key: 'act', ms: d.actMs || 0 }, { key: 'other', ms: d.otherMs || 0 },
+    ];
+    const total = parts.reduce((a, p) => a + p.ms, 0);
+    if (total <= 0) return null;
+    const segs = [];
+    parts.forEach((p) => {
+      if (p.ms <= 0) return;
+      segs.push({ key: p.key, n: Math.round(p.ms / total * 100), color: SEG_COLORS[p.key], ms: p.ms });
+    });
+    if (!segs.length) return null;
+    const diff = 100 - segs.reduce((a, s) => a + s.n, 0);
+    if (diff) segs[segs.reduce((best, s, i, arr) => (s.n > arr[best].n ? i : best), 0)].n += diff;
+    return segs;
+  }
+
+  /* 步骤合计：老记录混排时只累加测到的，并如实报「几步里有几步有数据」 */
+  function sumStepMs(steps) {
+    let sumMs = 0, measured = 0;
+    (steps || []).forEach((s) => {
+      const m = numOrNull(s && s.ms);
+      if (m == null) return;
+      sumMs += Math.max(0, m);
+      measured += 1;
+    });
+    return { sumMs: sumMs, measured: measured, total: (steps || []).length };
+  }
+
+  /* 对账：准备 + Σ步 + 收尾 与墙钟之差。容差 1s（取整与落盘时刻差都在这之内）。
+   * 任一分量缺失 → null（老记录算不出来就不画，不显示 0 假装平账）。 */
+  function reconcile(o) {
+    const wallMs = numOrNull(o && o.wallMs);
+    const prepMs = numOrNull(o && o.prepMs);
+    const sumMs = numOrNull(o && o.sumStepMs);
+    const tailMs = numOrNull(o && o.tailMs);
+    if (wallMs == null || prepMs == null || sumMs == null || tailMs == null) return null;
+    const calcMs = prepMs + sumMs + tailMs;
+    const deltaMs = wallMs - calcMs;
+    return {
+      prepMs: prepMs, sumStepMs: sumMs, tailMs: tailMs, wallMs: wallMs,
+      calcMs: calcMs, deltaMs: deltaMs, ok: Math.abs(deltaMs) <= 1000,
+    };
+  }
+
   /* 会话 id：r-MMDD-HHmm-xxxx（与 server 端 RUN_ID_RE 严格一致，防路径穿越校验同一份规则） */
   function newRunId(d) {
     const t = d || new Date();
@@ -963,6 +1014,9 @@
     durationView: durationView,
     formatMs: formatMs,
     stepDurationLine: stepDurationLine,
+    breakdownSegs: breakdownSegs,
+    sumStepMs: sumStepMs,
+    reconcile: reconcile,
     newRunId: newRunId,
     buildRunRecord: buildRunRecord
   };
