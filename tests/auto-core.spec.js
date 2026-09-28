@@ -892,3 +892,105 @@ test('buildRunRecord：meta 汇总正确、steps 序列化含 request/followUps/
   assert.strictEqual(empty.meta.endState, 'running');
   assert.strictEqual(empty.meta.stepCount, 0);
 });
+
+/* ---------- 耗时视图（spec 2026-09-28 §4 §5） ---------- */
+
+/* live 形状：payload + response + followUps + llm.raw + ms/jevMs 由埋点写入 */
+const LIVE_STEP = {
+  n: 5, ms: 9950, jevMs: 3200,
+  payload: { questions: { 动作: {}, 参数: {}, 未完成: {} } },
+  response: { answers: {} },
+  followUps: [{ kind: 'text', request: { questions: { 文本: {} } }, response: {}, ms: 3300, forAction: 'fill' }],
+  llm: { messages: [], raw: {}, text: '王小明', ms: 1200 },
+  exec: { ok: true, cmd: 'playwright-cli fill e14 "王小明"', elapsedMs: 1386 },
+};
+
+test('durationView：live 步骤 —— 两个耗时、Jev 合计（首轮 + 全部补问，不含生成输入）', () => {
+  const d = AutoCore.durationView(LIVE_STEP);
+  assert.equal(d.stepMs, 9950);
+  assert.equal(d.jevMs, 6500);          /* 3200 + 3300，llm 的 1200 不算 */
+  assert.equal(d.jevCalls, 2);
+  assert.equal(d.jevMeasured, 2);
+  assert.equal(d.llmMs, 1200);
+  assert.equal(d.actMs, 1386);
+  assert.equal(d.jevPct, 65);           /* 6500 / 9950 */
+  assert.equal(d.otherMs, 864);         /* 9950 - 6500 - 1386 - 1200（四段：其它已扣除生成输入） */
+});
+
+test('durationView：落盘形状（request/response/llm.response）与 live 同解', () => {
+  const rec = {
+    n: 5, ms: 9950, jevMs: 3200,
+    request: { questions: { 动作: {} } }, response: { answers: {} },
+    followUps: [{ kind: 'text', request: { questions: { 文本: {} } }, response: {}, ms: 3300 }],
+    llm: { messages: [], response: {}, text: '王小明', ms: 1200 },
+    exec: { ok: true, elapsedMs: 1386 },
+  };
+  assert.deepEqual(AutoCore.durationView(rec), AutoCore.durationView(LIVE_STEP));
+});
+
+test('durationView：老记录（无 ms 字段）→ null，绝不 NaN、绝不 0', () => {
+  const old = {
+    n: 1, request: { questions: { 动作: {}, 参数: {}, 未完成: {} } }, response: {},
+    followUps: [], exec: { ok: true, elapsedMs: 1609 },
+  };
+  const d = AutoCore.durationView(old);
+  assert.equal(d.stepMs, null);
+  assert.equal(d.jevMs, null);
+  assert.equal(d.jevCalls, 1);          /* 调用次数仍可数出来 */
+  assert.equal(d.jevMeasured, 0);
+  assert.equal(d.jevPct, null);
+  assert.equal(d.otherMs, null);
+  assert.equal(d.actMs, 1609);          /* 动作耗时老记录本来就有 */
+});
+
+test('durationView：部分补问缺 ms —— jevMs 只累加测到的，jevMeasured 如实报数', () => {
+  const half = {
+    n: 3, ms: 8000, jevMs: 3000,
+    payload: { questions: { 动作: {} } }, response: {},
+    followUps: [{ kind: 'text', request: { questions: { 文本: {} } }, response: {} }],
+  };
+  const d = AutoCore.durationView(half);
+  assert.equal(d.jevMs, 3000);
+  assert.equal(d.jevCalls, 2);
+  assert.equal(d.jevMeasured, 1);
+});
+
+test('durationView：时钟回拨导致负值 → 钳 0 且带 skew 说明', () => {
+  const d = AutoCore.durationView({ n: 1, ms: -50, jevMs: 100, payload: { questions: { 动作: {} } }, response: {} });
+  assert.equal(d.stepMs, 0);
+  assert.match(d.skew, /计时为负/);
+});
+
+test('formatMs：毫秒/秒/空值', () => {
+  assert.equal(AutoCore.formatMs(820), '820ms');
+  assert.equal(AutoCore.formatMs(9950), '9.9s');
+  assert.equal(AutoCore.formatMs(63900), '63.9s');
+  assert.equal(AutoCore.formatMs(0), '0ms');
+  assert.equal(AutoCore.formatMs(null), '—');
+  assert.equal(AutoCore.formatMs(undefined), '—');
+  assert.equal(AutoCore.formatMs(NaN), '—');
+});
+
+test('stepDurationLine：副行文案 —— 正常 / 老记录 / 无调用 / 跑动中', () => {
+  assert.equal(AutoCore.stepDurationLine(LIVE_STEP), 'Jev 6.5s · 2 次调用 · 占 65%');
+  assert.equal(AutoCore.stepDurationLine({ n: 1, request: { questions: { 动作: {} } }, response: {} }),
+    '该记录无耗时数据');
+  assert.equal(AutoCore.stepDurationLine({ n: 1 }), '');
+  /* 跑动中：Jev 还没返回，此时说「该记录无耗时数据」是错的（记录正在写）*/
+  assert.equal(AutoCore.stepDurationLine({ n: 2, payload: { questions: { 动作: {} } } }, { live: true }), 'Jev 计时中…');
+  assert.equal(AutoCore.stepDurationLine(LIVE_STEP, { live: true }), 'Jev 6.5s · 2 次调用 · 占 65%');
+});
+
+test('actionsOf：把 ms 透出到每个行动（主调用 / 补问 / 生成输入）', () => {
+  const acts = AutoCore.actionsOf(LIVE_STEP);
+  assert.deepEqual(acts.map((a) => a.ms), [3200, 3300, 1200]);
+});
+
+test('stepDurationLine：部分补问缺 ms 时说明测到几次', () => {
+  const half = {
+    n: 3, ms: 8000, jevMs: 3000,
+    payload: { questions: { 动作: {} } }, response: {},
+    followUps: [{ kind: 'text', request: { questions: { 文本: {} } }, response: {} }],
+  };
+  assert.equal(AutoCore.stepDurationLine(half), 'Jev 3.0s · 2 次调用（1 次未计时） · 占 38%');
+});

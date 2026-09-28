@@ -767,6 +767,7 @@
       out.push({
         kind: 'main', title: dialog ? 'Jev 弹窗步 · 1 题' : 'Jev 首轮 · ' + n + ' 题',
         payload: mainPayload, response: s.response || null, error: s.jevError || null,
+        ms: numOrNull(s.jevMs),
       });
     }
     (s.followUps || []).forEach((r) => {
@@ -786,7 +787,7 @@
         payload: p, response: r.response || null, error: r.error || null,
         batch: r.batch != null ? r.batch : null, param: r.param || null, action: r.action || null,
         text: r.text || null, forAction: r.forAction || null, from: r.from || null,
-        role: r.role || null, ref: r.ref || null, why: r.why || null,
+        role: r.role || null, ref: r.ref || null, why: r.why || null, ms: numOrNull(r.ms),
       });
     });
     const L = s.llm;
@@ -794,7 +795,7 @@
       out.push({
         kind: 'llm', title: 'LLM 生成输入',
         payload: null, messages: L.messages || null, response: L.raw || L.response || null,
-        text: L.text || null, error: L.error || null,
+        text: L.text || null, error: L.error || null, ms: numOrNull(L.ms),
       });
     }
     return out;
@@ -806,6 +807,67 @@
     if (a.kind === 'main') return a.response ? 'ok' : 'pending';
     if (a.kind === 'llm') return a.text ? 'ok' : 'pending';
     return (a.param || a.action || a.text) ? 'ok' : 'pending';
+  }
+
+  /* ===================== 耗时视图（spec 2026-09-28 §4 §5） =====================
+   * 两个耗时的唯一权威：live step（payload / llm.raw）与落盘步骤（request /
+   * llm.response）两种形状都吃 —— 与 actionsOf 同一套归一（耗时也只从 actionsOf
+   * 的行动上读，不另开一条路径）。
+   * 字段缺失一律 null，绝不返回 NaN 或 0：0 是「测到了，就是 0ms」，
+   * 与「这条记录没测过」必须能分辨（老记录全靠这个区分）。
+   * 「生成输入」的 LLM 调用不计入 Jev（那是生成模型，不是 Jev），单列 llmMs。 */
+  function numOrNull(v) {
+    return typeof v === 'number' && isFinite(v) ? v : null;
+  }
+
+  /* 系统休眠 / NTP 回拨会让 Date.now() 差值变负：钳 0，并让调用方知道发生过 */
+  const SKEW_NOTE = '计时为负（系统时钟调整过？已按 0 显示）';
+
+  function durationView(step) {
+    const s = step || {};
+    let jevMs = null, jevCalls = 0, jevMeasured = 0;
+    actionsOf(s).forEach((a) => {
+      if (a.kind === 'llm') return;
+      jevCalls += 1;
+      const m = numOrNull(a.ms);
+      if (m == null) return;
+      jevMeasured += 1;
+      jevMs = (jevMs == null ? 0 : jevMs) + Math.max(0, m);
+    });
+    const rawStepMs = numOrNull(s.ms);
+    const stepMs = rawStepMs == null ? null : Math.max(0, rawStepMs);
+    const actMs = numOrNull(s.exec && s.exec.elapsedMs);
+    const llmMs = numOrNull(s.llm && s.llm.ms);
+    const skew = (rawStepMs != null && rawStepMs < 0) || (jevMs != null && jevMs < 0) ? SKEW_NOTE : null;
+    /* 其它 = 步耗时 − Jev − 动作 − 生成输入；负数（补问耗时重叠等异常）钳 0 */
+    let otherMs = null;
+    if (stepMs != null) {
+      otherMs = Math.max(0, stepMs - (jevMs || 0) - (actMs || 0) - (llmMs || 0));
+    }
+    return {
+      stepMs: stepMs, jevMs: jevMs, actMs: actMs, llmMs: llmMs, otherMs: otherMs,
+      jevCalls: jevCalls, jevMeasured: jevMeasured,
+      jevPct: (stepMs != null && stepMs > 0 && jevMs != null) ? Math.round(jevMs / stepMs * 100) : null,
+      skew: skew,
+    };
+  }
+
+  /* 820ms / 9.9s / 63.9s / —（null 与 NaN 一律 '—'，不留 NaN 给界面） */
+  function formatMs(ms) {
+    const m = numOrNull(ms);
+    if (m == null) return '—';
+    return m < 1000 ? Math.round(m) + 'ms' : (m / 1000).toFixed(1) + 's';
+  }
+
+  /* 树上步骤行的第二行文案。空串 = 这行不该出现（一个 Jev 调用都没有）。
+   * opt.live：这一步正在跑 —— Jev 还没返回时说「该记录无耗时数据」是错的（记录正在写）。 */
+  function stepDurationLine(step, opt) {
+    const d = durationView(step);
+    if (!d.jevCalls) return '';
+    if (d.jevMs == null) return (opt && opt.live) ? 'Jev 计时中…' : '该记录无耗时数据';
+    const miss = d.jevCalls > d.jevMeasured ? '（' + (d.jevCalls - d.jevMeasured) + ' 次未计时）' : '';
+    const pct = d.jevPct != null ? ' · 占 ' + d.jevPct + '%' : '';
+    return 'Jev ' + formatMs(d.jevMs) + ' · ' + d.jevCalls + ' 次调用' + miss + pct;
   }
 
   /* 会话 id：r-MMDD-HHmm-xxxx（与 server 端 RUN_ID_RE 严格一致，防路径穿越校验同一份规则） */
@@ -898,6 +960,9 @@
     isRefParam: isRefParam,
     actionsOf: actionsOf,
     actionStatus: actionStatus,
+    durationView: durationView,
+    formatMs: formatMs,
+    stepDurationLine: stepDurationLine,
     newRunId: newRunId,
     buildRunRecord: buildRunRecord
   };
