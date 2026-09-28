@@ -1033,3 +1033,39 @@ test('reconcile：平账 / 超差 / 缺数据', () => {
   assert.equal(bad.deltaMs, 62900);
   assert.equal(AutoCore.reconcile({ wallMs: 67070, prepMs: null, sumStepMs: 1, tailMs: 1 }), null);
 });
+
+/* ---------- 落盘格式（spec 2026-09-28 §5） ---------- */
+
+test('buildRunRecord：步骤与补问与 llm 的 ms 落盘；meta 带对账四件套', () => {
+  const rec = AutoCore.buildRunRecord({
+    id: 'r-0928-1200-abcd', runCfg: { goal: 'g', url: 'u', maxSteps: 3 },
+    startedAt: '2026-09-28T04:00:00.000Z', endedAt: '2026-09-28T04:01:07.000Z',
+    endState: 'done', timing: { prepMs: 3100, wallMs: 67070 },
+    steps: [
+      { n: 1, ms: 9950, jevMs: 3200, payload: { questions: { 动作: {} } }, response: {},
+        followUps: [{ kind: 'text', payload: { questions: { 文本: {} } }, response: {}, ms: 3300 }],
+        llm: { messages: [], raw: {}, text: 'x', ms: 1200 }, exec: { ok: true, elapsedMs: 1386 } },
+      { n: 2, exec: { ok: true, elapsedMs: 500 } },   /* 老形状：没测过耗时 */
+    ],
+  });
+  assert.equal(rec.steps[0].ms, 9950);
+  assert.equal(rec.steps[0].jevMs, 3200);
+  assert.equal(rec.steps[0].followUps[0].ms, 3300);
+  assert.equal(rec.steps[0].llm.ms, 1200);
+  assert.equal(rec.steps[1].ms, null);            /* 缺 → null（JSON 里是 null，不是丢字段） */
+  assert.equal(rec.meta.prepMs, 3100);
+  assert.equal(rec.meta.wallMs, 67070);
+  assert.equal(rec.meta.sumStepMs, 9950);         /* 只累加测到的 */
+  assert.equal(rec.meta.tailMs, 67070 - 3100 - 9950);
+});
+
+test('buildRunRecord：没传 timing（老调用方 / 进行中首存）→ 对账四件套为 null，不回归', () => {
+  const rec = AutoCore.buildRunRecord({
+    id: 'r-x', runCfg: { goal: 'g', url: 'u' }, startedAt: 't',
+    steps: [{ n: 1, ms: 500, payload: { questions: { 动作: {} } }, response: {} }],
+  });
+  assert.equal(rec.meta.prepMs, null);
+  assert.equal(rec.meta.wallMs, null);
+  assert.equal(rec.meta.tailMs, null);
+  assert.equal(rec.meta.sumStepMs, 500);          /* 步耗时照样能合，只是平不了账 */
+});

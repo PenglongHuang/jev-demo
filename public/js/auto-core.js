@@ -936,8 +936,12 @@
       n: s.n, label: s.label, pageInfo: s.pageInfo, snapshot: s.snapshot || null,
       refLabels: s.refLabels || null, decision: s.decision || null,
       request: s.payload || null, response: s.response || null, jevError: s.jevError || null,
+      ms: numOrNull(s.ms), jevMs: numOrNull(s.jevMs),
       exec: s.exec || null, terminal: s.terminal || null, anno: s.anno || null, annoError: s.annoError || null,
-      llm: s.llm ? { messages: s.llm.messages, response: s.llm.raw, text: s.llm.text, error: s.llm.error } : null,
+      llm: s.llm ? {
+        messages: s.llm.messages, response: s.llm.raw, text: s.llm.text,
+        error: s.llm.error, ms: numOrNull(s.llm.ms),
+      } : null,
       screenshot: s.screenshot || null, historyLine: s.historyLine || null,
       trim: s.trim || null, trimNote: s.trimNote || null,
       followUps: (s.followUps || []).map((r) => ({
@@ -945,11 +949,20 @@
         batch: r.batch != null ? r.batch : null, param: r.param || null, action: r.action || null,
         text: r.text || null, forAction: r.forAction || null, from: r.from || null,
         role: r.role || null, ref: r.ref || null, why: r.why || null, error: r.error || null,
+        ms: numOrNull(r.ms),
       })),
     }));
     const c = o.runCfg || {};
     const jevCalls = steps.reduce((a, s) => a + (s.request ? 1 : 0) + (s.followUps || []).length, 0);
     const llmCalls = steps.filter((s) => s.llm).length;
+    /* 对账四件套：wallMs 由调用方给（运行中=当下，结束时=最终值）；tailMs 倒推，
+     * 所以「准备 + Σ步 + 收尾 = 墙钟」在记录里恒成立，导出后能独立核对。
+     * 缺 timing / 缺 wallMs → 三项都为 null：老记录与「进行中首存」算不出来就不画。 */
+    const t = o.timing || {};
+    const sumMs = sumStepMs(steps).sumMs;
+    const prepMs = numOrNull(t.prepMs);
+    const wallMs = numOrNull(t.wallMs);
+    const tailMs = (wallMs == null || prepMs == null) ? null : Math.max(0, wallMs - prepMs - sumMs);
     return {
       meta: {
         id: o.id, goal: c.goal, startUrl: c.url,
@@ -960,7 +973,9 @@
         jevModel: o.jevModel, llmModel: o.llmModel,
         startedAt: o.startedAt, endedAt: o.endedAt || null,
         endState: o.endState || 'running', endReason: o.endReason || null,
-        stepCount: steps.length, jevCalls, llmCalls, exportedAt: o.exportedAt || null,
+        stepCount: steps.length, jevCalls, llmCalls,
+        prepMs: prepMs, sumStepMs: sumMs, tailMs: tailMs, wallMs: wallMs,
+        exportedAt: o.exportedAt || null,
       },
       steps,
     };
