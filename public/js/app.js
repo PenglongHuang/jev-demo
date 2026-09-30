@@ -29,22 +29,58 @@ const Config = (() => {
     customEndpoint: 'jev-custom-endpoint',
     llm: 'jev-llm',
     paramTrim: 'jev-param-trim',
+    snapshotTrim: 'jev-snapshot-trim',
   };
 
-  /* 「参数」题候选裁剪的默认值（与 AutoCore.normalizeTrim 的口径一致） */
-  const TRIM_DEFAULTS = { on: true, limit: 80, maxTranches: 3 };
+  /* 「参数」题候选算法的默认值：一律取自各模块自己的常量。
+   * 这里再抄一遍字面量的代价是真实的 —— 曾出现界面上写着 200、运行时按别的数切批，
+   * 因为口径分散在 app.js / auto-core.js / ref-recall.js 三处各写了一遍。 */
+  const TRIM_DEFAULTS = {
+    on: true,
+    algorithm: AutoCore.ALGORITHMS[0],
+    limit: RefFunnel.DEFAULT_LIMIT,
+    maxTranches: 3,
+    size: RefRecall.DEFAULT_SIZE,
+    topN: RefRecall.DEFAULT_TOPN,
+  };
+  const TRIM_ALGOS = AutoCore.ALGORITHMS;
   function normalizeTrim(raw) {
     const t = (raw && typeof raw === 'object') ? raw : {};
     const limit = Number(t.limit);
     const batches = Number(t.maxTranches);
+    const sizeRaw = Number(t.size);
+    const topNRaw = Number(t.topN);
+    const size = isFinite(sizeRaw) ? Math.max(10, Math.min(250, Math.round(sizeRaw))) : TRIM_DEFAULTS.size;
     return {
       on: t.on !== false,
+      algorithm: TRIM_ALGOS.indexOf(t.algorithm) === -1 ? TRIM_DEFAULTS.algorithm : t.algorithm,
       limit: isFinite(limit) ? Math.max(10, Math.min(250, Math.round(limit))) : TRIM_DEFAULTS.limit,
       maxTranches: isFinite(batches) ? Math.max(0, Math.min(5, Math.round(batches))) : TRIM_DEFAULTS.maxTranches,
+      size: size,
+      /* 召回数不得超过一批的容量（与 auto-core 同一口径） */
+      topN: isFinite(topNRaw) ? Math.max(1, Math.min(size, Math.round(topNRaw))) : TRIM_DEFAULTS.topN,
     };
   }
 
-  const current = { provider: 'official', key: '', endpoint: 'official', model: 'jev-latest', llm: { base: '', key: '', model: '' }, paramTrim: Object.assign({}, TRIM_DEFAULTS) };
+  /* 快照裁剪的默认值来自 SnapshotTrim.DEFAULT_BUDGET_BYTES（唯一的定义处）。
+   * budgetBytes 是**快照**的字节预算，不是总请求预算 —— 总请求还要加 questions。
+   * 那个「questions 稳定在 13~15KB」的旧估算只在「相关性裁剪」路线上成立；并行召回的
+   * 题目实测 30KB，配合中文页 0.424 tokens/byte，60,000 会放出 79KB / 33.7K tokens 的
+   * 请求（上游报 max_tokens_exceeded）。默认值因此降到 45,000。推导与实测见
+   * snapshot-trim.js 顶部注释。 */
+  const SNAP_TRIM_DEFAULTS = { on: true, budgetBytes: SnapshotTrim.DEFAULT_BUDGET_BYTES };
+  function normalizeSnapshotTrim(raw) {
+    const t = (raw && typeof raw === 'object') ? raw : {};
+    const b = Number(t.budgetBytes);
+    return {
+      on: t.on !== false,
+      budgetBytes: isFinite(b)
+        ? Math.max(8000, Math.min(200000, Math.round(b)))
+        : SNAP_TRIM_DEFAULTS.budgetBytes,
+    };
+  }
+
+  const current = { provider: 'official', key: '', endpoint: 'official', model: 'jev-latest', llm: { base: '', key: '', model: '' }, paramTrim: Object.assign({}, TRIM_DEFAULTS), snapshotTrim: Object.assign({}, SNAP_TRIM_DEFAULTS) };
   let draft = null;
 
   function readJson(key, fallback) {
@@ -68,6 +104,7 @@ const Config = (() => {
       ? { base: String(llm.base || ''), key: String(llm.key || ''), model: String(llm.model || '') }
       : { base: '', key: '', model: '' };
     current.paramTrim = normalizeTrim(readJson(STORAGE.paramTrim, null));
+    current.snapshotTrim = normalizeSnapshotTrim(readJson(STORAGE.snapshotTrim, null));
     updateBadge();
   }
 
@@ -81,7 +118,8 @@ const Config = (() => {
    * 这正是「高级参数怎么不见了」那类投诉的解药（原先它是被挤到弹窗折叠线以下了）。
    * 展开状态记在 localStorage：常用的人不用每次重开。 */
   const SLOT_KEY = 'jev-cfg-open';
-  const SLOTS = [['cfgLlmSlot', 'llm'], ['cfgTrimSlot', 'trim']];
+  const SLOTS = [['cfgLlmSlot', 'llm'], ['cfgTrimSlot', 'trim'], ['cfgSnapshotSlot', 'snap']];
+  const SLOT_IDS = { llm: 'cfgLlmSlot', trim: 'cfgTrimSlot', snap: 'cfgSnapshotSlot' };
   function applySlotOpen() {
     const st = readJson(SLOT_KEY, {}) || {};
     SLOTS.forEach(([id, k]) => {
@@ -104,9 +142,28 @@ const Config = (() => {
   }
   /* 展开某一节（保存校验失败时用：报错指向节内的字段，却让它收着就白报了） */
   function openSlot(kind) {
-    const d = document.getElementById(kind === 'llm' ? 'cfgLlmSlot' : 'cfgTrimSlot');
+    const d = document.getElementById(SLOT_IDS[kind] || 'cfgTrimSlot');
     if (d && !d.open) { d.open = true; try { d.scrollIntoView({ block: 'nearest' }); } catch (_) {} }
   }
+  /* 候选算法两套字段只显示当前这套。
+   * 注意 hidden 要靠 CSS 配合：.trim-fields 自带 display:grid 会盖掉 [hidden] 的
+   * display:none（styles.css 里有一条显式规则兜这个）。 */
+  function applyAlgoFields() {
+    const sel = document.getElementById('cfgTrimAlgo');
+    if (!sel) return;
+    const algo = sel.value;
+    const par = document.getElementById('trimParallelFields');
+    const rk = document.getElementById('trimRankedFields');
+    if (par) par.hidden = algo !== 'parallel';
+    if (rk) rk.hidden = algo !== 'ranked';
+    const tip = document.getElementById('cfgTrimAlgoTip');
+    if (tip) {
+      tip.textContent = algo === 'parallel'
+        ? '并行召回：首轮仍是三题，「参数」只给本页前 N 个元素；动作需要定位元素时（click / fill / type / select / check / uncheck / hover）再并行召回其余元素（各批按概率取前若干），最后在「首轮前 N 个 + 召回合并」里做一次最终决策。工程侧不排序、不丢元素；这条路线没有「其他」兜底项。'
+        : '相关性裁剪：按关键词稀有度 / 可点击 / 已失败降权的确定性排序取前 N 个；Jev 找不到目标时选「其他」展开下一批（最多 N 批）。';
+    }
+  }
+
   function refreshSlotStates() {
     const llm = document.getElementById('cfgLlmState');
     if (llm) {
@@ -118,9 +175,19 @@ const Config = (() => {
     const trim = document.getElementById('cfgTrimState');
     if (trim) {
       const on = document.getElementById('cfgTrimOn').checked;
-      trim.textContent = on
-        ? '智能裁剪 开 · 上限 ' + document.getElementById('cfgTrimLimit').value + ' · 批次 ' + document.getElementById('cfgTrimBatches').value
-        : '智能裁剪 关（全量发送）';
+      const algo = document.getElementById('cfgTrimAlgo').value;
+      trim.textContent = !on ? '候选收敛 关（全量发送）'
+        : algo === 'parallel'
+          ? '并行召回 开 · 每批 ' + document.getElementById('cfgTrimSize').value
+            + ' · 召回 ' + document.getElementById('cfgTrimTopN').value
+          : '相关性裁剪 开 · 上限 ' + document.getElementById('cfgTrimLimit').value
+            + ' · 批次 ' + document.getElementById('cfgTrimBatches').value;
+    }
+    const snap = document.getElementById('cfgSnapState');
+    if (snap) {
+      const on = document.getElementById('cfgSnapOn').checked;
+      const kb = Math.round(Number(document.getElementById('cfgSnapBudget').value) / 1024);
+      snap.textContent = !on ? '快照裁剪 关（超预算会整轮失败）' : '超 ' + kb + 'KB 才裁';
     }
   }
 
@@ -149,12 +216,15 @@ const Config = (() => {
     });
     document.getElementById('configTest').addEventListener('click', testConnectivity);
     /* 节内任何改动都刷新摘要行上的当前值 */
-    ['cfgLlmBase', 'cfgLlmKey', 'cfgLlmModel', 'cfgTrimOn', 'cfgTrimLimit', 'cfgTrimBatches'].forEach((id) => {
+    ['cfgLlmBase', 'cfgLlmKey', 'cfgLlmModel', 'cfgTrimOn', 'cfgTrimLimit', 'cfgTrimBatches',
+      'cfgTrimSize', 'cfgTrimTopN', 'cfgTrimAlgo', 'cfgSnapOn', 'cfgSnapBudget'].forEach((id) => {
       const n = document.getElementById(id);
       if (!n) return;
       n.addEventListener('input', refreshSlotStates);
       n.addEventListener('change', refreshSlotStates);
     });
+    /* 切算法时字段组跟着换（并行召回 / 相关性裁剪各一套参数） */
+    document.getElementById('cfgTrimAlgo').addEventListener('change', applyAlgoFields);
     bindSlotState();
   }
 
@@ -174,8 +244,14 @@ const Config = (() => {
     document.getElementById('cfgLlmKey').value = current.llm.key;
     document.getElementById('cfgLlmModel').value = current.llm.model;
     document.getElementById('cfgTrimOn').checked = current.paramTrim.on;
+    document.getElementById('cfgTrimAlgo').value = current.paramTrim.algorithm;
     document.getElementById('cfgTrimLimit').value = String(current.paramTrim.limit);
     document.getElementById('cfgTrimBatches').value = String(current.paramTrim.maxTranches);
+    document.getElementById('cfgTrimSize').value = String(current.paramTrim.size);
+    document.getElementById('cfgTrimTopN').value = String(current.paramTrim.topN);
+    document.getElementById('cfgSnapOn').checked = current.snapshotTrim.on;
+    document.getElementById('cfgSnapBudget').value = String(current.snapshotTrim.budgetBytes);
+    applyAlgoFields();
     applySlotOpen();
     refreshSlotStates();
     refreshFormForProvider(draft.provider, true);
@@ -332,10 +408,24 @@ const Config = (() => {
     }
     localStorage.setItem(STORAGE.llm, JSON.stringify({ base: llmBase, key: llmKey, model: llmModel }));
 
-    /* 高级参数：候选项裁剪（只影响 playwright-jev-agent 的「参数」题） */
+    /* 高级参数：候选收敛（只影响 playwright-jev-agent 的「参数」题）。
+     * 两套算法各校验各的参数 —— 并行召回看批次大小/召回数，相关性裁剪看上限/批次。 */
+    const trimAlgo = document.getElementById('cfgTrimAlgo').value;
     const trimLimit = Number(document.getElementById('cfgTrimLimit').value);
     const trimBatches = Number(document.getElementById('cfgTrimBatches').value);
-    if (document.getElementById('cfgTrimOn').checked) {
+    const trimSize = Number(document.getElementById('cfgTrimSize').value);
+    const trimTopN = Number(document.getElementById('cfgTrimTopN').value);
+    if (document.getElementById('cfgTrimOn').checked && trimAlgo === 'parallel') {
+      if (!isFinite(trimSize) || trimSize < 10 || trimSize > 250) {
+        openSlot('trim');
+        return toast('批次大小需在 10–250 之间');
+      }
+      if (!isFinite(trimTopN) || trimTopN < 1 || trimTopN > trimSize) {
+        openSlot('trim');
+        return toast('每批召回数需在 1–批次大小（' + trimSize + '）之间');
+      }
+    }
+    if (document.getElementById('cfgTrimOn').checked && trimAlgo === 'ranked') {
       if (!isFinite(trimLimit) || trimLimit < 10 || trimLimit > 250) {
         openSlot('trim');
         return toast('候选元素上限需在 10–250 之间（接口硬上限 255）');
@@ -347,8 +437,24 @@ const Config = (() => {
     }
     localStorage.setItem(STORAGE.paramTrim, JSON.stringify(normalizeTrim({
       on: document.getElementById('cfgTrimOn').checked,
+      algorithm: trimAlgo,
       limit: trimLimit,
       maxTranches: trimBatches,
+      size: trimSize,
+      topN: trimTopN,
+    })));
+
+    /* 高级参数：快照裁剪（只影响发往 Jev 的 state.页面快照）。
+     * 预算是**快照**字节数，不是总请求；总请求还要加 questions 的 13~15KB。 */
+    const snapOn = document.getElementById('cfgSnapOn').checked;
+    const snapBudget = Number(document.getElementById('cfgSnapBudget').value);
+    if (snapOn && (!isFinite(snapBudget) || snapBudget < 8000 || snapBudget > 200000)) {
+      openSlot('snap');
+      return toast('快照预算需在 8000–200000 字节之间');
+    }
+    localStorage.setItem(STORAGE.snapshotTrim, JSON.stringify(normalizeSnapshotTrim({
+      on: snapOn,
+      budgetBytes: snapBudget,
     })));
 
     loadProvider(providerId);
@@ -369,6 +475,10 @@ const Config = (() => {
     paramTrim: {
       get: function () { return Object.assign({}, current.paramTrim); },
       defaults: function () { return Object.assign({}, TRIM_DEFAULTS); },
+    },
+    snapshotTrim: {
+      get: function () { return Object.assign({}, current.snapshotTrim); },
+      defaults: function () { return Object.assign({}, SNAP_TRIM_DEFAULTS); },
     },
   };
 })();

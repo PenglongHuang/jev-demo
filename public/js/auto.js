@@ -24,12 +24,15 @@ const Auto = (() => {
     addVar: document.getElementById('autoAddVar'),
     browser: document.getElementById('autoBrowser'),
     browserMode: document.getElementById('autoBrowserMode'),
+    backend: document.getElementById('autoBackend'),
     cdpField: document.getElementById('autoCdpField'),
     cdpTarget: document.getElementById('autoCdpTarget'),
     cdpWarn: document.getElementById('autoCdpWarn'),
     screen: document.getElementById('autoScreen'),
     maxSteps: document.getElementById('autoMaxSteps'),
     screenshot: document.getElementById('autoScreenshot'),
+    pauseFirst: document.getElementById('autoPauseFirst'),
+    pauseField: document.getElementById('autoPauseField'),
     closeBrowser: document.getElementById('autoCloseBrowser'),
     stop: document.getElementById('autoStop'),
     start: document.getElementById('autoStart'),
@@ -77,9 +80,26 @@ const Auto = (() => {
    * 放在模块级是因为补问逻辑（resolveMoreBatches）也要读它。 */
   let failedRefs = Object.create(null);
   let refPageUrl = '';
+  /* 上一步动作顺带带回的快照（driver 的 act.snapshot）——「直接顶替下一步的 snapshot」。
+   * 有它就省掉这一步开头那次 /api/browser/snapshot（cdp 模式下那条还要多一条守卫 eval，
+   * 一次进程固定约 0.9s，两次约 1.8s），而且它取自动作之后的「等稳定之后」，比现在
+   * 在动作之前拍更贴近模型要判断的那一页。
+   * 收不收、什么时候清，规则全在 AutoCore.makeSnapshotCarrier（那边有单测盯着）：
+   * 只有动作成功且带回非空字符串才收，取走即清，开跑时 reset。
+   * 兜底永远是真取一次 —— 那也是原生弹窗唯一能被发现的地方（snapshot 接口报 modal state
+   * 才转得出「弹窗步」）。 */
+  const snapshotCarrier = AutoCore.makeSnapshotCarrier();
   let startTs = 0;
   let timerId = null;
   let finished = false;
+  /* 耗时三个锚点（spec 2026-09-28 §4）：准备 / 步骤 / 收尾 的分界，
+   * 三者与 startTs 一起构成恒等式「准备 + Σ步耗时 + 收尾 = 墙钟」。
+   * 墙钟口径必须与顶部那个秒数一致（elapsedMs()）—— 它**扣掉了人工门的等待**
+   * （人工登录三分钟不该算进任务耗时）。所以准备也照样扣：prepMs 在循环入口一次算定。 */
+  let loopStartTs = 0;         /* 主循环真正开始（准备工作结束）的时刻 */
+  let prevStepEndTs = 0;       /* 上一步最后一个动作做完的时刻：步耗时从它起算 */
+  let prepMs = null;           /* 准备耗时（已扣除人工门等待），循环入口定下后不再变 */
+  let finalWallMs = null;      /* 结束那一刻的墙钟，供落盘与对账条定格 */
 
   /* ---------- 会话落盘（设计 §5） ---------- */
   let runId = null;            // 本轮会话 id（start 时生成）
@@ -102,6 +122,12 @@ const Auto = (() => {
           endedAt: final ? new Date().toISOString() : null,
           endState: final ? (els.runPill.dataset.state || 'error') : 'running',
           endReason: final ? endReasonText : null,
+          /* 对账两件套：运行中墙钟取当下（随时可平账），结束时已由 finishRun 定格。
+           * 走 elapsedMs() 与顶部秒数同源（人工门等待不计入）。 */
+          timing: {
+            prepMs: prepMs,
+            wallMs: finalWallMs != null ? finalWallMs : (startTs ? elapsedMs() : null),
+          },
           steps,
         });
         const r = await apiJson('/api/runs/' + runId, record, { method: 'PUT' });
@@ -274,18 +300,69 @@ const Auto = (() => {
   async function openSession(which) {
     if (which === 'current') {
       view.sess = 'current'; viewRecord = null;
-      renderSessDd(); renderFlow();
+      renderSessDd(); renderFlow(); syncSessUrl();
       return;
     }
     const r = await apiJson('/api/runs/' + which, null, { cache: 'no-store' });
     if (!r.ok) {
       toast('历史会话读取失败：' + apiErrText(r));
       refreshRunsList();
-      return;
+      return;                    /* 视图没动，地址栏也别动 —— 别把一条读不出来的 id 写进 URL */
     }
     viewRecord = hydrateRecord(r);
     view.sess = which; view.type = 'session'; view.follow = false;
-    renderSessDd(); renderFlow();
+    renderSessDd(); renderFlow(); syncSessUrl();
+  }
+
+  /* ---------- URL 里的会话（?sess=<id>） ----------
+   * 会话视图做成可分享的：看历史会话时地址栏写 ?sess=<id>，看本页这一轮时把参数清掉
+   * （于是默认 URL 与这个功能上线前逐字一致，不带参数的链接行为完全没变）。
+   *
+   * 用 replaceState 而不是 pushState：本页其它状态切换（模式 / 演示场景 / state 编辑）
+   * 一律不进浏览器历史，只给会话开一个例外会让「后退」的行为变得难以预测 —— 后退到底是
+   * 回上一个会话还是上一个页面？现在统一是「上一步操作不进历史」，后退永远离开本页。
+   *
+   * 正在跑的这一轮不进 URL：那是页面自己的活视图，刷新后本页会起一轮新的空会话，
+   * 把它当成「可分享的既成记录」分享出去只会误导人（列表里它会被标成「中断」）。 */
+  const SESS_PARAM = 'sess';
+
+  function urlSessId() {
+    try { return new URL(location.href).searchParams.get(SESS_PARAM) || ''; }
+    catch (_) { return ''; }
+  }
+
+  /* 把「正在看哪个会话」写回地址栏。写不进去（file:// / 被策略挡）就静默跳过：
+   * 地址栏同步是附赠品，会话切换本身不该因为它失败。 */
+  function syncSessUrl() {
+    try {
+      const u = new URL(location.href);
+      if (view.sess === 'current') u.searchParams.delete(SESS_PARAM);
+      else u.searchParams.set(SESS_PARAM, view.sess);
+      const next = u.pathname + u.search + u.hash;
+      /* 只在真的变了的时候写：无谓的 replaceState 会把「复制 URL」之外的其它 hash 改动搅乱 */
+      if (next !== location.pathname + location.search + location.hash) {
+        /* 必须写 window.history：本文件第 73 行有个同名的 `let history = []`（已完成步骤），
+         * 裸写 history 会被它遮住，运行时炸出 "replaceState is not a function"。 */
+        window.history.replaceState(null, '', next);
+      }
+    } catch (_) { /* 地址栏不可写：不影响会话切换 */ }
+  }
+
+  /* 启动时按 URL 落到那条会话上。列表要先拉回来 —— 一是这里要靠它判断 id 是否真的存在
+   * （不然只会得到一句笼统的「读取失败」，看不出是 id 过期还是服务出问题），二是
+   * 「本页这一轮」那条要排在下拉列表最前。 */
+  async function openSessionFromUrl() {
+    const id = urlSessId();
+    if (!id || id === 'current') { syncSessUrl(); return; }
+    /* 会话树在 auto 面板里：不切过去，深链打开的页面看上去像「什么都没发生」 */
+    switchMode('auto');
+    try { await refreshRunsList(); } catch (_) { /* 列表拿不到也往下走，交给 openSession 报错 */ }
+    if (id !== runId && !runsList.some((m) => m.id === id)) {
+      toast('URL 里的会话不存在或已被清理：' + id);
+      openSession('current');    /* 顺带把地址栏里这条死 id 清掉 */
+      return;
+    }
+    await openSession(id);
   }
 
   /* 树视图状态：sess='current' 看本页运行，否则为历史会话 id；type= session|step|action */
@@ -293,7 +370,13 @@ const Auto = (() => {
   let viewRecord = null;     // 历史会话记录（已 hydrate 成运行时形状）
   let runsList = [];         // GET /api/runs 列表（下拉数据源）
 
-  const STEP_GAP_MS = 800;   // 步间间隔（设计 §11）
+  /* 步间间隔（设计 §11）。**默认 0**：这一步的页面稳定由动作自带的 settle 负责
+   * （动作之后的静默期 + 等动作期间发出的请求 + 取快照，见 browser-driver 的
+   * SETTLE_MS / SETTLE_REQ_CAP_MS），紧接的下一步读的也是同一份已稳定的页面，
+   * 这里再静默 800ms 纯属白等 —— 8 步就是 6.4s，占整轮墙钟的 8%。
+   * 留这个常量而不是删掉：演示要让人眼看清楚时，把它调回几百毫秒即可，
+   * 结算口径（settleStepMs 把这段算进上一步）不用动。 */
+  const STEP_GAP_MS = 0;
 
   /* ---------- 小工具 ---------- */
   function el(tag, cls, text) {
@@ -315,16 +398,9 @@ const Auto = (() => {
     return (viewRecord && viewRecord.meta && viewRecord.meta.variables) || [];
   }
   function hydrateRecord(rec) {
-    /* 落盘形状（request / llm.response）→ 运行时形状（payload / llm.raw），
-     * 让全部现有渲染函数（decisionSummaryHtml 等）对历史会话零改动可用 */
-    return {
-      meta: rec.meta,
-      steps: (rec.steps || []).map((s) => Object.assign({}, s, {
-        payload: s.payload || s.request || null,
-        followUps: (s.followUps || []).map((r) => Object.assign({}, r, { payload: r.payload || r.request || null })),
-        llm: s.llm ? { messages: s.llm.messages, raw: s.llm.response, text: s.llm.text, error: s.llm.error } : null,
-      })),
-    };
+    /* 实现在 auto-core（纯逻辑、可被 node:test 往返对账）——
+     * 这条「落盘 → 重新载入 → 面板」的边界原先只活在浏览器里，丢字段丢得无声无息 */
+    return AutoCore.hydrateRecord(rec);
   }
 
   /* ---------- 环境探测（设计 §4） ---------- */
@@ -558,6 +634,14 @@ const Auto = (() => {
       goal: '两笔发货并复核（严格按 ①→⑤ 顺序逐步执行，不要跳步、不要合并）：① 在「订单状态」下拉框选择「已付款待发货」；② 找到商品为 AirPods Pro 2（USB-C 国行）且买家是王小明的那笔订单，点击该行的「发货」；③ 再找到商品为「AirPods Pro 2 保护套」、买家张伟的待发货订单，点击「发货」；④ 把「订单状态」切到「已发货」；⑤ 在顶部搜索框（提示文字为「搜索订单号 / 买家昵称 / 收件人手机号」的键盘输入框，不是「订单状态」下拉框）填入「王小明」，确认第 ② 步那笔订单（金额 ¥1,899）已出现在已发货列表。其余 AirPods 订单（AirPods 4、港版等干扰项）保持原状不动。',
       vars: [{ name: '商品', value: 'AirPods Pro 2' }, { name: '买家', value: '王小明' }, { name: '待发货状态', value: '已付款待发货' }, { name: '已发货状态', value: '已发货' }],
     },
+    {
+      /* 与上一个「订单后台」场景刻意成对：同一个业务、同一类页面，但那一个把步骤
+       * ①→⑤ 写死给模型，这一个只给业务意图 —— 用来观察 Jev 自己能不能把意图拆成
+       * 可执行的步骤（泛化能力），也用来验证它在更多字段 / 更复杂筛选下还找不找得准。 */
+      id: 'orders-complex', icon: '🧾', name: '订单后台（复杂）', path: '/demo/orders-complex.html',
+      goal: '客服接到一位金卡会员的催单：这笔订单买的是 AirPods Pro 2 正品耳机，已经付款但仓库还没安排出库。请把这一笔订单标记为已发货，其余订单一律保持原样。注意别发错——保护套、耳塞这类配件，以及 AirPods 4 等其它型号，都不是这位会员买的那个。',
+      vars: [{ name: '会员等级', value: '金卡' }, { name: '商品关键词', value: 'AirPods Pro 2' }],
+    },
   ];
 
   /* 选中态直接由「当前 URL 是否落在某个场景页」推出，不另存状态 ——
@@ -608,6 +692,21 @@ const Auto = (() => {
    * 刷新页面就丢会很难受。键名沿用 app.js 的 jev- 前缀约定。 */
   const MODE_KEY = 'jev-auto-browser-mode';
   const CDP_KEY = 'jev-auto-cdp-target';
+  /* 驱动后端也记住：切回 playwright-cli 通常是「进程内这条在某个站点上出问题」的
+   * 刻意选择，刷新就丢会让人反复踩同一个坑。 */
+  const BACKEND_KEY = 'jev-auto-backend';
+
+  /* 合法后端同样以 DOM 里的真实 option 为准（与 validModes 同一条理由：
+   * localStorage 里的脏值不该用，而权威清单只能有一处） */
+  function validBackends() {
+    return els.backend ? Array.from(els.backend.options).map((o) => o.value) : ['inproc'];
+  }
+  function readStoredBackend() {
+    try {
+      const b = localStorage.getItem(BACKEND_KEY);
+      return validBackends().includes(b) ? b : 'inproc';
+    } catch (_) { return 'inproc'; }
+  }
 
   /* 合法模式的唯一来源是 #autoBrowserMode 里的真实 option（index.html）——
    * 早先这里和 server 各硬编码了一份 ['isolated','persistent','cdp']，加模式要记得改三处。
@@ -633,9 +732,11 @@ const Auto = (() => {
       cadence: cadence(),
       browser: els.browser.value,
       mode: els.browserMode.value,
+      backend: els.backend.value,
       cdp: els.cdpTarget.value.trim(),
       screen: els.screen.value,
       screenshot: els.screenshot.checked,
+      pauseFirst: els.pauseFirst.checked,
     };
   }
   /* 运行参数：弹窗里那几个。取消弹窗只回滚这一份。 */
@@ -645,9 +746,11 @@ const Auto = (() => {
       cadence: cadence(),
       browser: els.browser.value,
       mode: els.browserMode.value,
+      backend: els.backend.value,
       cdp: els.cdpTarget.value.trim(),
       screen: els.screen.value,
       screenshot: els.screenshot.checked,
+      pauseFirst: els.pauseFirst.checked,
     };
   }
   function writeRunParams(c) {
@@ -657,9 +760,11 @@ const Auto = (() => {
     if (radio) radio.checked = true;
     els.browser.value = c.browser;
     els.browserMode.value = c.mode;
+    if (validBackends().includes(c.backend)) els.backend.value = c.backend;
     els.cdpTarget.value = c.cdp || '';
     els.screen.value = c.screen;
     els.screenshot.checked = c.screenshot;
+    els.pauseFirst.checked = Boolean(c.pauseFirst);
     refreshModeFields();
   }
 
@@ -670,6 +775,10 @@ const Auto = (() => {
     els.cdpField.hidden = !cdp;
     setWarnbar(els.cdpWarn, cdp);
     els.screen.disabled = cdp;
+    /* 「开跑后先暂停」在 cdp 下没有意义：那道门是为了让**我们起的**那个干净浏览器先被人工
+     * 登录，而 cdp 复用的本来就是你已经登录着的浏览器。留着它只会承诺一件不会发生的事 ——
+     * 与上面「窗口尺寸在 cdp 下禁用」同一条理由。 */
+    els.pauseField.hidden = cdp;
     if (cdp) probeCdp();
     renderPreflight();   /* 模式/端点变了，开跑前检查跟着重算（cdp 的起始 URL 也可能被改） */
   }
@@ -761,7 +870,10 @@ const Auto = (() => {
       modeLabel(),
       screenLabel(),
       f.screenshot ? '每步截图' : '不截图',
-    ].join(' · '));
+      /* cdp 下这个勾选框是隐藏的（readForm 读到的可能仍是残留的 true），所以这里跟着
+       * 一起判模式 —— 摘要不许承诺一件该模式下不会发生的事，与 screenLabel 同一条规矩。 */
+      (f.pauseFirst && f.mode !== 'cdp') ? '开跑后先暂停' : '',
+    ].filter(Boolean).join(' · '));
   }
 
   /* 与 start() 共用同一份规则，避免两处漂移 */
@@ -797,6 +909,7 @@ const Auto = (() => {
     try {
       localStorage.setItem(MODE_KEY, els.browserMode.value);
       localStorage.setItem(CDP_KEY, els.cdpTarget.value.trim());
+      localStorage.setItem(BACKEND_KEY, els.backend.value);
     } catch (_) { /* 隐私模式等写不进去：不影响运行 */ }
     closeTaskModal();
     toast('运行参数已更新');
@@ -1005,6 +1118,9 @@ const Auto = (() => {
     const sel = (on) => (on ? ' sel' : '');   /* 选中态只进 class，key 保持纯净可解析 */
     /* 会话根标记：空心 indigo 圆环（容器语义），运行中转琥珀脉冲 —— 不与步骤状态实心点混色 */
     const sessRunning = view.sess === 'current' ? running : (meta && meta.endState) === 'running';
+    /* 正在跑的那一步：只有它跳秒。条件是 stepDot 里判 'run' 的同一套 ——
+     * 历史会话（view.sess !== 'current'）的最后一步绝不能显示成还在跑。 */
+    const liveStep = (view.sess === 'current' && running && steps.length) ? steps[steps.length - 1] : null;
     tree.appendChild(mk('sess', 'sess-row' + sel(view.type === 'session'),
       '<span class="dot root' + (sessRunning ? ' run' : '') + '"></span>'
       + '<span class="lb">会话 <span class="mono">' + escapeHtml(meta && meta.id || '—') + '</span> · ' + escapeHtml(shortStr((meta && meta.goal) || '', 14)) + '</span>'));
@@ -1015,18 +1131,25 @@ const Auto = (() => {
        * 单次调用是常态，它不提供任何可比较的信息。has-acts 的 ::before 就是给子行
        * 引出的那段导轨，没有子行时必须一并去掉，否则步骤行下面悬着一截断线。
        * 判定必须是 > 1：单行动步骤的树节点仍是 .tn.kid（e2e 的 clickTreeNode 按文字找它）。 */
+      const live = st === liveStep && running;      /* 只有正在跑的那一步才说得上「计时中」 */
       tree.appendChild(mk('s:' + st.n, 'kid' + (acts.length > 1 ? ' has-acts' : '') + sel(view.type === 'step' && view.n === st.n),
         '<span class="dot ' + stepDot(st) + '"></span>'
         /* 命令段（click 【e48 · …】）走等宽小字号，与中文 sans 区分；CJK 自动回退 */
         + '<span class="lb"><b>步骤 ' + st.n + '</b> · <span class="mono">' + escapeHtml(st.label || '决策中…') + '</span></span>'
-        /* 耗时右对齐固定宽（无值占位）：右侧自成一条安静的数据列，标签区不随耗时跳动 */
-        + '<span class="dur">' + (st.exec && st.exec.elapsedMs != null ? st.exec.elapsedMs + 'ms' : '') + '</span>'));
+        /* 右侧只有 Jev 耗时（这一步各**段** Jev 调用之和：首轮 → 召回 → 补问串行相加；
+         * 并行的召回批次算一段，只取最慢那一批，不是 K 批相加）。**只有数字** —— 树宽 320px，
+         * 文案一长就把标签挤到第三行被两行钳制吃掉（E2E S9.9 实测）。调用次数进 title 与
+         * 步骤详情头部，会话总览表的「行动」列另有次数。步耗时不上树（2026-09-28 收窄）。 */
+        + '<span class="dur jev" title="' + escapeHtml(AutoCore.stepDurationTitle(st)) + '">'
+        + escapeHtml(AutoCore.stepDurationLine(st, { live: live })) + '</span>'));
       if (acts.length <= 1) return;   /* 单次调用：步骤行自己就是这条调用，不另起子行 */
       acts.forEach((a, i) => {
         /* 末个行动标 last：导轨截止到行中线，与父步骤形成肘形收口 */
         tree.appendChild(mk('a:' + st.n + ':' + i, 'act-kid' + (i === acts.length - 1 ? ' last' : '') + sel(view.type === 'action' && view.n === st.n && view.i === i),
           '<span class="k ' + (a.kind === 'llm' ? 'llm' : 'jev') + '">' + (a.kind === 'llm' ? 'LLM' : 'JEV') + '</span>'
           + '<span class="lb">' + escapeHtml(a.title) + '</span>'
+          /* 每次调用各自的耗时（同属 Jev 耗时，只是拆到每次调用） */
+          + '<span class="dur">' + escapeHtml(AutoCore.formatMs(a.ms)) + '</span>'
           + '<span class="dot ' + AutoCore.actionStatus(a) + '"></span>'));
       });
     });
@@ -1072,9 +1195,13 @@ const Auto = (() => {
       const acts = AutoCore.actionsOf(st);
       const a = acts[view.i] || acts[0];
       view.i = acts.indexOf(a);
+      /* 这次调用的耗时 + 输入/输出 token 直接写在头部（原本只埋在「原始报文」的 JSON 里，
+       * 要展开长报文才能看到）。三种行动同构：首轮 / 补问走 Jev，生成输入走生成模型。 */
+      const metrics = AutoCore.actionMetricsLine(a);
       head.innerHTML = '<span class="crumb">会话 ▸ 步骤 ' + st.n + ' ▸ 行动 ' + (view.i + 1) + '/' + acts.length + '</span>'
         + '<h2>' + escapeHtml(a.title) + '</h2>'
-        + '<span class="fd-tag ' + (a.kind === 'llm' ? 'llm' : 'jev') + '">' + (a.kind === 'llm' ? '生成模型' : 'Jev') + '</span>';
+        + '<span class="fd-tag ' + (a.kind === 'llm' ? 'llm' : 'jev') + '">' + (a.kind === 'llm' ? '生成模型' : 'Jev') + '</span>'
+        + (metrics ? '<span class="fd-dur">' + escapeHtml(metrics) + '</span>' : '');
       body.innerHTML = actionViewHtml(st, a);
       animateBars(body);
     }
@@ -1082,10 +1209,15 @@ const Auto = (() => {
 
   function stepBadgeHtml(st) {
     const e = st.exec;
+    /* 详情头部只补一个 Jev 合计（含调用次数）。步耗时/其中动作不显示 —— 2026-09-28 收窄为
+     * 「只展示 Jev」；单条命令的往返耗时仍在下面命令那一行 · 1239ms 里。 */
+    const d = AutoCore.durationView(st);
+    const jev = (d.jevMs != null && d.jevCalls)
+      ? '<span class="fd-dur">Jev ' + AutoCore.formatMs(d.jevMs) + '（' + d.jevCalls + ' 次调用）</span>' : '';
     if (st.terminal) return '<span class="fd-state term">终止 · ' + escapeHtml(st.terminal) + '</span>';
-    if (!e) return '<span class="fd-state run">进行中…</span>';
-    if (e.skipped) return '<span class="fd-state warn">已跳过</span>';
-    return '<span class="fd-state ' + (e.ok ? 'ok' : 'err') + '">' + (e.ok ? '✓ 成功' : '✗ 失败') + (e.elapsedMs != null ? ' · ' + e.elapsedMs + 'ms' : '') + '</span>';
+    if (!e) return '<span class="fd-state run">进行中…</span>' + jev;
+    if (e.skipped) return '<span class="fd-state warn">已跳过</span>' + jev;
+    return '<span class="fd-state ' + (e.ok ? 'ok' : 'err') + '">' + (e.ok ? '✓ 成功' : '✗ 失败') + (e.elapsedMs != null ? ' · ' + e.elapsedMs + 'ms' : '') + '</span>' + jev;
   }
 
   function sessionHeadHtml() {
@@ -1113,14 +1245,17 @@ const Auto = (() => {
       + '<div class="fd-kv"><div class="fd-kv-k">输入变量</div><div class="fd-kv-v">' + vars + '</div></div>'
       + '<div class="fd-kv"><div class="fd-kv-k">模型</div><div class="fd-kv-v mono">' + escapeHtml((meta.jevModel || '—') + (meta.llmModel ? ' · 生成 ' + meta.llmModel : '')) + '</div></div>'
       + '<div class="sec-t" style="margin-top:6px">步骤总览（点击行查看详情）</div>'
-      + '<table class="ov"><thead><tr><th>#</th><th>步骤</th><th>动作</th><th>状态</th><th>用时</th><th>行动</th></tr></thead><tbody>'
+      /* 「用时」列改成 Jev 耗时（含调用次数）：2026-09-28 收窄为只展示 Jev。
+       * 单条动作的往返耗时仍在步骤详情的命令那一行。 */
+      + '<table class="ov"><thead><tr><th>#</th><th>步骤</th><th>动作</th><th>状态</th><th>Jev 耗时</th><th>行动</th></tr></thead><tbody>'
       + list.map((s) => {
-        const d = s.decision || {};
+        const dd = s.decision || {};
+        const d = AutoCore.durationView(s);
         const nAct = AutoCore.actionsOf(s).length;
         return '<tr data-go="s:' + s.n + '"><td class="mono">' + s.n + '</td><td>' + escapeHtml(s.label || '…') + '</td>'
-          + '<td class="mono">' + escapeHtml(d.action || '—') + (d.param ? ' ' + escapeHtml(d.param) : '') + '</td>'
+          + '<td class="mono">' + escapeHtml(dd.action || '—') + (dd.param ? ' ' + escapeHtml(dd.param) : '') + '</td>'
           + '<td>' + (s.exec ? (s.exec.skipped ? '跳过' : (s.exec.ok ? '成功' : '失败')) : (s.terminal ? '终止' : '…')) + '</td>'
-          + '<td class="mono">' + (s.exec && s.exec.elapsedMs != null ? s.exec.elapsedMs + 'ms' : '—') + '</td>'
+          + '<td class="mono jev-num">' + escapeHtml(d.jevCalls ? AutoCore.formatMs(d.jevMs) : '—') + '</td>'
           + '<td class="mono">' + nAct + '</td></tr>';
       }).join('')
       + '</tbody></table>';
@@ -1153,6 +1288,14 @@ const Auto = (() => {
     if (a.error) return '失败';
     if (a.kind === 'main') return a.response ? '已响应' : '请求中…';
     if (a.kind === 'llm') return a.text ? '生成 ' + shortStr(a.text, 12) : '…';
+    if (a.kind === 'recall') {
+      const bs = a.batches || [];
+      if (!bs.some((b) => b.response || b.error)) return '请求中…';
+      const got = bs.reduce((n, b) => n + (b.recalled || []).length, 0);
+      const failed = bs.filter((b) => b.error).length;
+      return '召回 ' + got + ' 个（合并 ' + ((a.merged && a.merged.merged) || 0) + '）'
+        + (failed ? ' · ' + failed + ' 批失败' : '');
+    }
     return (a.param || a.action || a.text) ? '命中 ' + shortStr(a.param || a.action || a.text, 14) : '请求中…';
   }
 
@@ -1171,7 +1314,7 @@ const Auto = (() => {
     if (a.kind === 'llm') return llmHtml(st);
     if (a.kind === 'main') {
       let html = '';
-      if (st.trim && st.trim.trimmed && st.payload && st.payload.questions && st.payload.questions['参数']) {
+      if (hasTrimNote(st) && st.payload && st.payload.questions && st.payload.questions['参数']) {
         html += '<div class="trim-note">' + escapeHtml(trimSummary(st)) + '</div>';
       }
       /* 右侧一屏多块：输入/输出/原始报文各自成块带块头（.sec 面板），不再糊成一片 */
@@ -1179,9 +1322,10 @@ const Auto = (() => {
         html += '<div class="sec"><div class="sec-head">本轮输出 · 决策与概率分布</div>' + decisionDetailsHtml(st) + '</div>';
       }
       if (a.error) html += '<div class="step-err">' + escapeHtml(a.error) + '</div>';
-      html += stateSectionHtml(a.payload.state);
+      html += stateSectionHtml(a.payload.state, a);
       html += questionsSectionHtml(a.payload, st);
-      html += trimDetailHtml(st);
+      /* 超限页首轮不带「参数」：候选明细属于「并行召回」那个动作，不在这一格重复展示 */
+      if (a.payload.questions && a.payload.questions['参数']) html += trimDetailHtml(st);
       html += '<div class="sec"><div class="sec-head">原始报文</div>'
         + rawBlock('① 发送的请求体（与真实请求同一对象）', relaxedStringify(a.payload))
         + (a.response
@@ -1190,6 +1334,9 @@ const Auto = (() => {
         + '</div>';
       return html;
     }
+    /* 并行召回的某一批：与补问卡同构（问题块 / 作答概率 / 原始报文），
+     * 但结论行是本批召回了哪些元素 —— 它不是决策，只是候选来源 */
+    if (a.kind === 'recall') return recallViewHtml(st, a, 'rc:' + st.n + ':' + view.i);
     /* 补问行动：结论行 + 问题块 + 作答概率分布 + 原始报文 —— 与首轮卡同构 */
     return followUpViewHtml(st, a, 'fu:' + st.n + ':' + view.i);
   }
@@ -1215,8 +1362,8 @@ const Auto = (() => {
   }
 
   /* ============ 决策区：摘要常显 + 明细折叠 ============ */
-  /* 补问的记录种类 → 它回传的题名（三类补问各只回一题） */
-  const FOLLOWUP_Q = { param: '参数', action: '动作', text: '文本' };
+  /* 补问的记录种类 → 它回传的题名（每类补问各只回一题；pick = 并行召回的最终决策） */
+  const FOLLOWUP_Q = { param: '参数', action: '动作', text: '文本', pick: '参数' };
   const Q_COLOR = { 动作: 'var(--violet)', 参数: '#7c3aed', 文本: '#0d9268' };
 
   /* ref chip 标签：「键 · 短文本」。与 auto-core.shortRefLabel **有意不同**：那个是嵌进
@@ -1234,11 +1381,13 @@ const Auto = (() => {
   }
 
   /* 单张作答卡：题名 + 选中值 + 置信度 + 概率条。首轮网格与补问卡共用 ——
-   * 补问单题响应里的 probabilities 此前只躺在裸 JSON 里没人解析。 */
-  function choiceCardHtml(name, ans, chosenLabel, note) {
+   * 补问单题响应里的 probabilities 此前只躺在裸 JSON 里没人解析。
+   * stale=true：这张卡的概率分布**没有被采纳**（答案被归一剥掉 / 被后续行动改写），
+   * 视觉上压暗并标注原因，避免把「模型当时这么说」误读成「本步就是这么决策的」。 */
+  function choiceCardHtml(name, ans, chosenLabel, note, stale) {
     const x = ans || {};
     const chosen = chosenLabel != null ? chosenLabel : (x.choice != null ? String(x.choice) : '—');
-    return '<div class="qcard">' +
+    return '<div class="qcard' + (stale ? ' stale' : '') + '">' +
       '<div class="qcard-head"><span class="qcard-name">' + name + '</span>' +
       '<span class="qcard-chosen">' + escapeHtml(chosen) + '</span>' +
       (typeof x.confidence === 'number' ? '<span class="qcard-conf">置信度 ' + pct(x.confidence) + '</span>' : '') + '</div>' +
@@ -1285,19 +1434,52 @@ const Auto = (() => {
     const d = step.decision || {};
     const refLabels = step.refLabels || {};
     /* 参数若是补问回合定下来的，本轮的「参数」概率分布里没有它 —— 不能拿第一批的
-     * 概率条去解释第二批复问的答案，改成指向那次补问行动 */
-    const followUpRec = (step.followUps || []).find((r) => r.param && r.param === d.param);
-    /* 本网格只呈现首轮这一次调用的作答：「文本」已移入补问，它的答案与概率分布
-     * 在同一步的「文本补问」行动视图里（那里与本网格同构）。 */
+     * 概率条去解释第二批复问的答案，改成指向那次补问行动。
+     * **只认「参数批次补问」（kind='param'）**：并行召回的最终决策（kind='pick'）也带
+     * param 且与本步 d.param 同值，只按 param 匹配会先命中它 —— 本行的参数会被说成
+     * 「第 undefined 批补问确定」（pick 记录没有 batch）、指向一个本步并不存在的
+     * 「参数补问」行动，还抢掉下面那个 pick 分支。老记录（无 kind）按 auto-core 的
+     * 同一口径默认成 'param'，串行召回 / 旧的补问路径不受影响。 */
+    const followUpRec = (step.followUps || []).find(
+      (r) => (r.kind || 'param') === 'param' && r.param && r.param === d.param);
+    /* 并行召回的最终决策（kind='pick'）：本轮的「参数」分布与本步的元素毫不相干。
+     * 召回一条都没命中时会退回相关性裁剪候选（merged.fallback）—— 那种情况不能
+     * 说成「并行召回合并候选」，否则又是「面板与实际不符」 */
+    const pickRec = (step.followUps || []).find((r) => r.kind === 'pick' && r.param);
+    const pickFallback = Boolean(step.recall && step.recall.merged && step.recall.merged.fallback);
+    /* 本轮到底有没有问过「参数」：弹窗步与老记录（超限页首轮只问 2 题）都没有 */
+    const askedParam = Boolean(step.payload && step.payload.questions && step.payload.questions['参数']);
+    /* 动作被「动作补问」改过（checkActionRole 拦下后重问）：本轮分布说的是旧动作 */
+    const actionRec = (step.followUps || []).filter((r) => r.kind === 'action' && r.action).slice(-1)[0];
+    const rawParam = (a['参数'] && a['参数'].choice != null) ? String(a['参数'].choice) : null;
+
+    /* 这一格显示的分布**有没有被采纳**，必须写在卡片上。
+     * 面板此前只渲染原始作答的概率条，于是「动作=放弃 / 参数=其他」这类被 ⑤b 归一剥掉、
+     * 或被判无效的答案照样以高概率躺在分布里，看起来像真的那么决策了（实测用户报的就是这个）。
+     * 采纳情况只有三种：被本轮决策采用 / 被后续行动改写 / 未被采用（附原因）。 */
+    const paramNote = followUpRec
+      ? '本行选项由第 ' + followUpRec.batch + ' 批补问确定，该题概率见「参数补问」行动'
+      : pickRec
+        ? '本行答案由「参数决策」行动定下（' + (pickFallback ? '召回无结果，用的是退回的相关性裁剪候选' : '并行召回合并候选') + '），该题概率见该行动'
+        : rawParam == null
+          ? (askedParam ? '本轮「参数」题没有作答：模型没给出元素'
+            : '本轮没有「参数」题（弹窗步 / 老记录形态），元素由并行召回解决')
+          : !d.param
+            ? '原始作答未被采用' + (step.trimNote ? '：' + step.trimNote
+              : (step.exec && step.exec.error ? '：' + step.exec.error : ''))
+            : (d.param !== rawParam ? '本轮原始作答是 ' + rawParam + '，已被后续补问改为 ' + d.param : '');
+    const actionNote = actionRec
+      ? '本轮原始作答是「' + actionRec.from + '」，已由动作补问改为「' + actionRec.action + '」，该题概率见「动作补问」行动'
+      : '';
+
     const chosenLabel = {
       动作: d.action || '—',
       参数: d.param ? refChipLabel(d.param, refLabels) + (followUpRec ? '（第 ' + followUpRec.batch + ' 批补问）' : '') : '—',
     };
     let html = '<div class="qgrid">';
     ['动作', '参数'].forEach((name) => {
-      html += choiceCardHtml(name, a[name], chosenLabel[name],
-        (name === '参数' && followUpRec)
-          ? '本行选项由第 ' + followUpRec.batch + ' 批补问确定，该题概率见「参数补问」行动' : '');
+      html += choiceCardHtml(name, a[name], chosenLabel[name], name === '参数' ? paramNote : actionNote,
+        Boolean(name === '参数' ? (rawParam != null && !d.param && !followUpRec && !pickRec) : actionNote));
     });
     const u = a['未完成'] || {};
     html += '<div class="qcard">' +
@@ -1350,15 +1532,20 @@ const Auto = (() => {
   }
 
   /* ============ 输入区（结构化 state + 首轮 3 道问题，建卡时一次性渲染） ============ */
-  function snapshotDetailsHtml(snap) {
+  function snapshotDetailsHtml(snap, step) {
     const text = String(snap || '');
     const lines = text ? text.split('\n').length : 0;
     const refs = Object.keys(AutoCore.refCriteria(text)).length;
-    return '<details class="snap-details" data-dk="snap"><summary>accessibility 快照 · ' + lines + ' 行 · ' + refs + ' 个元素（点开查看）</summary>' +
+    /* 来源写进 summary：'action' = 上一步动作顺带带回（这一步省掉一次快照调用），
+     * 'fresh' = 这一步真取了一次。措辞按「省了什么」说，不按实现说。
+     * 老记录没有这个字段（null）→ 不写假话，只留空白。 */
+    const from = step && step.snapshotFrom === 'action' ? ' · 来自上一步动作'
+      : step && step.snapshotFrom === 'fresh' ? ' · 本步新取' : '';
+    return '<details class="snap-details" data-dk="snap"><summary>accessibility 快照 · ' + lines + ' 行 · ' + refs + ' 个元素' + from + '（点开查看）</summary>' +
       '<pre class="step-pre tall">' + escapeHtml(text) + '</pre></details>';
   }
 
-  function stateSectionHtml(state) {
+  function stateSectionHtml(state, step) {
     const page = state['当前页面'] || {};
     const hist = Array.isArray(state['已完成步骤']) ? state['已完成步骤'] : [];
     const lastResult = String(state['上一步结果'] || '');
@@ -1368,10 +1555,14 @@ const Auto = (() => {
       '<div class="kv"><div class="kv-k">当前页面</div><div class="kv-v"><span class="mono-chip">' + escapeHtml(page.url || '') + '</span>' +
       (page['标题'] ? '<span class="page-title">' + escapeHtml(page['标题']) + '</span>' : '') + '</div></div>' +
       '<div class="kv"><div class="kv-k">上一步结果</div><div class="kv-v' + lastCls + '">' + escapeHtml(lastResult) + '</div></div>' +
+      /* 停滞提示只在检出重复 / 快照未变时才有 —— 常驻一行空占位反而让人以为它一直在报警 */
+      (state['停滞提示']
+        ? '<div class="kv"><div class="kv-k">停滞提示</div><div class="kv-v stall-text">' + escapeHtml(state['停滞提示']) + '</div></div>'
+        : '') +
       '<div class="kv"><div class="kv-k">已完成步骤</div><div class="kv-v">' +
       (hist.length ? '<ol class="hist-list">' + hist.map((h) => '<li>' + escapeHtml(h) + '</li>').join('') + '</ol>' : '<span class="muted">（第一步，暂无）</span>') +
       '</div></div>' +
-      '<div class="kv"><div class="kv-k">页面快照</div><div class="kv-v">' + snapshotDetailsHtml(state['页面快照']) + '</div></div>' +
+      '<div class="kv"><div class="kv-k">页面快照</div><div class="kv-v">' + snapshotDetailsHtml(state['页面快照'], step) + '</div></div>' +
       '</div></div>';
   }
 
@@ -1382,7 +1573,7 @@ const Auto = (() => {
       const chips = Object.keys(crit).map((k) => {
         let tone = '';
         if (terminal[k]) tone = k === '任务已完成' ? ' good' : ' warn';
-        else if (k === '生成输入' || k === '无操作') tone = ' violet';
+        else if (k === '生成输入') tone = ' violet';
         return '<span class="crit-chip' + tone + '" title="' + escapeHtml(crit[k]) + '">' + escapeHtml(k) + '</span>';
       }).join('');
       return '<div class="crit-cloud">' + chips + '</div>';
@@ -1435,10 +1626,36 @@ const Auto = (() => {
     return html;
   }
 
-  /* 参数题候选裁剪的摘要：让人一眼看出「本来多少个、给了 Jev 多少个、为什么」 */
-  function trimSummary(step) {
-    const m = step.trim;
-    if (!m || !m.trimmed) return '';
+  /* 参数题候选的摘要：让人一眼看出「本来多少个、给了 Jev 多少个、为什么」。
+   * 两条算法路线各说各的：并行召回讲「几批 → 合并多少」，相关性裁剪讲「折叠/兜底」。 */
+  /* 候选摘要：**按传进来的那份 meta 说**（默认 step.trim = 本步主调用那份候选）。
+   * 首轮卡说的是首轮那批（前 size 个），并行召回卡说的是合并后的候选 —— 两者不能互相冒充：
+   * 曾经 resolveRecall 把合并 meta 写回 step.trim，于是首轮卡一边列出 200 个候选、
+   * 一边写「候选 45 个 / 全页 469 个」，还重复渲染了一遍召回明细（面板与实际不符的老毛病）。 */
+  function trimSummary(step, meta) {
+    const m = meta || step.trim;
+    if (!m) return '';
+    if (m.algorithm === 'parallel' && m.first) {
+      /* 首轮那一次：候选只有本页前 size 个，其余交给第二轮的并行召回。
+       * 这一步到底有没有发起召回，卡上要说实话（动作不需要元素时一个请求都没发） */
+      const rest = Math.max(0, (m.totalRefs || 0) - (m.firstSize || 0));
+      const ran = Boolean(step && step.recall && (step.recall.batches || []).length);
+      return '并行召回：首轮候选 = 本页前 ' + m.firstSize + ' 个元素（全页 ' + m.totalRefs + ' 个）'
+        + '→ 其余 ' + rest + ' 个' + (ran ? '已由「并行召回」行动核对（见该行动）' : '未发起并行召回');
+    }
+    if (m.algorithm === 'parallel') {
+      /* 合并后那一份。两个入口：① 老记录 —— 早先的构建把合并 meta 写进了 step.trim，
+       * 那些会话的「首轮」卡读到的就是它（新记录不再这样，见 resolveRecall）； */
+      const per = m.perBatch || [];
+      const empty = per.filter((p) => !(p.recalled || []).length).length;
+      let s = '并行召回：' + m.batches + ' 批 × 每批前 ' + m.topN + '（每批 ' + m.size + ' 个）→ 候选 '
+        + m.merged + ' 个 / 全页 ' + m.totalRefs + ' 个';
+      if (m.seeded && m.seeded.length) s += '（含首轮前 ' + m.seeded.length + ' 个）';
+      if (m.clamped) s += '，超 250 截断 ' + m.clamped + ' 个';
+      if (empty) s += '，' + empty + ' 批无召回';
+      return s;
+    }
+    if (!m.trimmed) return '';
     const head = '本批 ' + m.top.length + ' 个 / 全页 ' + m.totalRefs + ' 个';
     const why = [];
     why.push('关键词命中');
@@ -1452,9 +1669,19 @@ const Auto = (() => {
     return s;
   }
 
+  /* 「参数」题候选有没有需要摘要/明细可讲（两条路线任一命中） */
+  function hasTrimNote(step) {
+    const m = step && step.trim;
+    return Boolean(m && (m.trimmed || m.algorithm === 'parallel'));
+  }
+
   function trimDetailHtml(step) {
     const m = step.trim;
-    if (!m || !m.trimmed) return '';
+    if (!m) return '';
+    /* 首轮那份：候选清单就在「本轮输入」的问题块里（chips 全列出），这里不再重复一张表；
+     * 逐批召回明细属于「并行召回」行动卡（recallViewHtml） */
+    if (m.algorithm === 'parallel') return '';
+    if (!m.trimmed) return '';
     const rows = (m.top || []).map((x) =>
       '<div class="ref-row scored"><span class="ref-id">' + escapeHtml(x.ref) + '</span>' +
       '<span class="ref-score">' + escapeHtml(String(x.score)) + '</span>' +
@@ -1501,6 +1728,73 @@ const Auto = (() => {
     return html;
   }
 
+  /* 召回批次视图：结论行（本批召回 N 个）+ 问题块 + 作答与概率分布 + 原始报文。
+   * 概率条的说明写给看的人：本批内归一的概率只用于召回排序，不是最终答案 ——
+   * 最终决策在合并候选那次调用里做（行动列表里紧跟着的「Jev 首轮」）。 */
+  /* 并行召回视图：**一个**动作里装 K 批。
+   * 结论行说清「几批、召回多少、合并多少、失败几批」，下面是每批的可折叠明细
+   * （候选 / 概率分布 / 召回清单 / 该批原始报文），最后是合并后的候选清单。
+   * 每批的请求体都是真发出去的那一份 —— 折叠只是排版，不是省略。 */
+  function recallViewHtml(st, a, dk) {
+    const bs = a.batches || [];
+    const meta = a.meta || {};
+    const merged = a.merged || {};
+    const topN = meta.topN != null ? meta.topN : '';
+    const got = bs.reduce((n, b) => n + (b.recalled || []).length, 0);
+    const failed = bs.filter((b) => b.error).length;
+    const pend = !bs.some((b) => b.response || b.error);
+    /* 召回清单是同一份投影（ref 编号 + 快照里的标签），每批明细与合并结果两处共用 */
+    const refRows = (refs) => '<div class="ref-scroll">' + refs.map((r) =>
+      '<div class="ref-row"><span class="ref-id">' + escapeHtml(r) + '</span>' +
+      '<span class="ref-label">' + escapeHtml(AutoCore.stripRefPrefix((st.refLabels || {})[r] || '')) + '</span></div>').join('') + '</div>';
+    const hit = pend ? '请求中…'
+      : '并行召回 ' + bs.length + ' 批（每批 ' + (meta.size || '?') + ' 个）→ 召回 ' + got
+        + ' 个 → 合并候选 ' + (merged.merged != null ? merged.merged : '?') + ' 个 / 全页 ' + (meta.totalRefs != null ? meta.totalRefs : '?')
+        + (merged.seeded && merged.seeded.length ? '（含首轮前 ' + merged.seeded.length + ' 个）' : '')
+        + (failed ? '；' + failed + ' 批失败' : '')
+        + (merged.clamped ? '；超 250 截断 ' + merged.clamped + ' 个' : '');
+    let html = '<div class="fu-hit' + (failed ? ' bad' : (pend ? ' pend' : '')) + '">' + escapeHtml(hit) + '</div>';
+    /* 异常/兜底必须写在卡上：召回全空、退回裁剪候选这类事不能只留在落盘记录里。
+     * 结论行（上面那行）已经把「几批 / 召回多少 / 合并多少 / 含首轮前 N 个 / 失败几批 / 截断」
+     * 说全了，这里不再叠一行摘要 —— 同一件事印两遍，两处措辞迟早会漂开 */
+    if (a.note) html += '<div class="step-err">' + escapeHtml(a.note) + '</div>';
+
+    html += '<div class="sec"><div class="sec-head">召回明细 · ' + bs.length + ' 批（每批前 ' + topN + ' 个进最终候选）</div>';
+    bs.forEach((b) => {
+      const ans = (b.response && b.response.answers && b.response.answers['参数']) || null;
+      const one = b.error ? '失败：' + b.error
+        : !b.response ? '请求中…'
+          : (b.recalled || []).length ? '召回 ' + b.recalled.length + ' 个' : '本批无召回';
+      html += '<details class="step-collapse"' + (b.error ? ' open' : '') + '>' +
+        '<summary>第 ' + b.batch + '/' + bs.length + ' 批 · ' + b.size + ' 个候选 · ' + escapeHtml(one)
+        + (b.ms != null ? ' · ' + AutoCore.formatMs(b.ms) : '') + '</summary>' +
+        '<div class="req-inner">';
+      if (ans) {
+        html += choiceCardHtml('参数', ans, null, '本批内归一，只用于召回排序（按概率取前 ' + topN + ' 个）');
+        if ((b.recalled || []).length) html += refRows(b.recalled);
+      } else if (b.error) {
+        html += '<div class="step-err">' + escapeHtml(b.error) + '</div>';
+      }
+      html += rawBlock('① 发送的请求体（仅「参数」一题）', relaxedStringify(b.payload || null))
+        + rawBlock('② Jev 响应', b.response ? JSON.stringify(b.response, null, 2) : '（调用失败，无响应）')
+        + '</div></details>';
+    });
+    html += '</div>';
+
+    /* 合并结果：最终决策这一题的候选就是它。首轮前 N 个排在最前面（它们所在的那一段不在召回范围） */
+    const keys = (a.mergedKeys || []).length ? a.mergedKeys : null;
+    html += '<div class="sec"><div class="sec-head">' + (merged.fallback
+      ? '并行召回无结果 · 退回相关性裁剪的候选（送给「参数决策」那一次）'
+      : '合并后的候选 · 首轮前 ' + ((merged.seeded || []).length) + ' 个 + ' + bs.length + ' 批召回（送给「参数决策」那一次）') + '</div>' +
+      '<div class="trim-note">' + (merged.fallback
+        ? '召回一条都没命中，本步改用相关性裁剪的候选：' + (merged.merged != null ? merged.merged : '?') + ' 个'
+        : '合并去重 ' + (merged.recalled != null ? merged.recalled : got) + ' → 候选 '
+          + (merged.merged != null ? merged.merged : '?') + ' 个') + '，已全部列出、无「其他」兜底</div>' +
+      (keys ? refRows(keys) : '') +
+      '</div>';
+    return html;
+  }
+
   /* 每次步骤对象变化后调用：渲染合并到下一帧（同一帧多次 touch 只重建一次），并节流落盘。
    * 用户交互路径（select / 跟随按钮 / 会话切换）仍走同步 renderFlow，不经过此合并。 */
   let renderQueued = false;
@@ -1526,23 +1820,77 @@ const Auto = (() => {
   }
 
   /* ---------- 单步确认（挂 #fdConfirm：autoFlow 的兄弟容器，树/详情重建不影响它） ---------- */
+  /* 确认条构造：单步确认与「开跑先暂停」两道门共用这一条 —— 宿主、样式、滚动，
+   * 以及「点了就把条子收掉再 resolve」这套生命周期都只有这一份，按钮表由调用方给。
+   * 早先这两行是写在 awaitConfirm 里的，第二道门要来了才抽出来：两处各建一条 bar，
+   * 按钮布局与收尾时机必然会各自漂移。 */
+  function buildConfirmBar(host, specs, resolve) {
+    const bar = el('div', 'confirm-bar');
+    specs.forEach((s) => {
+      const b = el('button', s.cls, s.label);
+      b.type = 'button';
+      b.onclick = () => { bar.remove(); resolve(s.val); };
+      bar.appendChild(b);
+    });
+    host.appendChild(bar);
+    bar.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return bar;
+  }
+
   function awaitConfirm(step) {
     return new Promise((resolve) => {
       if (view.sess !== 'current' || view.type !== 'step' || view.n !== step.n) select('step', step.n, null, false);
       const host = document.getElementById('fdConfirm');
       if (!host) return resolve('run');   /* 视图异常时保守执行 */
-      const bar = el('div', 'confirm-bar');
-      const mk = (label, cls, val) => {
-        const b = el('button', cls, label);
-        b.type = 'button';
-        b.onclick = () => { bar.remove(); resolve(val); };
-        return b;
+      buildConfirmBar(host, [
+        { label: '▶ 执行本步', cls: 'btn-ghost', val: 'run' },
+        { label: '⏭ 跳过', cls: 'btn-ghost', val: 'skip' },
+        { label: '■ 中止循环', cls: 'btn-ghost danger', val: 'abort' },
+      ], resolve);
+    });
+  }
+
+  /* ---------- 开跑后先暂停（人工登录 / 接管）----------
+   * 门开在 runLoop 里、浏览器打开之后、**第 1 步快照之前** —— 这就是这道门存在的全部理由：
+   * 让「人工操作之后」的页面成为模型的第一次输入。
+   * 为什么不能靠既有的单步确认：那边暂停在 ⑦，此时快照早已拍完、模型也已决策完，
+   * 人工在那里登录，第 1 步的依据是登录**前**的页面 —— 依据过期，执行下去大概率是错的。
+   *
+   * 出口有三条，缺一条就会让人卡住（或以为卡住）：
+   *   ① 条上的「■ 中止」；
+   *   ② 顶部那个一直可见的「■ 中止」——门开着时 for 循环没在跑，没有东西在读 abortFlag，
+   *      必须由 gateRelease 放行（见 bindEvents），否则点了毫无反应；
+   *   ③ 刷新页面（门随内存态一起消失，浏览器仍开着，交给「关闭浏览器」收拾）。 */
+  let gateRelease = null;   /* 门开着时存下自己的收尾函数，供顶部中止按钮放行 */
+
+  function awaitManualGate() {
+    return new Promise((resolve) => {
+      const host = document.getElementById('fdConfirm');
+      /* 宿主不在（视图异常）时**停下来**，与单步确认的处置正好相反：那边放行是「保守执行」，
+       * 这边放行等于「跳过人工」—— 这门是安全阀，静默放过去就等于人工没机会登录。 */
+      if (!host) return resolve('abort');
+      const leave = (val) => {
+        const bar = host.querySelector('.confirm-bar');
+        if (bar) bar.remove();                    /* 顶部中止那条路没有 onClick 可以自删 */
+        if (gateEnteredAt != null) { gateAccumMs += Date.now() - gateEnteredAt; gateEnteredAt = null; }
+        gateRelease = null;
+        els.runPill.className = 'status-pill busy';
+        els.runPill.textContent = '运行中';
+        resolve(val);
       };
-      bar.appendChild(mk('▶ 执行本步', 'btn-ghost', 'run'));
-      bar.appendChild(mk('⏭ 跳过', 'btn-ghost', 'skip'));
-      bar.appendChild(mk('■ 中止循环', 'btn-ghost danger', 'abort'));
-      host.appendChild(bar);
-      bar.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      gateRelease = leave;
+      gateEnteredAt = Date.now();
+      /* 只动文案、**不动 data-state**：它是展示层与 E2E 的公共契约，语义是
+       * 「非 running = 本轮已结束」。暂停不是结束 —— 改了它，所有轮询终止态的测试
+       * 都会把暂停误读成结束（waitEnd 会立刻返回并断言一个还没发生的终态）。 */
+      els.runPill.className = 'status-pill warn';
+      els.runPill.textContent = '已暂停';
+      buildConfirmBar(host, [
+        { label: '▶ 已完成，继续', cls: 'btn-ghost', val: 'run' },
+        /* 与顶部「■ 中止」文案**故意**一样：两者干的是同一件事（中止本轮）。
+         * 写成两个名字反而会让人怀疑它们有区别。 */
+        { label: '■ 中止', cls: 'btn-ghost danger', val: 'abort' },
+      ], leave);
     });
   }
 
@@ -1567,8 +1915,18 @@ const Auto = (() => {
     return data;
   }
 
-  /* ---------- Jev 调用（失败重试一次） ---------- */
+  /* ---------- Jev 调用（失败重试一次） ----------
+   * 计时包在**最外层**（spec 2026-09-28 §4）：用户等的是含重试与重试前 600ms sleep 的
+   * 这段墙钟，不是成功那一次的净耗时 —— 否则一次失败的调用在界面上是 0ms，
+   * 正好把最该看见的慢藏了起来。 */
   async function callJev(payload) {
+    const t0 = Date.now();
+    const r = await callJevRaw(payload);
+    r.ms = Date.now() - t0;
+    return r;
+  }
+
+  async function callJevRaw(payload) {
     const attempt = async () => {
       const res = await fetch('/api/systemone', {
         method: 'POST',
@@ -1612,6 +1970,7 @@ const Auto = (() => {
     touch();
 
     const jev = await callJev(payload);
+    rec.ms = jev.ms;
     if (!jev.ok) { rec.error = jev.error; return false; }
     rec.response = jev.data;
 
@@ -1623,6 +1982,112 @@ const Auto = (() => {
       return false;
     }
     return opt.apply(value);
+  }
+
+  /* ---------- 第二轮 · 并行召回（K 批） + 最终「参数」决策 ----------
+   * 触发条件由调用方把关：页面元素超过一批 **且** 首轮动作需要元素。
+   * 三件事按顺序做完，才回到主循环：
+   *   ① K 批并行问「参数」（每批只看自己那批元素，按概率排出最相关的若干个）
+   *   ② 合并各批召回（去重、按概率排序、上限 250）
+   *   ③ 用合并后的候选再问一次「参数」——这一次的答案才是本步真正要操作的元素
+   * 行动列表里 ①② 是**一个**动作（K 批是它的内部明细），③ 单列一个「参数决策」动作。
+   * 全部批次都失败时退回相关性裁剪的候选集，宁可少一次召回也别把整步判死。 */
+  async function resolveRecall(step, plan, state) {
+    /* 首轮那次「参数」作答：它所在的那一段不在召回范围内，只能由首轮自己的预测代表。
+     * 带**前 topN 个**进去（不是只带作答的那一个）——最终候选 = 首轮前 N + K 批召回合并，
+     * 这样最终决策才有可比较的对手；作答的那个 ref 由 pickFromAnswer 保证恒在。 */
+    const seeds = AutoCore.recallSeeds({ plan: plan, answer: step.response });
+    if (!seeds.length && AutoCore.isRefParam(step.decision.param, step.refLabels)) {
+      /* 首轮没给概率分布（旧协议）/ 作答落在批外：至少把作答的那一个带上，不带空手入场 */
+      seeds.push(step.decision.param);
+    }
+    const rec = {
+      meta: plan.meta, batches: [], merged: null, failed: 0, note: null,
+      afterMain: true,   /* 行动列表据此把它排在「首轮」之后（老记录没有这个标记） */
+      seed: seeds,
+    };
+    step.recall = rec;
+
+    /* 先把 K 份 payload 全部建好再并发发出去：每份都是「步骤卡里展示的那个对象」本身 */
+    rec.batches = plan.batches.map((b) => ({
+      batch: b.index, size: b.refs.length,
+      payload: null, response: null, ms: null, error: null, recalled: [],
+    }));
+    touch();
+    await Promise.all(plan.batches.map((b, i) => {
+      const payload = {
+        state,
+        model: Config.current.model,
+        questions: AutoCore.buildRecallQuestions(plan, i + 1),
+      };
+      rec.batches[i].payload = payload;
+      return callJev(payload).then((r) => {
+        rec.batches[i].ms = r.ms;
+        if (r.ok) rec.batches[i].response = r.data;
+        else rec.batches[i].error = r.error;
+      });
+    }));
+
+    /* 直接喂整封响应（{model, answers:{参数:…}}）—— 剥壳在 ref-recall.answerOf 里做一次。
+     * 曾经这里只认「作答」那一层而调用方给的是信封：每一批都召回 0 个，面板写「候选 1 个」
+     * （会话 r-0928-1954-4dgf）。契约换成「两种形状都收」，这个坑不会再静默复现。 */
+    const merged = AutoCore.mergeRecall(plan, rec.batches.map((b) => b.response), { seed: seeds });
+    merged.meta.perBatch.forEach((p, i) => { rec.batches[i].recalled = p.recalled; });
+    rec.merged = merged.meta;
+    rec.failed = rec.batches.filter((b) => b.error).length;
+
+    /* 一条候选都没召回 → 退回相关性裁剪的候选集（本步照常往下走，不判死） */
+    let criteria = merged.criteria;
+    let meta = merged.meta;
+    if (!Object.keys(criteria).length) {
+      const empty = rec.batches.filter((b) => b.response).length > 0;
+      rec.note = empty
+        ? '并行召回无结果：' + rec.batches.length + ' 批响应里没有可用的作答，本步退回相关性裁剪候选'
+        : '并行召回无结果（批次全部失败），本步退回相关性裁剪候选';
+      /* 兜底候选的构造在纯逻辑层（剔「其他」+ 按剔后份数报数），这里只接线 */
+      const fb = AutoCore.recallFallback({
+        snapshot: step.snapshot, goal: runCfg.goal,
+        avoidRefs: Object.keys(failedRefs), paramTrim: runCfg.paramTrim,
+        mergedMeta: merged.meta,
+      });
+      criteria = fb.criteria;
+      meta = fb.meta;
+      rec.merged = meta;
+    }
+    /* step.trim 保持指向**首轮那份**候选 meta：主卡（首轮）列的就是那一批候选，
+     * 摘要与明细必须说同一件事。合并后的 meta 记在 rec.merged / rec.criteria 上，
+     * 由「并行召回」卡的结论行自己说（几批 / 召回多少 / 合并多少 / 含首轮前 N 个）。 */
+    rec.criteria = criteria;   /* 最终决策实际拿到的候选（行动视图与落盘都要看它） */
+
+    /* 用户在 K 批飞行中按了中止：不再花这一次最终决策的钱（那是一次实打实的付费调用），
+     * 让调用方紧接着的 abortFlag 检查把整轮记成「已中止」 */
+    if (abortFlag) {
+      rec.note = '用户中止，跳过最终「参数」决策';
+      return false;
+    }
+
+    /* ③ 最终决策：单题「参数」，候选 = 首轮前 N + K 批召回的合并（meta 用实际生效的那一份） */
+    const questions = AutoCore.buildRecallPickQuestions({
+      criteria: criteria, meta: meta, action: step.decision.action,
+    });
+    const pickRec = {
+      kind: 'pick', payload: null, response: null, error: null, param: null,
+      ms: null, candidates: Object.keys(criteria).length, action: step.decision.action,
+    };
+    return askFollowUp(step, pickRec, questions, {
+      qname: '参数', noun: '元素', parse: AutoCore.parseParamAnswer,
+      apply: (param) => {
+        /* 必须是本页真实 ref —— 「其他」这类兜底键即便混进候选也不是元素，
+         * 放它过去就会拿「其他」当 ref 发命令（实测：连烧三步的 fill 报错） */
+        if (!AutoCore.isRefParam(param, step.refLabels)) {
+          pickRec.error = '最终决策返回的不是本页真实 ref：' + param;
+          return false;
+        }
+        pickRec.param = param;
+        step.decision = Object.assign({}, step.decision, { param: param });
+        return true;
+      },
+    });
   }
 
   /* ---------- 候选裁剪：Jev 选了「其他」时补问下一批 ----------
@@ -1753,7 +2218,7 @@ const Auto = (() => {
     return true;
   }
 
-  /* 本步要操作的元素的 ref（用于标注）：终止动作与「无操作」没有目标，返回 null。
+  /* 本步要操作的元素的 ref（用于标注）：终止动作没有目标，返回 null。
    * 「生成输入」的目标是 decision.param，其余动作走 planExecution，但这里只需要 ref，
    * 可以直接用 decision.param（与 planExecution 的 ref 同源）。
    * 判定必须走 isRefParam（refLabels = 当前快照解析出的全量 ref 表）：曾用
@@ -1762,7 +2227,7 @@ const Auto = (() => {
    * 从切标签页之后每一步都消失，且不报任何错。 */
   function assignRef(decision, refLabels) {
     if (!decision) return null;
-    if (AutoCore.TERMINAL_TOOLS[decision.action] || decision.action === '无操作') return null;
+    if (AutoCore.TERMINAL_TOOLS[decision.action]) return null;
     return AutoCore.isRefParam(decision.param, refLabels) ? decision.param : null;
   }
 
@@ -1773,11 +2238,6 @@ const Auto = (() => {
     if (AutoCore.TERMINAL_TOOLS[decision.action]) {
       step.terminal = decision.action;
       return;
-    }
-    /* 无操作 */
-    if (decision.action === '无操作') {
-      step.exec = { ok: true, elapsedMs: 0, cmd: null };
-      return {};
     }
     /* 生成输入：LLM 单步闭环 */
     if (decision.action === '生成输入') {
@@ -1800,13 +2260,18 @@ const Auto = (() => {
       L.messages = m.messages;
       const llmCfg = Config.llm.get();
       let r;
+      /* 生成输入那次 LLM 的耗时单列（不计入 Jev —— 那是生成模型，不是 Jev），
+       * 失败分支也要记：不然这段等待在界面上凭空消失。 */
+      const lt0 = Date.now();
       try {
         r = await callLlm({ model: llmCfg.model, messages: m.messages, temperature: m.temperature, max_tokens: m.max_tokens }, llmCfg);
       } catch (e) {
+        L.ms = Date.now() - lt0;
         L.error = '生成模型调用失败：' + parseErrText(e);
         step.exec = { ok: false, error: L.error, elapsedMs: 0, cmd: null };
         return {};
       }
+      L.ms = Date.now() - lt0;
       L.raw = r;
       const content = r.choices && r.choices[0] && r.choices[0].message && r.choices[0].message.content;
       if (!content) { L.error = '生成模型响应中没有文本内容'; step.exec = { ok: false, error: L.error, cmd: null }; return {}; }
@@ -1817,6 +2282,9 @@ const Auto = (() => {
       const act = await apiJson('/api/browser/act', { command: 'fill', ref: decision.param, text: L.text });
       step.exec = { cmd: cmdDisplay('fill', decision.param, L.text), elapsedMs: Date.now() - t0, ok: Boolean(act.ok), error: act.ok ? null : act.error, lostTab: Boolean(act.lostTab) };
       if (act.ok) step.generatedText = L.text;
+      /* fill 走的是 CLI 的 fill（browser_type 的非 slowly 分支），上游**不给**动作后快照，
+       * 所以这里会照实清成空：下一步真取一次（规则在 makeSnapshotCarrier 里）。 */
+      snapshotCarrier.accept(act);
       return {};
     }
     /* 常规动作 */
@@ -1848,6 +2316,10 @@ const Auto = (() => {
        * 交给调用方收尾，别让它变成一条可重试的失败喂回给模型 */
       lostTab: Boolean(act.lostTab),
     };
+    /* 动作顺带带回的快照：交给下一步当页面依据（规则见 makeSnapshotCarrier）。
+     * 只在动作真的成功、且带回的内容能用时才收 —— 失败步要保持「下一步真取一次」的原样，
+     * 否则失败原因（如弹窗、被遮挡）会被上一份快照盖掉。 */
+    snapshotCarrier.accept(act);
     return {};
   }
 
@@ -1856,10 +2328,20 @@ const Auto = (() => {
     els.progress.textContent = '第 ' + n + ' / ' + runCfg.maxSteps + ' 步';
     els.progress.title = '';   /* 清上一轮结束原因，免得悬停看到过期解释 */
   }
+  /* 人工暂停的累计耗时：门开着的时候「用时」应当**冻结**，不能把人工登录的三分钟算进
+   * 任务耗时里（那会把「这轮跑了多久」这个数毁掉）。tick 与 finishRun 两处都必须读
+   * 这一个函数 —— 各写一份 `Date.now() - startTs` 是这类计时最容易长出来的第二处副本，
+   * 一改就漏一处。held 让门开着时显示就停在进门那一刻，而不是等门关掉才跳回去。 */
+  let gateAccumMs = 0;
+  let gateEnteredAt = null;
+  function elapsedMs() {
+    const held = gateEnteredAt ? (Date.now() - gateEnteredAt) : 0;
+    return Date.now() - startTs - gateAccumMs - held;
+  }
   function startTimer() {
     startTs = Date.now();
     timerId = setInterval(() => {
-      els.elapsed.textContent = Math.round((Date.now() - startTs) / 1000) + 's';
+      els.elapsed.textContent = Math.round(elapsedMs() / 1000) + 's';
     }, 1000);
   }
   function stopTimer() {
@@ -1924,13 +2406,25 @@ const Auto = (() => {
 
     abortFlag = false; finished = false;
     steps = []; history = []; consecutiveFails = 0; unfinishedHistory = [];
+    gateAccumMs = 0; gateEnteredAt = null; gateRelease = null;
+    /* 耗时锚点同批复位：漏一个，第二轮就会继承上一轮的定格墙钟 / 残留准备时间 */
+    loopStartTs = 0; prevStepEndTs = 0; prepMs = null; finalWallMs = null;
     Object.assign(view, { sess: 'current', type: 'session', n: 0, i: 0, follow: true });
+    syncSessUrl();   /* 视图回到本页这一轮了，地址栏里那条历史会话 id 就该让位（见 syncSessUrl） */
     failedRefs = Object.create(null); refPageUrl = '';
+    /* 上一轮动作留下的快照绝不能跨轮生效：这一轮的浏览器是刚 open 的（或刚 attach 的
+     * 另一个标签页），拿旧页面的快照当第 1 步依据正是「依据过期」那类事故。 */
+    snapshotCarrier.reset();
     const plan = windowPlan();
     runCfg = {
       goal, url, maxSteps, variables: collectVars(), screenshotOn: els.screenshot.checked,
       browser: els.browser.value, mode, cdp: cdpTarget, window: plan,
+      /* 驱动后端（inproc / cli）：与内核、模式都正交，冻结在这一刻 */
+      backend: els.backend.value,
+      /* 冻结在开跑这一刻：跑起来之后再改弹窗里的勾选框不影响本轮（与其它运行参数同规矩） */
+      pauseFirst: els.pauseFirst.checked,
       paramTrim: Config.paramTrim.get(),
+      snapshotTrim: Config.snapshotTrim.get(),
     };
     runId = AutoCore.newRunId();
     runStartedAt = new Date().toISOString();
@@ -1950,6 +2444,12 @@ const Auto = (() => {
     try {
       await runLoop();
     } finally {
+      /* 门没走完就抛异常的话，条子会留在页面上 —— 一条点不动的僵尸条比没有更糟，
+       * 它会让人以为还能点。这里兜底清掉，并把门的状态复位。 */
+      const stale = document.querySelector('#fdConfirm .confirm-bar');
+      if (stale) stale.remove();
+      gateRelease = null;
+      gateEnteredAt = null;
       running = false;
       stopTimer();
       els.start.disabled = false;
@@ -1960,6 +2460,12 @@ const Auto = (() => {
       refreshBrowserState();
       /* 兜底：runLoop 抛异常时 finishRun 尚未执行，走同一条结论文案，
        * 不能再像以前那样把 pill 一律改写为「已结束」—— 那会盖掉真正的结论。 */
+      /* 异常路径同样要结算本步耗时：抛出时正在跑的那一步没走过 settleStepMs
+       * （正常 / 终止 / 跳过 / 中止 / Jev 失败这五条都走过了），那一步在树上会是空白、
+       * 差额还会冒充成收尾。已结算的步 ms 非 null，跳过；在步创建之前就返回的路径
+       * （中止 / 页丢失守卫）最后一步也早已结算，不会误加。 */
+      const curStep = steps.length ? steps[steps.length - 1] : null;
+      if (curStep && curStep.ms == null) settleStepMs(curStep);
       if (!finished) finishRun({ done: false, state: 'error', reason: '运行异常中断' });
     }
   }
@@ -1971,18 +2477,30 @@ const Auto = (() => {
   const END_STATES = {
     done:    { label: '任务已完成',   tone: 'done' },
     aborted: { label: '用户中止',     tone: 'warn' },
+    /* 新会话不再产生 giveup（「放弃」已从动作集下线）；留着只为读旧记录时文案不塌成「出错」 */
     giveup:  { label: 'Jev 放弃任务', tone: 'warn' },
     limit:   { label: '已达步数上限', tone: 'warn' },
     fails:   { label: '连续执行失败', tone: 'warn' },
     error:   { label: '出错',         tone: 'error' },
   };
 
+  /* 结算本步耗时：从**上一步动作结束**起算（而不是本步开始）—— 步间间隔（STEP_GAP_MS，
+   * 默认 0）落在上一步结束之后，只有这样归属，「准备 + Σ步耗时 + 收尾 = 墙钟」才成立。
+   * 每一条离开本步的路径（正常 / 终止 / 跳过 / 中止 / Jev 失败）都要过这里：
+   * 漏一条，那一步在树上就是空白，差额还会冒充成「收尾」。 */
+  function settleStepMs(step) {
+    const now = Date.now();
+    if (step) step.ms = Math.max(0, now - prevStepEndTs);
+    prevStepEndTs = now;
+  }
+
   function finishRun(t) {
     if (finished) return;
     finished = true;
+    finalWallMs = elapsedMs();   /* 与顶部秒数同源：结束这一刻定格，之后不再随实时钟增长 */
     stopTimer();                                  /* 停在最终值，与下面读的 elapsed 同源 */
     const s = END_STATES[t.state] || END_STATES.error;
-    const secs = Math.round((Date.now() - startTs) / 1000);
+    const secs = Math.round(elapsedMs() / 1000);
     /* 人类可读的结束原因，供落盘 meta.endReason；必须在 const s 之后（TDZ） */
     endReasonText = t.reason || s.label;
     els.runPill.className = 'status-pill ' + s.tone;
@@ -2011,11 +2529,16 @@ const Auto = (() => {
      * 复用自己的连接由 driver 处理（模式串了它会自己拆），所以这里不关。 */
     if (runCfg.mode !== 'cdp') await apiJson('/api/browser/close', {});
     const opened = await apiJson('/api/browser/open', Object.assign(
-      { url: runCfg.url, browser: runCfg.browser, mode: runCfg.mode, cdp: runCfg.cdp }, runCfg.window));
+      { url: runCfg.url, browser: runCfg.browser, mode: runCfg.mode, cdp: runCfg.cdp, backend: runCfg.backend }, runCfg.window));
     if (!opened.ok) {
       finishRun({ done: false, state: 'error', reason: '打开浏览器失败：' + opened.error });
       return;
     }
+    /* 实际用的是哪条后端：进程内起不来时 driver 会自动退回 playwright-cli 并带
+     * backendFallback 说明。**必须说出来** —— 否则用户以为自己跑的是快的那条，
+     * 看到整轮慢却找不到原因。落盘 meta 里也记（buildRunRecord）。 */
+    runCfg.backendUsed = opened.backend || runCfg.backend;
+    if (opened.backendFallback) toast('驱动后端已回退：' + opened.backendFallback);
     /* cdp 不碰用户窗口，也就没有「全屏未生效 / 尺寸调整失败」可言 */
     if (!opened.windowSkipped) {
       if (opened.fullscreen === false) toast('全屏未生效（已退化为最大化窗口）：' + (opened.fullscreenError || ''));
@@ -2026,20 +2549,47 @@ const Auto = (() => {
     if (opened.swappedFrom) {
       toast('手填的端点回 404（http 形态在默认 profile 上必 404），已自动改用 ' + opened.target);
     }
+    /* ★ 开跑后先暂停：门必须在第 1 步快照之前（勾选框在运行参数弹窗里，取 runCfg 的冻结值）。
+     * 放在窗口校正之后，人工看到的就是最终窗口（全屏 / 指定尺寸都已生效），
+     * 而不是先给一个小窗、点完继续再跳成全屏。
+     * cdp 下勾选框是隐藏的，这里也一并跳过 —— 复用你已登录的浏览器，这道门没有意义。 */
+    if (runCfg.pauseFirst && runCfg.mode !== 'cdp') {
+      const gate = await awaitManualGate();
+      if (gate === 'abort') {
+        abortFlag = true;
+        finishRun({ done: false, state: 'aborted', reason: '用户中止' });
+        return;
+      }
+    }
+
     runCfg.browserUsed = opened.browser;
     runCfg.fullscreenUsed = opened.fullscreen === true;
     runBrowserOpen = true;   /* 浏览器确实开着了（cdp 直连的那个也算「有开着的」）*/
     updateCloseBtn();
 
     let lastResult = '';
+    /* 准备耗时在此定下：扣掉人工门那一段（与 elapsedMs 同口径，见顶部锚点注释）。 */
+    loopStartTs = Date.now();
+    prevStepEndTs = loopStartTs;
+    prepMs = startTs ? Math.max(0, loopStartTs - startTs - gateAccumMs) : null;
     for (let n = 1; n <= runCfg.maxSteps; n++) {
       if (abortFlag) { finishRun({ done: false, state: 'aborted', reason: '用户中止' }); return; }
       setProgress(n);
 
-      /* ① 快照 —— 原生弹窗（modal state）期间 snapshot 会被 playwright 拒绝，
-       * 这不是故障：转成「弹窗步」，只问 Jev 一道「动作」（接受 / 取消弹窗），
-       * 处理完弹窗下一轮就能正常快照（实测：mailbox 删除触发 confirm 即走这条路径） */
-      const snap = await apiJson('/api/browser/snapshot', {});
+      /* ① 快照 —— 优先用上一步动作顺带带回的那份（见 snapshotCarrier）：动作之后、等稳定
+       * 之后拍的，当这一步的页面依据；没有才真取一次。
+       * 真取那条还兼着两件别的事，所以兜底不能省：①原生弹窗（modal state）期间 snapshot
+       * 会被 playwright 拒绝，这不是故障 —— 转成「弹窗步」，只问 Jev 一道「动作」（接受 /
+       * 取消弹窗），处理完弹窗下一轮就能正常快照（实测：mailbox 删除触发 confirm 即走这条）；
+       * ②CDP 守卫的每步检查点（被关/被切走的专用标签页在 ②page-info 那道同样会拦下，
+       * 只是晚一个阶段）。 */
+      let snap;
+      const carried = snapshotCarrier.take();
+      if (carried) {
+        snap = { ok: true, snapshot: carried, fromAction: true };
+      } else {
+        snap = await apiJson('/api/browser/snapshot', {});
+      }
       let dialogMode = false;
       let snapText = '';
       if (!snap.ok || typeof snap.snapshot !== 'string') {
@@ -2059,6 +2609,21 @@ const Auto = (() => {
         snapText = AutoCore.DIALOG_SNAPSHOT_NOTE;
       } else {
         snapText = snap.snapshot;
+      }
+      /* ①b 快照裁剪（超预算才动手）—— 位置是刻意的：必须在**任何派生之前**。
+       * refLabels / refRoles / detectStall / buildState / recallPlan / paramCriteria /
+       * buildQuestions / 截图标注 / 落盘 全部从 snapText 派生，只在裁这一处，
+       * 它们天然一致（ref 编号、候选、树形、标注指的是同一份文本）。
+       * 事后再裁就会出现「候选里的 ref 不在快照里」那类老 bug。
+       * 弹窗步的快照是常量说明文本，没有裁的意义，跳过。 */
+      let snapTrim = null;
+      if (!dialogMode && (!runCfg.snapshotTrim || runCfg.snapshotTrim.on !== false)) {
+        snapTrim = SnapshotTrim.truncate({
+          snapshot: snapText,
+          goal: runCfg.goal,
+          budgetBytes: runCfg.snapshotTrim && runCfg.snapshotTrim.budgetBytes,
+        });
+        snapText = snapTrim.text;
       }
       /* ② 当前页信息 + 全部标签页（工程自动执行；弹窗期间 tab-list 同样可能被拒，
        * 复用上一步的页面信息）。tabs 会让 state 多出「标签页」字段 —— target=_blank
@@ -2101,18 +2666,56 @@ const Auto = (() => {
       }
       const refLabels = dialogMode ? {} : AutoCore.refCriteria(snapText);   // 展示用：始终是全量 ref
       const refRoles = dialogMode ? {} : AutoCore.refRoles(snapText);       // 动作 × 角色兼容性校验用
+      /* 停滞检测（重复同一动作 / 快照连续未变）→ 只写进 state 当反馈，不终止。
+       * 弹窗步必须排除：那时快照是常量说明文本（DIALOG_SNAPSHOT_NOTE），
+       * 连续两步必然「未变化」，不排除就会每次处理弹窗都平白误报一条。 */
+      const stall = dialogMode
+        ? { notice: null }
+        : AutoCore.detectStall(steps, snapText, runCfg.variables);
       const state = AutoCore.buildState({
         goal: runCfg.goal, url: pageInfo.url, title: pageInfo.title,
         history, lastResult: tabNote ? (lastResult + '\n' + tabNote) : lastResult,
         snapshot: snapText, tabs: pageInfo.tabs,
+        stallNotice: stall.notice,
       });
-      /* 「参数」题候选：≤250 个 ref 原样透传，超限才按相关性裁剪（高级参数可关）；
-       * 弹窗步没有快照，只问一道「动作」（dialog-accept / dialog-dismiss） */
-      let param = { criteria: {}, meta: { trimmed: false } };
+      /* 本步的候选算法路线（「高级参数」里选，默认并行召回）：
+       *   parallel —— 首轮仍是三道题，「参数」候选只给**本页前 size 个元素**；动作确定后
+       *               若它需要定位元素，再发起第二轮并行召回去核对**其余元素**，最后
+       *               在「首轮前 topN 个 + 召回合并」里做一次最终决策
+       *   ranked   —— 单次调用 + 相关性裁剪（含「其他」兜底补问，见 resolveMoreBatches）
+       * 元素不超过一批（K=0 个召回批次）与关掉裁剪时 plan 为 null，一律走单次调用 */
+      const plan = dialogMode ? null : AutoCore.recallPlan({ snapshot: snapText, paramTrim: runCfg.paramTrim });
+
+      const step = {
+        n, label: null, decision: null, payload: null, response: null, jevError: null,
+        exec: null, llm: null, screenshot: null, terminal: null,
+        pageInfo, snapshot: snapText, refLabels, historyLine: null, generatedText: null,
+        trim: null, followUps: [], trimNote: null, ms: null, recall: null,
+        /* 本步快照裁剪的账（null = 没裁）。与 trim 并列，导出记录里能看见「这步裁了多少」 */
+        snapshotTrim: snapTrim ? snapTrim.meta : null,
+        /* 这一页依据是怎么来的：'action' = 上一步动作顺带带回（省了一次快照调用），
+         * 'fresh' = 这一步真取了一次。看得见才验得动 —— 省没省、哪几步没省，一眼能对。
+         * 弹窗步写 null：那时的「快照」是常量说明文本（DIALOG_SNAPSHOT_NOTE），
+         * 说成「本步新取」是假话（取是取了，取失败了）。 */
+        snapshotFrom: dialogMode ? null : (snap.fromAction ? 'action' : 'fresh'),
+      };
+      steps.push(step);
+      touch();   /* 主调用期间树即出现本步 'run' 脉冲骨架，与状态条同步 */
+
+      let param;
       let questions;
       if (dialogMode) {
+        /* 弹窗步没有快照，只问一道「动作」（dialog-accept / dialog-dismiss） */
+        param = { criteria: {}, meta: { trimmed: false } };
         questions = AutoCore.buildDialogQuestions();
+      } else if (plan) {
+        /* 超限页首轮：三道题照旧，「参数」只给前 size 个元素。
+         * 这一段之外的候选交给第二轮的并行召回 —— 首轮不必先排一遍序、也不必
+         * 为整页候选付费；首轮的这个作答会成为最终决策的候选之一（见 resolveRecall）. */
+        param = { criteria: plan.first.criteria, meta: Object.assign({}, plan.meta, { first: true }) };
+        questions = AutoCore.buildQuestions({ snapshot: snapText, param });
       } else {
+        /* 「参数」题候选：≤250 个 ref 原样透传，超限才按相关性裁剪（高级参数可关） */
         param = AutoCore.paramCriteria({
           snapshot: snapText, goal: runCfg.goal,
           avoidRefs: Object.keys(failedRefs), paramTrim: runCfg.paramTrim,
@@ -2120,20 +2723,17 @@ const Auto = (() => {
         questions = AutoCore.buildQuestions({ snapshot: snapText, param });
       }
       const payload = { state, model: Config.current.model, questions };
-
-      const step = {
-        n, label: null, decision: null, payload, response: null, jevError: null,
-        exec: null, llm: null, screenshot: null, terminal: null,
-        pageInfo, snapshot: snapText, refLabels, historyLine: null, generatedText: null,
-        trim: param.meta, followUps: [], trimNote: null,
-      };
-      steps.push(step);
-      touch();   /* 主调用期间树即出现本步 'run' 脉冲骨架，与状态条同步 */
+      /* 主调用是「真实的这一次」：payload 落到 step 上（可见性：展示的就是发出的） */
+      step.payload = payload;
+      step.trim = param.meta;
+      touch();
 
       const jev = await callJev(payload);
+      step.jevMs = jev.ms;
       if (!jev.ok) {
         step.jevError = jev.error;
         step.label = 'Jev 调用失败';   /* 错误终步在树里不能永远显示「决策中…」 */
+        settleStepMs(step);           /* 失败的步也有耗时，不结算就成了树上一条空白 */
         touch();
         finishRun({ done: false, state: 'error', reason: jev.error });
         return;
@@ -2179,9 +2779,14 @@ const Auto = (() => {
           step.trimNote = norm.note;
         } else if (AutoCore.isRefMore(step.decision.param)) {
           if (!param.meta.trimmed) {
-            /* 没启用裁剪时候选里根本没有「其他」，这是无效答案，不能拿它去补问 */
+            /* 候选里根本没有「其他」，这是无效答案，不能拿它去补问。
+             * 两条路线的原因不一样，别把并行召回说成「没触发裁剪」——
+             * 那是**另一条**路线的事，写错了读记录的人会去找一个不存在的开关 */
+            const why = param.meta.algorithm === 'parallel'
+              ? '并行召回这条路线没有兜底项'
+              : '当前页面未触发候选裁剪';
             step.exhausted = true;
-            step.exec = { ok: false, error: 'Jev 选了候选里没有的「其他」（当前页面未触发候选裁剪）', cmd: null };
+            step.exec = { ok: false, error: 'Jev 选了候选里没有的「其他」（' + why + '）', cmd: null };
             step.label = step.decision.action + '【' + AutoCore.REF_MORE + ' · 无效选项】';
           } else if (await resolveMoreBatches(step)) {
             step.label = AutoCore.describeDecision(step.decision, refLabels, runCfg.variables);
@@ -2192,6 +2797,33 @@ const Auto = (() => {
             step.exec = { ok: false, error: last.error || '候选已展开到最后一批仍未命中目标元素', cmd: null };
             step.label = step.decision.action + '【' + AutoCore.REF_MORE + ' · 补问未命中】';
           }
+        }
+        touch();
+      }
+
+      /* ⑤b2 第二轮 · 并行召回（只在这一个条件下发生：页面元素超过一批 **且**
+       * 首轮动作是需要定位元素的那几个动作）。动作是终止 / 导航 / 生成输入时，
+       * 一个召回请求都不发 —— 那正是「先判动作、再决定要不要召回」的全部意义：
+       * 不为用不上的候选付费。
+       * 召回范围天然不含首轮看过的那一段（切法保证，见 ref-recall.planBatches）；
+       * 首轮在那一段里选出的前 topN 个会作为 seed 带进最终候选，与召回结果一起交给 Jev 决策。
+       * 落定后 step.decision 带上 param，⑤c 的角色校验与 ⑤d 的文本补问照常接着走。 */
+      if (AutoCore.shouldRecall(plan, step.decision) && !step.exhausted) {
+        const picked = await resolveRecall(step, plan, state);
+        /* 中止也要结算本步耗时：K 批召回是真花掉的时间，这一步不能留成树上的空白
+         * （漏结算，差额会冒充成「收尾」，见 settleStepMs 注释）。先结算再 finishRun。 */
+        if (abortFlag) { settleStepMs(step); finishRun({ done: false, state: 'aborted', reason: '用户中止' }); return; }
+        if (picked) {
+          step.label = AutoCore.describeDecision(step.decision, refLabels, runCfg.variables);
+        } else if (step.recall && step.recall.note && /用户中止/.test(step.recall.note)) {
+          /* 中止不算「未命中」：不写失败原因，别让记录里出现一条假的调用失败 */
+          step.label = step.decision.action + '【已中止】';
+        } else {
+          /* 召回整段失败（K 批全挂 / 最终决策没落定）：记失败步交给 Jev 自纠，不静默 */
+          const last = step.followUps[step.followUps.length - 1] || {};
+          step.exhausted = true;
+          step.exec = { ok: false, cmd: null, error: last.error || '并行召回未能确定目标元素', refNotTried: true };
+          step.label = step.decision.action + '【并行召回未命中】';
         }
         touch();
       }
@@ -2249,12 +2881,13 @@ const Auto = (() => {
       /* ⑦ 单步确认（设计 §10/§11：单步确认是安全阀，终止判定同样要过门） */
       if (cadence() === 'single') {
         const choice = await awaitConfirm(step);
-        if (choice === 'abort') { abortFlag = true; step.exec = { skipped: true }; touch(); finishRun({ done: false, state: 'aborted', reason: '用户中止' }); return; }
+        if (choice === 'abort') { abortFlag = true; step.exec = { skipped: true }; settleStepMs(step); touch(); finishRun({ done: false, state: 'aborted', reason: '用户中止' }); return; }
         if (choice === 'skip') {
           step.exec = { skipped: true };
           step.historyLine = n + '. ' + step.label + ' · 用户跳过';
           history.push(step.historyLine);
           lastResult = '用户跳过（未执行）';
+          settleStepMs(step);   /* 跳过也是本步走完（含等人点按钮的时间） */
           touch();
           continue;
         }
@@ -2262,19 +2895,16 @@ const Auto = (() => {
 
       /* 终止动作：截图留证后收尾（放在确认门之后，单步模式下用户可选择跳过）
        * 终止判定不是「一步操作」，所以在时间线上不留 chip（结论由状态条承担）；
-       * 卡片保留 —— 它的最终页面截图是完成证据。 */
+       * 卡片保留 —— 它的最终页面截图是完成证据。
+       * 「任务已完成」现在是**唯一的终止态**（「放弃」已从动作集下线），走到这里就是 done。 */
       if (step.decision && AutoCore.TERMINAL_TOOLS[step.decision.action]) {
-        const doneTerminal = step.decision.action === '任务已完成';
         step.terminal = step.decision.action;
         step.label = step.decision.action;
         if (runCfg.screenshotOn) { await takeShot(step, 'step-' + n + '-final'); }
+        settleStepMs(step);    /* 终帧截图也算本步的工作：今天它完全没被计时 */
         touch();
-        history.push(AutoCore.formatHistoryStep(n, step.label, doneTerminal, null));
-        finishRun({
-          done: doneTerminal,
-          state: doneTerminal ? 'done' : 'giveup',
-          reason: 'Jev 判定：' + step.terminal,
-        });
+        history.push(AutoCore.formatHistoryStep(n, step.label, true, null));
+        finishRun({ done: true, state: 'done', reason: 'Jev 判定：' + step.terminal });
         return;
       }
 
@@ -2282,9 +2912,8 @@ const Auto = (() => {
        * 位置与截图都取自动作之前：元素此刻必定还在、位置唯一确定。放到动作后取位置的话，
        * 演示页「归档」「发货」点完就重渲染、ref 立刻失效，一条都标不出来，而且删行会让
        * 后续行往上顶、环落到相邻行上（两种毛病都是实测过的）。标注画在图上，页面不留痕迹。 */
-      const noop = step.decision && step.decision.action === '无操作';
       /* 弹窗步不截图：modal state 下 screenshot 同样被拒，且没有页面元素可标 */
-      if (runCfg.screenshotOn && !noop && !dialogMode) {
+      if (runCfg.screenshotOn && !dialogMode) {
         await takeShot(step, 'step-' + n, assignRef(step.decision, refLabels));
       }
 
@@ -2292,6 +2921,8 @@ const Auto = (() => {
       if (step.decision && !step.exhausted) {
         await executeDecision(step, step.decision, refLabels);
       }
+      /* 本步到此为止 —— 结算后再看守卫拦没拦（守卫拦下的步也该有耗时） */
+      settleStepMs(step);
       /* 守卫在 act 里拦下（专用标签页没了）：整轮到此为止 —— 别把「在别人页面上动手」
        * 记成一步可重试的失败，那只会诱导模型继续试 */
       if (step.exec && step.exec.lostTab) {
@@ -2302,7 +2933,7 @@ const Auto = (() => {
       /* 失败记忆的键必须是「当前快照里真实存在的 ref」：曾用 /^e[A-Za-z0-9_-]+$/ 猜形状，
        * 切到第 N 个标签页后 playwright 把 ref 前缀变成 fN（e496 → f2e496），正则全部失配，
        * failedRefs 静默失效 —— 实测会话 r-0926-0046-qrys 就此重复点被遮挡元素到终止。 */
-      if (!ok && !noop && !step.refNotTried && step.decision
+      if (!ok && !step.refNotTried && step.decision
           && AutoCore.isRefParam(step.decision.param, refLabels)) {
         failedRefs[step.decision.param] = 1;
       }
@@ -2315,7 +2946,7 @@ const Auto = (() => {
         /* 与 historyLine 同一份摘要：这里的 slice(0,120) 会把排在末尾的遮挡根因再切一次，
          * 「上一步结果」是模型下一轮唯一的失败线索，不能只剩「超时」 */
         : '失败：' + AutoCore.briefError(step.exec && step.exec.error);
-      consecutiveFails = (ok || noop || (step.exec && step.exec.skipped)) ? 0 : consecutiveFails + 1;
+      consecutiveFails = (ok || (step.exec && step.exec.skipped)) ? 0 : consecutiveFails + 1;
 
       touch();
 
@@ -2326,7 +2957,9 @@ const Auto = (() => {
       });
       if (t) { finishRun(t); return; }
 
-      await sleep(STEP_GAP_MS);
+      /* 间隔为 0 时不发这一次定时器：sleep(0) 至少要过一个宏任务（浏览器有 4ms 下限
+       * 与后台节流），几十步累起来也是白白多出来的收尾误差 */
+      if (STEP_GAP_MS > 0) await sleep(STEP_GAP_MS);
     }
     finishRun({ done: false, state: 'limit', reason: '达到步数上限（' + runCfg.maxSteps + '）' });
   }
@@ -2421,7 +3054,14 @@ const Auto = (() => {
       b.addEventListener('click', () => switchMode(b.dataset.mode));
     });
     els.start.onclick = start;
-    els.stop.onclick = () => { abortFlag = true; toast('将在当前步骤后中止…'); };
+    els.stop.onclick = () => {
+      abortFlag = true;
+      /* 门开着时 for 循环还没跑起来，没有任何东西在读 abortFlag —— 不放行这道门，
+       * 用户点「中止」就是毫无反应（按钮看着能点、点了没动静）。收尾文案交给门后的
+       * finishRun 去写，这里那句「将在当前步骤后中止」在门下是错的（根本没有「当前步骤」）。 */
+      if (gateRelease) { gateRelease('abort'); return; }
+      toast('将在当前步骤后中止…');
+    };
     els.closeBrowser.onclick = async () => {
       const r = await apiJson('/api/browser/close', {});
       /* 只说 server 说的那一句：cdp 是「已断开连接（你的浏览器仍在运行）」、本来就没开着
@@ -2494,6 +3134,7 @@ const Auto = (() => {
      * 刷新页面就丢会很难受）；没存过则维持 HTML 里的默认值 isolated。 */
     els.browserMode.value = readStoredMode();
     try { els.cdpTarget.value = localStorage.getItem(CDP_KEY) || ''; } catch (_) { /* 读不到就算了 */ }
+    if (els.backend) els.backend.value = readStoredBackend();
     refreshModeFields();
     /* 默认走一个场景：别让用户面对空白表单开场 */
     if (!els.goal.value.trim() && !els.url.value.trim() && SCENARIOS.length) {
@@ -2507,6 +3148,8 @@ const Auto = (() => {
     probeEngine();          /* 完成后自己会再刷一次检查条（引擎那一格） */
     refreshBrowserState();  /* 决定「关闭浏览器」开局是否可点（空闲时应为不可点） */
     refreshRunsList();
+    /* 深链 ?sess=<id>：列表拉完之后再落座（openSessionFromUrl 自己会等列表） */
+    openSessionFromUrl().catch((e) => console.warn('[auto] openSessionFromUrl failed:', e));
   }
 
   return { init: init };

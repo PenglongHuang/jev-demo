@@ -42,6 +42,14 @@ function startMocks() {
     return m ? m[1] : null;
   };
 
+  /* oracle 的「没找到目标元素」兜底动作。
+   * 这里**不能**返回「放弃」：脚本场景里这一支通常只意味着快照还没到位（页面尚未渲染完
+   * 或上一个场景的浏览器没收拾干净），放弃会把一次可自愈的等待变成整轮 giveup
+   * （实测：S2 因此在 mock 侧直接终止）—— 这条教训后来直接把「放弃」从动作集里拔掉了。
+   * 也不能用「无操作」—— 它更早下线。tab-list 是唯一满足条件的替代：真实动作、
+   * 不需要 ref 也不需要文本、对页面零副作用，跑一步就能拿到新快照再判一次。 */
+  const RE_OBSERVE = { action: 'tab-list', unfinished: 1 };
+
   /* ---- 决策 oracle ---- */
   function decide(state) {
     const goal = String(state['任务目标'] || '');
@@ -65,7 +73,7 @@ function startMocks() {
       if (gone && /已删除 1 封/.test(snapshot)) return { action: '任务已完成', unfinished: 0 };
       const r = findRefAfterLine(snapshot, /8 月电子对账单/, '删除');
       if (r) return { action: 'click', ref: r, unfinished: 1 };
-      return { action: '无操作', unfinished: 1 };
+      return RE_OBSERVE;
     }
 
     if (goal.includes('搜索')) {
@@ -74,7 +82,7 @@ function startMocks() {
       if (val && n <= 5) return { action: '任务已完成', unfinished: 0 };
       const sb = searchRef(snapshot);
       if (sb) return { action: '生成输入', ref: sb, unfinished: 1 };
-      return { action: '无操作', unfinished: 1 };
+      return RE_OBSERVE;
     }
 
     if (goal.includes('所有邮件')) {
@@ -89,7 +97,7 @@ function startMocks() {
       if (/option "已付款待发货"[^\n]*\[selected\]/.test(snapshot)) return { action: '任务已完成', unfinished: 0 };
       const m = snapshot.match(/- combobox "订单状态" (?:\[[^\]]+\] )*\[ref=([A-Za-z0-9_-]+)\]/);
       if (m) return { action: 'select', ref: m[1], unfinished: 1 };
-      return { action: '无操作', unfinished: 1 };
+      return RE_OBSERVE;
     }
 
     /* 默认：归档 9 月对账单场景 */
@@ -97,7 +105,7 @@ function startMocks() {
     if (gone && archived && Number(archived[1]) >= 1) return { action: '任务已完成', unfinished: 0 };
     const r = findRefAfterLine(snapshot, /9 月电子对账单/, '归档');
     if (r) return { action: 'click', ref: r, unfinished: 1 };
-    return { action: '无操作', unfinished: 1 };
+    return RE_OBSERVE;
   }
 
   /* 文本补问 oracle：目标里的「选择「xxx」」即应选定的取值（S6 → 已付款待发货）。
@@ -120,14 +128,20 @@ function startMocks() {
     };
     const answers = {};
     if (q['动作']) {
-      answers['动作'] = { type: 'choice', choice: d.action, probabilities: probs(d.action, ['无操作', 'click', 'fill']), confidence: 0.82 };
+      answers['动作'] = { type: 'choice', choice: d.action, probabilities: probs(d.action, ['click', 'fill', 'press']), confidence: 0.82 };
     }
     if (q['参数']) {
       /* 剧本动作带 ref 才答参数题：候选里只有真实 ref（「无需元素」已下线），
-       * 不作用于元素的动作（goto/无操作/终止…）不答，parseDecision 容忍缺失 */
+       * 不作用于元素的动作（goto/press/终止…）不答，parseDecision 容忍缺失。
+       * 目标 ref 不在本题候选里时（并行召回的批次只含页面后半段）就答该批第一个候选 ——
+       * 真机上模型也只能在候选里选，冒充「批外作答」会让 choiceInBatch 这类断言失去意义 */
       if (d.ref) {
-        const other = Object.keys(q['参数'].criteria || {}).find((k) => k !== d.ref);
-        answers['参数'] = { type: 'choice', choice: d.ref, probabilities: probs(d.ref, other ? [other] : []), confidence: 0.78 };
+        const crit = Object.keys(q['参数'].criteria || {});
+        const hit = crit.includes(d.ref) ? d.ref : crit[0];
+        if (hit) {
+          const other = crit.find((k) => k !== hit);
+          answers['参数'] = { type: 'choice', choice: hit, probabilities: probs(hit, other ? [other] : []), confidence: 0.78 };
+        }
       }
     }
     if (q['文本']) {
@@ -159,6 +173,19 @@ function startMocks() {
     if (names.length === 1 && ['参数', '动作', '文本'].includes(names[0])) {
       const crit = Object.keys((q[names[0]] || {}).criteria || {});
       if (!crit.length) v.push('单题补问的候选为空：' + names[0]);
+      /* 并行召回的批次（默认算法）：候选必须是真 ref、必须 ≤ 250、且不得出现「其他」——
+       * 这条路线没有兜底项，候选就是召回结果；措辞里也要说明只在本批内排序 */
+      if (names[0] === '参数') {
+        const snap = String((body.state || {})['页面快照'] || '');
+        const known = new Set((snap.match(/\[ref=([A-Za-z0-9_-]+)\]/g) || []).map((s) => s.slice(5, -1)));
+        crit.forEach((k) => { if (!known.has(k)) v.push('召回批次候选 ' + k + ' 不在快照 ref 集合内'); });
+        if (crit.includes('其他')) v.push('并行召回的候选里不得出现「其他」兜底项');
+        if (crit.length > 250) v.push('召回批次候选数 ' + crit.length + ' 超过接口 255 上限');
+        const inst = String((q[names[0]] || {}).instructions || '');
+        if (/不需要判断目标是否在本批中/.test(inst)) {
+          if (!/第 \d+\/\d+ 批/.test(inst)) v.push('召回批次 instructions 没写清是第几批');
+        }
+      }
       return v;
     }
     if (names.length !== 3 || !['动作', '参数', '未完成'].every((n) => names.includes(n))) {
@@ -166,10 +193,14 @@ function startMocks() {
       return v;
     }
     const acts = Object.keys(q['动作'].criteria || {});
-    if (acts.length !== 23) v.push('动作候选数=' + acts.length + '（应为 23：19 浏览器 + 2 工程 + 2 终止）');
-    ['生成输入', '无操作', '任务已完成', '放弃'].forEach((k) => {
+    if (acts.length !== 21) v.push('动作候选数=' + acts.length + '（应为 21：19 浏览器 + 1 工程 + 1 终止）');
+    ['生成输入', '任务已完成'].forEach((k) => {
       if (!acts.includes(k)) v.push('动作缺少 ' + k);
     });
+    /* 「无操作」已下线（空转出口导致模型 fill 完干等），任何形态回潮都算违约 */
+    if (acts.includes('无操作')) v.push('动作候选里不得再出现「无操作」');
+    /* 「放弃」同样已下线：模型随时可选的免死金牌，会把可自愈的卡壳变成整轮终止 */
+    if (acts.includes('放弃')) v.push('动作候选里不得再出现「放弃」');
     if (q['参数'].type !== 'choice') v.push('参数不是 choice');
     if (q['未完成'].type !== 'score' || (q['未完成'].criteria || []).length !== 2) v.push('未完成应为 2 级 score');
 

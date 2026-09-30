@@ -20,6 +20,7 @@ const ROOT = path.join(__dirname, '..');
 const driver = require(path.join(ROOT, 'browser-driver.js'));
 const { startServer } = require('./helpers/server.js');
 const { parseDevToolsPort } = driver._test;
+const { parseSnapshotRefs } = require(path.join(ROOT, 'public', 'js', 'util.js'));
 
 const SESSION = 'jevcdp' + Date.now().toString(36);
 const START_TAB = 'about:blank';   /* 用户「本来就开着」的标签页 —— 全程都不该被导航 */
@@ -109,6 +110,32 @@ test('cdp：attach 后只操作新建的专用标签页，用户原有的标签�
 
   const snap = await driver.snapshot(SESSION);
   assert.ok(snap.ok && /收件箱/.test(snap.snapshot), '专用页应已加载演示邮箱');
+});
+
+/* 快路径（run-code 合并命令）自己取的那份「动作之后」快照，必须有真机断言。
+ * 这是这次改动收益最大的一条：快路径绕开了 CLI 的动作命令，工件一点都没有，快照只能
+ * 在命令里自己等稳定、自己取。这里验两件事 —— 交回来了，且内容是**动作之后**的页面。
+ * 没有这条断言的话，把它改成 snapshot: null 整个单元测试仍然全绿。 */
+test('cdp：快路径动作把「动作之后」的快照交回来（真机）', async (t) => {
+  if (skipReason) return t.skip(skipReason);
+  const home = await driver.act(SESSION, 'goto', null, serverBase + '/demo/mailbox.html');
+  assert.ok(home.ok, 'goto 回邮箱页失败：' + (home.error || ''));
+
+  const before = await driver.snapshot(SESSION);
+  assert.ok(before.ok, '前置快照失败：' + (before.error || ''));
+  const subject = (String(before.snapshot).match(/listitem "邮件 \d+：([^"]+)"/) || [])[1];
+  const archive = parseSnapshotRefs(before.snapshot).find((r) => /button "归档"/.test(r.label));
+  assert.ok(subject && archive, '需要一封可归档的邮件（subject=' + subject + '）');
+  const ref = archive.ref;
+
+  /* click 属于 MERGED_ACTIONS：这一条走的就是 run-code 快路径 */
+  const clicked = await driver.act(SESSION, 'click', ref, null);
+  assert.ok(clicked.ok, '快路径 click 失败：' + (clicked.error || ''));
+  assert.strictEqual(typeof clicked.snapshot, 'string',
+    '快路径必须把动作后的快照交回来（命令里自己等稳定 + 自己取）');
+  assert.match(clicked.snapshot, /\[ref=/, '交回来的要能当快照用（下游全按 ref 行解析）');
+  assert.doesNotMatch(clicked.snapshot, new RegExp('listitem "邮件 \\d+：' + subject.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    '必须是**动作之后**的页面：被归档的那封不该还在');
 });
 
 test('cdp：窗口类动作拒绝执行（不改用户的窗口与视口）', async (t) => {

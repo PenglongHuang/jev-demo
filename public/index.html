@@ -192,6 +192,17 @@
                   <option value="cdp">复用我的浏览器 · CDP 直连（要开调试端口）</option>
                 </select>
               </div>
+              <!-- 驱动后端与浏览器内核/模式正交：决定「谁来下命令」，不决定「驱动哪个浏览器」。
+                   进程内后端把每条命令从「新起一个 node 进程」变成进程内函数调用，实测每步
+                   机械开销从 ~8.4s 降到 ~1.0s；playwright-cli 那条完整保留作兜底，
+                   起不来会自动退回并在错误条里说明（见 browser-driver.js 的 open 分发）。 -->
+              <div class="inline-field">
+                <label for="autoBackend">驱动后端</label>
+                <select id="autoBackend">
+                  <option value="inproc" selected>进程内 · 快（默认）</option>
+                  <option value="cli">playwright-cli · 兜底</option>
+                </select>
+              </div>
               <div class="inline-field" id="autoCdpField" hidden>
                 <label for="autoCdpTarget">CDP 端点 <span class="hint">留空＝自动探测（推荐）</span></label>
                 <input type="text" id="autoCdpTarget" placeholder="留空即可；手填要 ws://127.0.0.1:9222/devtools/browser/&lt;uuid&gt;（http 形态在默认 profile 上会 404）" />
@@ -209,6 +220,9 @@
                 </select>
               </div>
               <label class="check-inline"><input type="checkbox" id="autoScreenshot" checked />每步截图</label>
+              <!-- 「开跑后先暂停」：门在第一次快照之前，人工登录 / 接管完再继续。
+                   cdp 模式下整行隐藏（复用你已登录的浏览器，这道门没意义），见 auto.js 的 refreshModeFields。 -->
+              <label class="check-inline" id="autoPauseField"><input type="checkbox" id="autoPauseFirst" />开跑后先暂停 · 登录 / 接管完成再继续</label>
             </div>
             <div class="warnbar" id="autoCdpWarn" hidden>
               <div class="title">⚠ CDP 直连会操作用你正在使用的浏览器</div>
@@ -370,10 +384,10 @@
       带 <code>ref</code> 的可访问性树（如 <code>textbox "Username" [ref=e16]</code>），把这份快照连同任务目标
       放进 <code>state</code>，Jev 就能直接吐出「调用哪个工具、作用于哪个 ref」：</p>
       <ul>
-        <li><b>下一步动作</b>（Choice）：<b>完整的 playwright-cli 工具列表</b>，共 57 项 ——
+        <li><b>下一步动作</b>（Choice）：<b>完整的 playwright-cli 工具列表</b>，共 56 项 ——
         涵盖导航（<code>goto</code>/<code>go-back</code>/<code>reload</code>）、交互（<code>click</code>/<code>fill</code>/<code>type</code>/<code>press</code>/<code>select</code>/<code>check</code>/<code>hover</code>/<code>drag</code>/<code>upload</code>）、
         鼠标键盘（<code>mousemove</code>/<code>mousewheel</code>/<code>keydown</code>）、检查（<code>snapshot</code>/<code>screenshot</code>/<code>eval</code>/<code>console</code>/<code>network</code>）、
-        标签页、弹窗、Cookie/Storage、请求拦截、追踪录像、视口，以及 <code>任务已完成</code> / <code>放弃</code> 两个终止态。</li>
+        标签页、弹窗、Cookie/Storage、请求拦截、追踪录像、视口，以及 <code>任务已完成</code> 这个终止态。</li>
         <li><b>参数</b>（Choice）：<b>从 state 的快照里自动解析出的全部 ref</b>，无需手写。
         解析器逐行匹配 <code>[ref=xxx]</code>，取该行 ref 前的角色描述（并补上行尾冒号后的文字），
         自动标注 <code>【可交互】</code> 或 <code>【容器/静态】</code>。
@@ -449,13 +463,33 @@
           </div>
         </details>
         <details class="llm-slot" id="cfgTrimSlot">
-          <summary class="llm-slot-title">高级参数 <span class="llm-slot-sub">仅影响 playwright-jev-agent 的「参数」题</span><span class="slot-state" id="cfgTrimState">智能裁剪 开 · 上限 80 · 批次 3</span></summary>
+          <summary class="llm-slot-title">高级参数 <span class="llm-slot-sub">仅影响 playwright-jev-agent 的「参数」题</span><span class="slot-state" id="cfgTrimState">并行召回 开 · 每批 200 · 召回 15</span></summary>
           <div class="slot-body">
             <label class="check-row" for="cfgTrimOn">
               <input type="checkbox" id="cfgTrimOn" />
-              <span>参数候选智能裁剪<em>元素太多时，按相关性只把前 N 个候选给 Jev（关掉则全量发出，超过接口 255 个选项上限会直接报错）</em></span>
+              <span>参数候选收敛<em>元素太多时不再把全部元素塞进选项（关掉则全量发出，超过接口 255 个选项上限会直接报错）</em></span>
             </label>
-            <div class="trim-fields">
+            <div class="field">
+              <label for="cfgTrimAlgo">候选算法</label>
+              <select id="cfgTrimAlgo">
+                <option value="parallel">并行召回（默认）</option>
+                <option value="ranked">相关性裁剪</option>
+              </select>
+              <p class="field-tip" id="cfgTrimAlgoTip"></p>
+            </div>
+            <div class="trim-fields" id="trimParallelFields">
+              <div class="field">
+                <label for="cfgTrimSize">批次大小</label>
+                <input type="number" id="cfgTrimSize" min="10" max="250" step="10" />
+                <p class="field-tip">一页元素超过此数就分批：K = 总元素数 ÷ 批次大小（向上取整）。默认 200，且只在「首轮动作需要元素」时才触发召回。</p>
+              </div>
+              <div class="field">
+                <label for="cfgTrimTopN">每批召回数</label>
+                <input type="number" id="cfgTrimTopN" min="1" max="250" step="1" />
+                <p class="field-tip">每批按概率取前 N 个进最终候选（1–250，默认 15，不得超过批次大小）。合并后上限 250。</p>
+              </div>
+            </div>
+            <div class="trim-fields" id="trimRankedFields">
               <div class="field">
                 <label for="cfgTrimLimit">候选元素上限</label>
                 <input type="number" id="cfgTrimLimit" min="10" max="250" step="10" />
@@ -466,6 +500,20 @@
                 <input type="number" id="cfgTrimBatches" min="0" max="5" step="1" />
                 <p class="field-tip">Jev 在前 N 个里找不到目标时，会选「其他」让我们展开下一批；这里限总共最多给几批（0–5，默认 3，即首批 + 最多 2 次展开；0 = 不附「其他」项）。</p>
               </div>
+            </div>
+          </div>
+        </details>
+        <details class="llm-slot" id="cfgSnapshotSlot">
+          <summary class="llm-slot-title">快照裁剪 <span class="llm-slot-sub">仅影响发往 Jev 的 state.页面快照</span><span class="slot-state" id="cfgSnapState">超 44KB 才裁</span></summary>
+          <div class="slot-body">
+            <label class="check-row" for="cfgSnapOn">
+              <input type="checkbox" id="cfgSnapOn" />
+              <span>超预算时裁剪快照<em>页面太大时请求会超出 Jev 的上下文窗口，接口报 max_tokens_exceeded 且重试必然同样失败 —— 整轮就此终止。开启后超预算的页面会按相关性裁剪；没超预算的页面逐字节原样发送（不裁）</em></span>
+            </label>
+            <div class="field">
+              <label for="cfgSnapBudget">快照预算（字节）</label>
+              <input type="number" id="cfgSnapBudget" min="8000" max="200000" step="1000" />
+              <p class="field-tip">快照自身的字节上限（8000–200000，默认 45000）。注意这是**快照**的预算：总请求还要加上候选问题（并行召回的题目实测 30KB，比这里原先估的 13~15KB 大一倍）。默认值按中文页实测的 0.424 tokens/byte 反推，把总请求压在 ~30K tokens 以内（实测该页 30.5K 能过、33.7K 报 max_tokens_exceeded）。调大＝裁得更少但更接近上限。</p>
             </div>
           </div>
         </details>
@@ -501,13 +549,16 @@
 
 <script src="presets.js?v=20260924a"></script>
 <script src="js/util.js?v=20260924l"></script>
-<script src="js/ref-funnel.js?v=20260924j"></script>
-<script src="js/auto-core.js?v=20260926a"></script>
+<script src="js/ref-context.js?v=20260928d"></script>
+<script src="js/ref-funnel.js?v=20260928c"></script>
+<script src="js/ref-recall.js?v=20260928d"></script>
+<script src="js/snapshot-trim.js?v=20260928b"></script>
+<script src="js/auto-core.js?v=20260928d"></script>
 <script src="js/anno.js?v=20260924m"></script>
 <script src="js/state-editor.js?v=20260924a"></script>
 <script src="js/questions.js?v=20260924a"></script>
 <script src="js/output.js?v=20260924a"></script>
-<script src="js/app.js?v=20260927a"></script>
-<script src="js/auto.js?v=20260926f"></script>
+<script src="js/app.js?v=20260928d"></script>
+<script src="js/auto.js?v=20260928d"></script>
 </body>
 </html>

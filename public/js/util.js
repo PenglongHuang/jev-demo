@@ -94,6 +94,16 @@ function parseSnapshotRefs(snapshotText) {
   return refs;
 }
 
+/* 折叠中段：根因短语固定在行尾，按长度从头截会把根因切掉，所以两端都留。
+ * 唯一一份实现：auto-core（错误摘要）与 snapshot-trim（名字/URL 缩略）共用本模块，
+ * 只有根目录的 browser-driver.js 另存一份 —— 那是另一个运行时，不依赖 public/js。 */
+function clipMiddle(s, max) {
+  const str = String(s);
+  if (str.length <= max) return str;
+  const tail = Math.floor(max / 2);
+  return str.slice(0, max - tail - 1) + '…' + str.slice(-tail);
+}
+
 function buildRefCriteria(snapshotText) {
   const refs = parseSnapshotRefs(snapshotText);
   const criteria = {};
@@ -303,5 +313,5 @@ function confirmDialog(opts) {
 
 /* node:test 环境导出（浏览器 <script> 加载时此分支不生效，auto-core.js 复用同一实现） */
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { parseSnapshotRefs, buildRefCriteria, extractSnapshotText };
+  module.exports = { parseSnapshotRefs, buildRefCriteria, extractSnapshotText, clipMiddle };
 }

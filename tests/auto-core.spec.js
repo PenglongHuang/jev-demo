@@ -102,12 +102,17 @@ test('buildQuestions：固定 3 道，动作 19+2+2、参数来自快照、未�
   assert.ok(!qs['文本'], '「文本」不再随首轮作答：候选依赖已定动作，构造不出来');
 
   const tools = qs['动作'].criteria;
-  assert.strictEqual(Object.keys(tools).length, 23);   // 19 浏览器操作 + 2 工程 + 2 终止
-  ['click', 'fill', 'goto', 'tab-list', 'dialog-accept', '生成输入', '无操作', '任务已完成', '放弃']
+  assert.strictEqual(Object.keys(tools).length, 21);   // 19 浏览器操作 + 1 工程 + 1 终止
+  ['click', 'fill', 'goto', 'tab-list', 'dialog-accept', '生成输入', '任务已完成']
     .forEach((k) => assert.ok(tools[k], '动作缺少 ' + k));
+  /* 「放弃」已下线：它是模型随时可选的免死金牌，「当前页面做不到」多半只是这一步没选对 */
+  assert.ok(!tools['放弃'], '动作不应再有「放弃」');
   /* 裁掉的 8 个不得回潮 */
   ['dblclick', 'drop', 'keydown', 'keyup', 'mousemove', 'mousedown', 'mouseup', 'mousewheel']
     .forEach((k) => assert.ok(!tools[k], '动作不应再有 ' + k));
+  /* 「无操作」已下线：它是「等待页面自身变化」的合法空转出口，实测导致模型
+   * fill 完聊天框连选 3 步等回复（会话 r-0928-1530-r1uy）。不许以任何名字回潮。 */
+  ['无操作', '等待', 'noop'].forEach((k) => assert.ok(!tools[k], '空转动作不得回潮：' + k));
   assert.ok(tools['生成输入'].includes('生成'));
   assert.ok(!('snapshot' in tools) && !('eval' in tools) && !('cookie-set' in tools));
 
@@ -147,12 +152,23 @@ test('动作题 instructions：给出角色 → 动词对照', () => {
   assert.match(acts, /下拉框/);
 });
 
-test('动作题 instructions：滚动指到 press + 键名补问，等待指到无操作', () => {
+test('动作题 instructions：滚动指到 press + 键名补问；无空转选项，fill 之后要提交', () => {
   const qs = AutoCore.buildQuestions({ snapshot: SAMPLE_SNAPSHOT, variables: [] });
   const acts = qs['动作'].instructions;
   assert.match(acts, /press/);
   assert.match(acts, /PageDown/);
-  assert.match(acts, /无操作/);
+  assert.ok(!/无操作/.test(acts), '「无操作」已下线，instructions 里不得再出现');
+  /* fill 不提交是这次事故的根因，instructions 必须把后续动作写死 */
+  assert.match(acts, /fill[^。]*不提交|只写入/);
+  assert.match(acts, /click|press/);
+});
+
+test('动作词表：fill 描述写明「清空 + 整体替换」与「只写入、不提交」', () => {
+  const f = AutoCore.AUTO_TOOLS.fill;
+  assert.match(f, /清空/, 'fill 的清空语义必须写死（否则被当成 type 的追加语义）');
+  assert.match(f, /替换|不是追加/, 'fill 是整体替换');
+  assert.match(f, /不提交|不会有任何变化/, 'fill 只写值，必须写明页面不会自己变化');
+  assert.match(f, /click|press/, 'fill 描述里要直接指出后续的提交动作');
 });
 
 /* ---------- 动作 × 元素角色兼容性：不兼容就不发命令，同一步内补问「动作」 ----------
@@ -289,7 +305,6 @@ test('planExecution：常规动作映射到 op/ref/text', () => {
 });
 
 test('planExecution：工程动作与终止动作', () => {
-  assert.deepStrictEqual(AutoCore.planExecution({ action: '无操作', param: null, text: '无' }, VARS), { kind: 'noop' });
   assert.deepStrictEqual(AutoCore.planExecution({ action: '生成输入', param: 'e3', text: '无' }, VARS), { kind: 'llm', ref: 'e3' });
   assert.deepStrictEqual(AutoCore.planExecution({ action: '任务已完成', param: null, text: '无' }, VARS), { kind: 'terminal', action: '任务已完成' });
 });
@@ -306,6 +321,72 @@ test('planExecution：矛盾决策抛错（需 ref 却未选元素 / 需文本�
   assert.throws(() => AutoCore.planExecution({ action: 'click', param: null, text: '无' }, VARS), /未.*选定元素/);
   assert.throws(() => AutoCore.planExecution({ action: 'fill', param: 'e3', text: '无' }, VARS), /文本/);
   assert.throws(() => AutoCore.planExecution({ action: '生成输入', param: null, text: '无' }, VARS), /未.*选定元素/);
+});
+
+/* ---------- 停滞检测：重复动作 / 快照连续未变的反馈 ----------
+ * 事故链条（会话 r-0928-1530-r1uy）：fill 聊天框 → 连选 3 步「无操作」等回复。
+ * 现在的对策是**反馈**（state.停滞提示），不是终止 —— 同一动作连做 N 次本身可能合理
+ * （连续翻页、连点「下一页」），据此终止会误杀正常任务。 */
+
+const stepOf = (action, param, text, snapshot) => ({ decision: { action, param, text }, snapshot });
+
+test('detectStall：首步或页面有变化时不给提示', () => {
+  assert.strictEqual(AutoCore.detectStall([], 'a', VARS).notice, null);
+  assert.strictEqual(AutoCore.detectStall(null, 'a', VARS).notice, null);
+  const one = [stepOf('click', 'e10', null, 'a')];
+  assert.strictEqual(AutoCore.detectStall(one, 'b', VARS).notice, null, '快照变了就该闭嘴');
+  /* 单题补问/解析失败的步没有 decision —— 不能被算进连续计数 */
+  const noDecision = [{ snapshot: 'a' }, stepOf('click', 'e10', null, 'a')];
+  assert.strictEqual(AutoCore.detectStall(noDecision, 'a', VARS).repeatCount, 1);
+});
+
+test('detectStall：连续 2 步同一动作 → 软提示；第 3 步 → 硬提示（必须换）', () => {
+  const two = [stepOf('click', 'e10', null, 's1'), stepOf('click', 'e10', null, 's2')];
+  const soft = AutoCore.detectStall(two, 's3', VARS);
+  assert.strictEqual(soft.repeatCount, 2);
+  assert.match(soft.notice, /click/);
+  assert.match(soft.notice, /连续执行 2 步/);
+  assert.ok(!/必须换一个/.test(soft.notice), '2 步只提示，不下死命令');
+
+  const hard = AutoCore.detectStall(two.concat([stepOf('click', 'e10', null, 's3')]), 's4', VARS);
+  assert.strictEqual(hard.repeatCount, 3);
+  assert.match(hard.notice, /必须换一个/);
+  assert.match(hard.notice, /换入口/, '硬提示必须给出「重复不下去怎么办」的出口');
+  assert.ok(!/放弃/.test(hard.notice), '「放弃」已下线，硬提示不得再把它写成退路');
+});
+
+test('detectStall：指纹含动作 + 参数 + 最终文本，任一不同就不是重复', () => {
+  /* 换 ref → 不算重复 */
+  const otherRef = [stepOf('click', 'e10', null, 's1'), stepOf('click', 'e11', null, 's2')];
+  assert.strictEqual(AutoCore.detectStall(otherRef, 's3', VARS).repeatCount, 1);
+  /* 换动作 → 不算重复 */
+  const otherAct = [stepOf('click', 'e10', null, 's1'), stepOf('hover', 'e10', null, 's2')];
+  assert.strictEqual(AutoCore.detectStall(otherAct, 's3', VARS).repeatCount, 1);
+  /* 文本按变量解析后的**真值**比：「关键词」与「招商银行」是同一个值 → 算重复 */
+  const alias = [stepOf('fill', 'e3', '关键词', 's1'), stepOf('fill', 'e3', '招商银行', 's2')];
+  assert.strictEqual(AutoCore.detectStall(alias, 's3', VARS).repeatCount, 2);
+  /* 真的换了词 → 不算重复 */
+  const diffText = [stepOf('fill', 'e3', '关键词', 's1'), stepOf('fill', 'e3', '回车', 's2')];
+  assert.strictEqual(AutoCore.detectStall(diffText, 's3', VARS).repeatCount, 1);
+});
+
+test('detectStall：动作不同但快照连续未变，同样报警', () => {
+  const steps = [stepOf('click', 'e10', null, 'same'), stepOf('fill', 'e3', '关键词', 'same')];
+  const out = AutoCore.detectStall(steps, 'same', VARS);
+  assert.strictEqual(out.noChangeStreak, 2);
+  assert.strictEqual(out.repeatCount, 1);
+  assert.match(out.notice, /连续 2 步没有变化/);
+  assert.match(out.notice, /fill|提交/, '未变化时要提示「fill 不提交」这个高频原因');
+});
+
+test('buildState：停滞提示只在有值时出现，且排在末尾（近快照的注意力位）', () => {
+  const base = AutoCore.buildState({ goal: 'g', url: 'u', title: 't', history: [], lastResult: '', snapshot: 's' });
+  assert.strictEqual(base['停滞提示'], undefined, '无停滞时不得留空占位字段');
+  const st = AutoCore.buildState({
+    goal: 'g', url: 'u', title: 't', history: [], lastResult: '', snapshot: 's', stallNotice: '停',
+  });
+  assert.strictEqual(st['停滞提示'], '停');
+  assert.strictEqual(Object.keys(st).pop(), '停滞提示');
 });
 
 /* ---------- shouldTerminate ---------- */
@@ -515,7 +596,7 @@ test('normalizeParam：动作不需要元素时参数一律剥掉；需要元素
   assert.strictEqual(noRefJunk.param, null);
   assert.strictEqual(noRefJunk.note, '');
   /* 答案缺失：同样归一为空 */
-  assert.strictEqual(AutoCore.normalizeParam({ action: '无操作', param: null }).param, null);
+  assert.strictEqual(AutoCore.normalizeParam({ action: 'press', param: null }).param, null);
   /* 需要元素的动作：原样透传，「其他」留给调用方展开下一批 */
   const needRef = AutoCore.normalizeParam({ action: 'click', param: '其他' });
   assert.strictEqual(needRef.param, '其他');
@@ -531,6 +612,549 @@ test('parseParamAnswer：补问只回「参数」一题，不要求「动作」�
   assert.throws(() => AutoCore.parseParamAnswer({ 参数: {} }), /参数/);
 });
 
+/* ---------- 并行召回（ref-recall 接线） ---------- */
+
+const RECALL = { on: true, algorithm: 'parallel', size: 80, topN: 15 };
+const RANKED = { on: true, algorithm: 'ranked', limit: 80, maxTranches: 3 };
+
+test('normalizeTrim：默认算法 = 并行召回；非法值回退缺省', () => {
+  const d = AutoCore.normalizeTrim();
+  assert.strictEqual(d.algorithm, 'parallel', '并行召回是默认算法');
+  assert.strictEqual(d.on, true);
+  assert.strictEqual(d.size, 200, '批次大小默认 200');
+  assert.strictEqual(d.topN, 15);
+  assert.deepStrictEqual(AutoCore.ALGORITHMS, ['parallel', 'ranked']);
+  assert.strictEqual(AutoCore.normalizeTrim({ algorithm: '瞎写' }).algorithm, 'parallel');
+  assert.strictEqual(AutoCore.normalizeTrim({ algorithm: 'ranked' }).algorithm, 'ranked', '用户显式选择必须尊重');
+  assert.strictEqual(AutoCore.normalizeTrim({ size: 5 }).size, 10, '批次大小夹到 10–250');
+  assert.strictEqual(AutoCore.normalizeTrim({ size: 999 }).size, 250);
+  assert.strictEqual(AutoCore.normalizeTrim({ size: 20, topN: 99 }).topN, 20, '召回数不得超过一批容量');
+});
+
+test('recallPlan：默认 200 → 首轮 200 + 其余 193 一批召回；小页面 / 关裁剪 / 选了相关性裁剪都返回 null', () => {
+  const plan = AutoCore.recallPlan({ snapshot: RESUME_SNAPSHOT, paramTrim: { on: true, algorithm: 'parallel' } });
+  assert.ok(plan, '393 ref 必须走并行召回');
+  assert.strictEqual(plan.meta.firstSize, 200, '首轮「参数」候选 = 前 200 个');
+  assert.strictEqual(plan.meta.batches, 1, '其余 193 个一批召回（只剩一段）');
+  assert.strictEqual(plan.meta.size, 200);
+  assert.strictEqual(plan.meta.totalRefs, 393);
+  assert.strictEqual(AutoCore.recallPlan({ snapshot: RESUME_SNAPSHOT, paramTrim: RECALL }).meta.batches, 4, '显式 size=80 → 首轮 80 + 召回 4 批');
+  assert.strictEqual(AutoCore.recallPlan({ snapshot: SAMPLE_SNAPSHOT, paramTrim: RECALL }), null, '不超一批走单次调用');
+  assert.strictEqual(AutoCore.recallPlan({ snapshot: RESUME_SNAPSHOT, paramTrim: { ...RECALL, on: false } }), null, '关掉裁剪 = 全量单次');
+  assert.strictEqual(AutoCore.recallPlan({ snapshot: RESUME_SNAPSHOT, paramTrim: RANKED }), null,
+    '选了相关性裁剪时并行召回必须让路（否则两条路线同时生效）');
+});
+
+test('shouldRecall：只有「超限页 + 动作需要元素」才触发第二轮召回', () => {
+  const plan = AutoCore.recallPlan({ snapshot: RESUME_SNAPSHOT, paramTrim: RECALL });
+  assert.ok(plan);
+  assert.strictEqual(AutoCore.shouldRecall(plan, { action: 'click' }), true);
+  ['press', 'goto', 'reload', 'go-back', 'go-forward', 'tab-list', 'tab-select', 'tab-close',
+    '任务已完成'].forEach((a) => {
+    assert.strictEqual(AutoCore.shouldRecall(plan, { action: a }), false, a + ' 不需要元素，不该发召回请求');
+  });
+  assert.strictEqual(AutoCore.shouldRecall(null, { action: 'click' }), false, '小页面（K=1）不触发');
+  assert.strictEqual(AutoCore.shouldRecall(plan, null), false);
+});
+
+test('buildRecallQuestions：只问「参数」一题，候选 = 该批，instructions 说明本批范围', () => {
+  const plan = AutoCore.recallPlan({ snapshot: RESUME_SNAPSHOT, paramTrim: RECALL });
+  const at = plan.batches.findIndex((b) => b.criteria.e172);
+  assert.ok(at >= 0, 'e172（合格候选人的按钮）在召回范围内');
+  const q = AutoCore.buildRecallQuestions(plan, at + 1);
+  assert.deepStrictEqual(Object.keys(q), ['参数'], '召回批次只问元素，不问动作/未完成');
+  assert.strictEqual(q['参数'].type, 'choice');
+  assert.strictEqual(Object.keys(q['参数'].criteria).length, plan.batches[at].refs.length);
+  assert.ok(q['参数'].criteria.e172);
+  assert.strictEqual(q['参数'].criteria['其他'], undefined, '召回批次没有兜底项');
+  assert.match(q['参数'].instructions, new RegExp('第 ' + (at + 1) + '/' + plan.meta.batches + ' 批'), '写明第几批 / 共几批');
+  assert.match(q['参数'].instructions, /全页共 393 个/);
+  assert.match(q['参数'].instructions, /不需要判断目标是否在本批中/, '让模型只在本批内排序，别去判「有没有」');
+  assert.ok(!/折叠/.test(q['参数'].instructions));
+});
+
+test('mergeRecall：合并各批召回 → 最终候选集，无「其他」且 meta 完整', () => {
+  const plan = AutoCore.recallPlan({ snapshot: RESUME_SNAPSHOT, paramTrim: RECALL });
+  /* 模拟 K 批作答：每批给自己批内前 4 个非零概率，最后一批整个失败（null） */
+  const answers = plan.batches.map((b, i) => {
+    if (i === plan.batches.length - 1) return null;
+    const probabilities = {};
+    Object.keys(b.criteria).slice(0, 4).forEach((k, j) => { probabilities[k] = 0.5 - j / 10; });
+    return { type: 'choice', choice: Object.keys(b.criteria)[0], probabilities, confidence: 0.7 };
+  });
+  const merged = AutoCore.mergeRecall(plan, answers, { seed: [plan.first.refs[0].ref] });
+  assert.strictEqual(merged.meta.batches, 4, 'size=80 → 召回 4 批');
+  assert.strictEqual(merged.meta.recalled, 12, '4 批里 3 批成功 × 每批 4 个，最后一批失败不贡献');
+  assert.strictEqual(merged.meta.merged, 13, '12 个召回 + 1 个首轮预测');
+  assert.deepStrictEqual(merged.meta.seeded, [plan.first.refs[0].ref]);
+  assert.strictEqual(Object.keys(merged.criteria)[0], plan.first.refs[0].ref, '首轮预测排最前');
+  assert.strictEqual(merged.meta.topN, 15);
+  assert.strictEqual(merged.criteria['其他'], undefined);
+  assert.ok(Object.keys(merged.criteria).every((k) => /^e\d+$/.test(k)), '候选只能是真实 ref');
+  assert.strictEqual(merged.meta.perBatch[3].recalled.length, 0, '失败批次如实记空');
+});
+
+test('paramInstructions：并行召回的措辞说清来源，不提「折叠 / 其他」', () => {
+  const plan = AutoCore.recallPlan({ snapshot: RESUME_SNAPSHOT, paramTrim: RECALL });
+  const merged = AutoCore.mergeRecall(plan, plan.batches.map((b) => ({
+    choice: Object.keys(b.criteria)[0],
+    probabilities: { [Object.keys(b.criteria)[0]]: 0.9 },
+  })));
+  const qs = AutoCore.buildQuestions({ snapshot: RESUME_SNAPSHOT, variables: [], param: { criteria: merged.criteria, meta: merged.meta } });
+  assert.match(qs['参数'].instructions, /并行召回合并而来/);
+  assert.match(qs['参数'].instructions, /4 批 × 每批按概率取前 15/, 'size=80 → 召回 4 批');
+  assert.match(qs['参数'].instructions, /已全部列出/);
+  assert.ok(!/折叠|其他/.test(qs['参数'].instructions), '这条路线没有兜底项，措辞不能暗示还有下一批');
+  assert.strictEqual(Object.keys(qs['参数'].criteria).length, 4, '候选 = 合并结果（每批一个），不是全量 393');
+});
+
+test('paramInstructions：首轮那一次说清「只给了前 N 个、其余下一步按需召回」', () => {
+  const plan = AutoCore.recallPlan({ snapshot: RESUME_SNAPSHOT, paramTrim: RECALL });
+  const param = { criteria: plan.first.criteria, meta: Object.assign({}, plan.meta, { first: true }) };
+  const qs = AutoCore.buildQuestions({ snapshot: RESUME_SNAPSHOT, variables: [], param });
+  assert.match(qs['参数'].instructions, /候选是当前页面前 80 个元素（全页共 393 个）/);
+  assert.match(qs['参数'].instructions, /按需并行召回其余 313 个元素/);
+  assert.match(qs['参数'].instructions, /就选出本段中最接近的那一个/, '本段没有目标时别乱选，选最接近的');
+  assert.strictEqual(Object.keys(qs['参数'].criteria).length, 80, '首轮只给前 size 个');
+  assert.ok(!/其他/.test(qs['参数'].instructions));
+});
+
+test('buildRecallPickQuestions：最终决策题只含「参数」，说清候选来自合并、已全部列出', () => {
+  const q = AutoCore.buildRecallPickQuestions({
+    criteria: { e1: '【可交互】 button "a"', e2: '【可交互】 button "b"' },
+    meta: { batches: 3, merged: 2, totalRefs: 393, seeded: ['e1'] }, action: 'click',
+  });
+  assert.deepStrictEqual(Object.keys(q), ['参数']);
+  assert.strictEqual(Object.keys(q['参数'].criteria).length, 2);
+  assert.match(q['参数'].instructions, /click/);
+  assert.match(q['参数'].instructions, /首轮在该段元素里选出的 1 个 \+ 3 批并行召回的合并结果/);
+  assert.match(q['参数'].instructions, /已全部列出/);
+  assert.ok(!/其他/.test(q['参数'].instructions), '这条路线没有兜底项，措辞不能暗示还有下一批');
+  /* 首轮没给出可用预测时，措辞不谎报「首轮选出的」 */
+  const q2 = AutoCore.buildRecallPickQuestions({
+    criteria: { e1: 'x' }, meta: { batches: 1, merged: 1, totalRefs: 400, seeded: [] }, action: 'click',
+  });
+  assert.match(q2['参数'].instructions, /候选 = 1 批并行召回的合并结果/);
+});
+
+test('buildRecallPickQuestions：「其他」这类兜底键必须被剔除（否则会被当成元素发出去）', () => {
+  /* 实测事故：召回无结果时退回裁剪候选，那一份带「其他」；Jev 选了它，
+   * decision.param 就成了「其他」，命令报「fill 需要合法 ref」，连烧三步 */
+  const q = AutoCore.buildRecallPickQuestions({
+    criteria: { e1: '【可交互】 button "a"', 其他: '还有 5 个候选未列出，选中即自动展开下一批' },
+    meta: { batches: 1, merged: 2, totalRefs: 400, seeded: [] }, action: 'fill',
+  });
+  assert.strictEqual(q['参数'].criteria['其他'], undefined, '兜底键不得进最终决策候选');
+  assert.deepStrictEqual(Object.keys(q['参数'].criteria), ['e1']);
+  assert.match(q['参数'].instructions, /共 1 个/, '措辞里的候选数要按剔除后的算');
+  assert.ok(!/其他|下一批/.test(q['参数'].instructions));
+  assert.strictEqual(AutoCore.isRefParam('其他', { e1: 'x' }), false, '它本来就不是 ref');
+});
+
+test('buildRecallPickQuestions：退回裁剪候选时不得自称「并行召回的合并结果」', () => {
+  /* 召回一条都没命中 → 用相关性裁剪的候选兜底；措辞与候选数都要按**实际生效**的那一份说 */
+  const q = AutoCore.buildRecallPickQuestions({
+    criteria: { e1: '【可交互】 button "a"', e2: '【可交互】 button "b"' },
+    meta: { batches: 2, merged: 2, totalRefs: 469, seeded: [], fallback: true }, action: 'click',
+  });
+  assert.match(q['参数'].instructions, /退回的相关性裁剪候选/);
+  assert.ok(!/并行召回的合并结果/.test(q['参数'].instructions), '兜底那一份不能冒充召回结果');
+  assert.match(q['参数'].instructions, /共 2 个/);
+});
+
+test('recallSeeds：首轮前 topN 个一起进最终候选（不是只带作答的那一个）', () => {
+  const plan = AutoCore.recallPlan({ snapshot: RESUME_SNAPSHOT, paramTrim: RECALL });
+  const first = Object.keys(plan.first.criteria);
+  const answer = { type: 'choice', choice: first[3], probabilities: {} };
+  first.slice(0, 20).forEach((k, i) => { answer.probabilities[k] = 0.5 - i / 100; });
+  const seeds = AutoCore.recallSeeds({ plan: plan, answer: answer });
+  assert.strictEqual(seeds.length, 15, '取前 15 个（topN）');
+  /* 作答的 ref 恒排最前（模型自己选的），其余的按首轮概率序 —— 集合仍是首轮概率前 15 个 */
+  assert.strictEqual(seeds[0], first[3], '作答的 ref 排最前');
+  assert.deepStrictEqual(seeds.slice(1), first.slice(0, 15).filter((r) => r !== first[3]), '其余按首轮概率序');
+  assert.deepStrictEqual(seeds.slice().sort(), first.slice(0, 15).sort(), '集合 = 首轮概率前 15 个');
+  assert.ok(seeds.every((r) => plan.first.criteria[r]), '种子只来自首轮那一段');
+  /* 传整封响应（信封）也行 —— 剥壳在 answerOf 里，调用方不需要知道有两层 */
+  assert.deepStrictEqual(AutoCore.recallSeeds({ plan: plan, answer: { answers: { 参数: answer } } }), seeds);
+  /* 作答的 ref 概率为 0 也必须在种子里（pickFromAnswer 的硬规则） */
+  const zero = AutoCore.recallSeeds({ plan: plan, answer: { choice: first[0], probabilities: { [first[0]]: 0, [first[1]]: 0.2 } } });
+  assert.strictEqual(zero[0], first[0]);
+  /* 没有作答 / 没有 plan → 空数组，调用方自己决定兜底 */
+  assert.deepStrictEqual(AutoCore.recallSeeds({ plan: plan, answer: null }), []);
+  assert.deepStrictEqual(AutoCore.recallSeeds({ plan: null, answer: answer }), []);
+});
+
+test('answerOf 从 AutoCore 暴露出来（调用方只依赖一处剥壳实现）', () => {
+  const inner = { type: 'choice', choice: 'e1', probabilities: { e1: 1 } };
+  assert.strictEqual(AutoCore.answerOf({ model: 'jev-1.13.0', answers: { 参数: inner } }), inner);
+  assert.strictEqual(AutoCore.answerOf(inner), inner);
+});
+
+test('actionsOf：并行召回是一个动作，排在「首轮」之后、「参数决策」之前', () => {
+  const step = {
+    n: 1, payload: { state: {}, model: 'm', questions: { 动作: {}, 参数: {}, 未完成: {} } }, response: {}, jevMs: 992,
+    recall: {
+      afterMain: true,
+      meta: { algorithm: 'parallel', batches: 2, size: 200, topN: 15, totalRefs: 381, merged: 101 },
+      criteria: { e144: {}, e9: {} },
+      merged: { merged: 101, recalled: 140, batches: 2 },
+      batches: [
+        { batch: 1, size: 200, payload: { questions: { 参数: {} } }, response: {}, ms: 1200, recalled: ['e9'] },
+        { batch: 2, size: 181, payload: { questions: { 参数: {} } }, response: {}, ms: 1100, recalled: ['e144'] },
+      ],
+    },
+    followUps: [{ kind: 'pick', payload: { questions: { 参数: {} } }, response: {}, param: 'e144', ms: 954, candidates: 101 }],
+  };
+  const acts = AutoCore.actionsOf(step);
+  assert.deepStrictEqual(acts.map((a) => a.kind), ['main', 'recall', 'pick'], '时间线顺序：首轮 → 召回 → 参数决策');
+  assert.strictEqual(acts[0].title, 'Jev 首轮 · 3 题', '超限页首轮仍是三道题（参数只给前 200 个）');
+  assert.strictEqual(acts[1].title, '并行召回 · 2 批 × 200 个');
+  assert.strictEqual(acts[1].calls, 2, '一个动作、两次调用');
+  /* K 批是**并发**发出去的（resolveRecall 里 Promise.all）：墙钟只看最慢的那一批。
+   * 累加会把并行的 1.2s / 1.1s 说成 2.3s —— 那是「模型净耗时之和」，不是用户等的时间 */
+  assert.strictEqual(acts[1].ms, 1200, '召回动作的耗时 = 并行批次里的最大值');
+  assert.deepStrictEqual(acts[1].mergedKeys, ['e144', 'e9']);
+  assert.strictEqual(acts[2].title, '参数决策 · 1 题 · 候选 101 个（并行召回合并）');
+  /* 耗时口径：1 次首轮 + 2 批召回 + 1 次参数决策 = 4 次 Jev 调用；
+   * 首轮 → 召回 → 参数决策 三段是串行的，段位之间才累加，召回段内部取最大值 */
+  const d = AutoCore.durationView(step);
+  assert.strictEqual(d.jevCalls, 4);
+  assert.strictEqual(d.jevMs, 992 + 1200 + 954);
+  assert.strictEqual(d.jevMeasured, 4, '4 次调用都测到了：召回那 2 批各算一次，不能算成 1 次');
+});
+
+test('actionsOf：召回部分批次缺 ms —— 取测到的最慢一批，缺的那批只减 measured', () => {
+  const step = {
+    n: 2, payload: { questions: { 动作: {}, 未完成: {} } }, response: {}, jevMs: 500,
+    recall: {
+      afterMain: true,
+      meta: { algorithm: 'parallel', batches: 3, size: 200 },
+      criteria: {},
+      batches: [
+        { batch: 1, size: 200, response: {}, ms: 800, recalled: [] },
+        { batch: 2, size: 200, response: {}, ms: 1400, recalled: [] },
+        { batch: 3, size: 80, response: {}, recalled: [] },   /* 老记录 / 字段丢过 */
+      ],
+    },
+  };
+  const rec = AutoCore.actionsOf(step)[1];
+  assert.strictEqual(rec.kind, 'recall');
+  assert.strictEqual(rec.calls, 3);
+  assert.strictEqual(rec.ms, 1400, '只认测到的批次，取其中最大值');
+  const d = AutoCore.durationView(step);
+  assert.strictEqual(d.jevCalls, 4);
+  assert.strictEqual(d.jevMs, 500 + 1400);
+  assert.strictEqual(d.jevMeasured, 3, '首轮 1 + 召回测到的 2 批');
+});
+
+test('stepDurationTitle：召回并行时不能只说「合计」', () => {
+  const step = {
+    n: 2, payload: { questions: { 动作: {}, 未完成: {} } }, response: {}, jevMs: 500,
+    recall: {
+      afterMain: true, meta: { batches: 2, size: 200 }, criteria: {},
+      batches: [
+        { batch: 1, size: 200, response: {}, ms: 800, recalled: [] },
+        { batch: 2, size: 120, response: {}, ms: 1400, recalled: [] },
+      ],
+    },
+    followUps: [{ kind: 'pick', payload: { questions: { 参数: {} } }, response: {}, ms: 300, candidates: 12 }],
+  };
+  /* 3 次首轮/召回/决策？—— 首轮 1 + 召回 2 批 + 决策 1 = 4 次；召回那 2 批并行，文案要说明白 */
+  assert.strictEqual(AutoCore.stepDurationTitle(step),
+    '本步 4 次 Jev 调用（首轮/召回/补问）合计，召回 2 批并行、按最慢一批计入');
+});
+
+test('stepDurationTitle：批次已建好但一次都没测到（中断/自动保存）时不提「最慢一批」', () => {
+  /* 自动保存可能正好落在 Promise.all 还没回来的那一刻：recall.batches 已经建好，
+   * 每批的 ms 还是 null。这时说「按最慢一批计入」是凭空许诺，还与同一行的
+   * 「3 次未计时」互相打脸（data/runs 里真有这种 running 态记录） */
+  const step = {
+    n: 3, payload: { questions: { 动作: {}, 未完成: {} } }, response: {}, jevMs: 500,
+    recall: {
+      afterMain: true, meta: { batches: 3, size: 200 }, criteria: {},
+      batches: [
+        { batch: 1, size: 200, response: null, ms: null, recalled: [] },
+        { batch: 2, size: 200, response: null, ms: null, recalled: [] },
+        { batch: 3, size: 80, response: null, ms: null, recalled: [] },
+      ],
+    },
+    followUps: [{ kind: 'pick', payload: { questions: { 参数: {} } }, response: {}, ms: 300, candidates: 5 }],
+  };
+  const d = AutoCore.durationView(step);
+  assert.strictEqual(d.jevMs, 500 + 300, '召回那 3 批一次都没测到，不进合计');
+  assert.strictEqual(d.recallBatches, 3);
+  assert.strictEqual(d.recallMeasured, 0);
+  assert.strictEqual(AutoCore.stepDurationTitle(step),
+    '本步 5 次 Jev 调用（首轮/召回/补问）合计，其中 3 次未计时');
+});
+
+test('actionsOf：老流程记录（首轮带「参数」）仍把召回排在首轮之前', () => {
+  const step = {
+    n: 1, payload: { questions: { 动作: {}, 参数: {}, 未完成: {} } }, response: {}, jevMs: 500,
+    recall: { meta: { batches: 1, size: 80 }, criteria: {}, batches: [{ batch: 1, size: 80, response: {}, ms: 100, recalled: [] }] },
+  };
+  assert.deepStrictEqual(AutoCore.actionsOf(step).map((a) => a.kind), ['recall', 'main']);
+});
+
+test('两条路线互不干扰：选了相关性裁剪时 paramCriteria 仍是旧行为（含「其他」）', () => {
+  const pc = AutoCore.paramCriteria({ snapshot: RESUME_SNAPSHOT, goal: RESUME_GOAL, paramTrim: RANKED });
+  assert.strictEqual(pc.meta.trimmed, true);
+  assert.ok(pc.criteria['其他'], '相关性裁剪路线的兜底项必须还在');
+  const qs = AutoCore.buildQuestions({ snapshot: RESUME_SNAPSHOT, variables: [], param: pc });
+  assert.match(qs['参数'].instructions, /折叠/);
+});
+
+test('buildRunRecord：召回批次不重复存 state，且 Jev 调用次数把召回算进去', () => {
+  const state = { 任务目标: 'x', 页面快照: '- button "a" [ref=e1]' };
+  const step = {
+    n: 1,
+    payload: { state, model: 'm', questions: { 动作: {}, 参数: {}, 未完成: {} } },
+    recall: {
+      meta: { algorithm: 'parallel', batches: 2, size: 80, topN: 15, totalRefs: 100, merged: 20, clamped: 0, perBatch: [] },
+      batches: [
+        { batch: 1, size: 80, payload: { state, model: 'm', questions: { 参数: {} } }, response: {}, error: null, recalled: ['e1'], ms: 12 },
+        { batch: 2, size: 20, payload: { state, model: 'm', questions: { 参数: {} } }, response: null, error: 'boom', recalled: [], ms: 9 },
+      ],
+    },
+  };
+  const rec = AutoCore.buildRunRecord({ id: 'r', runCfg: { goal: 'x' }, steps: [step] });
+  const bs = rec.steps[0].recall.batches;
+  assert.strictEqual(bs.length, 2);
+  /* K 批发的是同一份 state：落盘只留 questions + sharedState 标记（读回时挂回 step.request.state）。
+   * 一步 6 次调用各存一份全量快照 → 记录实测从 ~300KB 涨到 1.6MB */
+  assert.strictEqual(bs[0].request.state, undefined, '批次请求不得重复存 state');
+  assert.strictEqual(bs[0].sharedState, true);
+  assert.ok(bs[0].request.questions['参数'], 'questions 必须留着 —— 那才是每批不同的部分');
+  assert.ok(rec.steps[0].request.state['页面快照'], '本步首轮的 state 仍在记录里，信息不丢');
+  assert.deepStrictEqual(bs[0].recalled, ['e1']);
+  assert.strictEqual(bs[1].error, 'boom', '失败批次如实落盘');
+  assert.strictEqual(rec.meta.jevCalls, 3, '首轮 1 次 + 召回 2 批（对账口径）');
+});
+
+test('落盘 → 重新载入：召回候选键与「参数决策」候选数都要活着回来（往返对账）', () => {
+  /* 「面板与实际数据不匹配」的老毛病就出在这条边界上：这层映射原先只活在浏览器里的
+   * auto.js，node 侧没有测试面，丢字段丢得无声无息 —— 会话一重新载入，
+   * 「参数决策 · 候选 N 个」就成了「候选 ? 个」，召回卡片里的合并候选清单一整段消失 */
+  const state = { 任务目标: 'x', 页面快照: '- button "a" [ref=e1]' };
+  const refLabels = { e1: '【可交互】 button "发货"', e2: '【可交互】 button "查看"' };
+  const step = {
+    n: 1, refLabels,
+    payload: { state, model: 'm', questions: { 动作: {}, 参数: {}, 未完成: {} } },
+    response: {},
+    recall: {
+      afterMain: true,
+      meta: { algorithm: 'parallel', batches: 1, size: 200, topN: 15, totalRefs: 400, merged: 2, seeded: ['e1'] },
+      criteria: { e1: refLabels.e1, e2: refLabels.e2 },
+      merged: { merged: 2, recalled: 1, batches: 1, seeded: ['e1'] },
+      batches: [{ batch: 1, size: 200, payload: { state, model: 'm', questions: { 参数: {} } }, response: {}, error: null, recalled: ['e2'], ms: 12 }],
+    },
+    followUps: [{ kind: 'pick', payload: { questions: { 参数: {} } }, response: {}, param: 'e1', candidates: 2, ms: 30 }],
+  };
+  const saved = AutoCore.buildRunRecord({ id: 'r', runCfg: { goal: 'x' }, steps: [step] });
+  assert.deepStrictEqual(saved.steps[0].recall.candidates, ['e1', 'e2'], '候选键必须落盘');
+  assert.strictEqual(saved.steps[0].followUps[0].candidates, 2, '候选数必须落盘（否则标题写 ?）');
+
+  const back = AutoCore.hydrateRecord(saved).steps[0];
+  assert.deepStrictEqual(Object.keys(back.recall.criteria), ['e1', 'e2'], '候选键映射按 refLabels 复原');
+  assert.strictEqual(back.recall.criteria.e1, refLabels.e1, '复原出来的描述与当时一致（卡片可读）');
+  assert.strictEqual(back.followUps[0].candidates, 2, '候选数往返不丢');
+  assert.deepStrictEqual(back.followUps[0].payload, saved.steps[0].followUps[0].request, 'request → payload 归一');
+  assert.deepStrictEqual(back.recall.batches[0].payload.state, state, 'sharedState 挂回去，展示 = 当时真发的');
+  assert.strictEqual(back.recall.batches[0].sharedState, undefined, '中间标记不留给渲染层');
+
+  /* 老记录（补问没存候选数，但召回候选键还在）：从候选键数补回来，不写「?」 */
+  const old = JSON.parse(JSON.stringify(saved));
+  delete old.steps[0].followUps[0].candidates;
+  const oldBack = AutoCore.hydrateRecord(old).steps[0];
+  assert.strictEqual(oldBack.followUps[0].candidates, 2, '老记录也补得回来（从批次候选键数）');
+
+  /* 更老的记录（候选键都没有）：如实为 null / 空 —— 报「候选 0 个」是假话 */
+  const older = JSON.parse(JSON.stringify(saved));
+  delete older.steps[0].recall.candidates;
+  delete older.steps[0].followUps[0].candidates;
+  const olderBack = AutoCore.hydrateRecord(older).steps[0];
+  assert.strictEqual(olderBack.followUps[0].candidates, null, '重建不出来就写 ?，不编造 0');
+  assert.deepStrictEqual(Object.keys(olderBack.recall.criteria), [], '候选键真没了就如实为空');
+});
+
+test('落盘 → 重新载入：召回耗时仍是「最慢一批」，不会被读成各批之和', () => {
+  /* 这条边界上丢过字段（候选键 / 候选数），耗时也一样要往返对账：
+   * 落盘存的是**每批各自**的 ms，读回后由 actionsOf 重新取最大 —— 只要有人改成相加，
+   * 重新载入的历史会话就会比实时跑的同一会话更慢，且没人看得出来 */
+  const state = { 任务目标: 'x', 页面快照: '- button "a" [ref=e1]' };
+  const step = {
+    n: 1, payload: { state, model: 'm', questions: { 动作: {}, 未完成: {} } }, response: {},
+    recall: {
+      afterMain: true,
+      meta: { algorithm: 'parallel', batches: 2, size: 200, topN: 15, totalRefs: 381 },
+      criteria: { e9: '【可交互】 button "查看"' },
+      batches: [
+        { batch: 1, size: 200, payload: { state, model: 'm', questions: { 参数: {} } }, response: {}, error: null, recalled: [], ms: 1100 },
+        { batch: 2, size: 181, payload: { state, model: 'm', questions: { 参数: {} } }, response: {}, error: null, recalled: [], ms: 1900 },
+      ],
+    },
+    followUps: [{ kind: 'pick', payload: { questions: { 参数: {} } }, response: {}, param: 'e9', candidates: 1, ms: 400 }],
+  };
+  const back = AutoCore.hydrateRecord(AutoCore.buildRunRecord({ id: 'r', runCfg: { goal: 'x' }, steps: [step] })).steps[0];
+  const acts = AutoCore.actionsOf(back);
+  assert.deepStrictEqual(acts.map((a) => a.kind), ['main', 'recall', 'pick']);
+  assert.strictEqual(acts[1].ms, 1900, '往返后仍是并发批次里的最大值（1100 + 1900 = 3000 是错的）');
+  assert.strictEqual(acts[1].calls, 2);
+  assert.strictEqual(acts[1].measured, 2);
+  assert.strictEqual(AutoCore.durationView(back).jevMs, 1900 + 400, '首轮这次没记 jevMs，只有召回段 + 决策段');
+});
+
+test('落盘 → 重新载入：行动顺序不变（并行召回仍排在「首轮」之后）', () => {
+  /* 实测缺陷：afterMain 没落盘，重新载入后按老判据（首轮带不带「参数」题）反推 ——
+   * 新流程首轮**就带**「参数」（前 size 个），于是判成「召回在前」，
+   * 时间线倒放（用户报过的「怎么还是先并行啊？」在重新载入时复活） */
+  const state = { 任务目标: 'x', 页面快照: '- button "a" [ref=e1]' };
+  const mk = (afterMain) => ({
+    n: 1, refLabels: { e1: 'a', e2: 'b' },
+    payload: { state, model: 'm', questions: { 动作: {}, 参数: {}, 未完成: {} } },
+    response: { answers: {} },
+    recall: {
+      afterMain: afterMain,
+      meta: { algorithm: 'parallel', batches: 1, size: 200, topN: 15, totalRefs: 400, merged: 20 },
+      criteria: { e1: 'a', e2: 'b' },
+      merged: { merged: 20, recalled: 19, batches: 1, seeded: ['e1'] },
+      batches: [{ batch: 1, size: 200, payload: { state, model: 'm', questions: { 参数: {} } }, response: {}, error: null, recalled: ['e2'], ms: 12 }],
+    },
+    followUps: [{ kind: 'pick', payload: { questions: { 参数: {} } }, response: {}, param: 'e1', candidates: 20, ms: 30 }],
+  });
+  const kinds = (step) => AutoCore.actionsOf(step).map((a) => a.kind);
+  const live = kinds(mk(true));
+  assert.deepStrictEqual(live, ['main', 'recall', 'pick'], '当前流程：首轮 → 并行召回 → 参数决策');
+  const rec = AutoCore.buildRunRecord({ id: 'r', runCfg: { goal: 'x' }, steps: [mk(true)] });
+  assert.strictEqual(rec.steps[0].recall.afterMain, true, 'afterMain 必须落盘');
+  assert.deepStrictEqual(kinds(AutoCore.hydrateRecord(rec).steps[0]), live, '重新载入后顺序不变');
+  /* 老流程（召回在首轮之前）落盘再读回，也不能被新逻辑翻过来 */
+  const oldRec = AutoCore.buildRunRecord({ id: 'r2', runCfg: { goal: 'x' }, steps: [mk(false)] });
+  assert.deepStrictEqual(kinds(AutoCore.hydrateRecord(oldRec).steps[0]), ['recall', 'main', 'pick']);
+  /* 更老的记录（没有 afterMain 字段）：按老判据 —— **首轮不带「参数」题**的那一版
+   * （首轮只问动作+未完成）召回是在首轮之后的 */
+  const ancient = AutoCore.buildRunRecord({ id: 'r3', runCfg: { goal: 'x' }, steps: [mk(true)] });
+  delete ancient.steps[0].recall.afterMain;
+  delete ancient.steps[0].request.questions['参数'];
+  assert.deepStrictEqual(kinds(AutoCore.hydrateRecord(ancient).steps[0]), ['main', 'recall', 'pick'], '老记录判据不变');
+  /* 首轮带「参数」却没有 afterMain 字段 = 中间那版（召回先发）的记录，仍按「召回在前」渲染 */
+  const mid = AutoCore.buildRunRecord({ id: 'r4', runCfg: { goal: 'x' }, steps: [mk(true)] });
+  delete mid.steps[0].recall.afterMain;
+  assert.deepStrictEqual(kinds(AutoCore.hydrateRecord(mid).steps[0]), ['recall', 'main', 'pick'], '中间版本的历史记录不改写');
+});
+
+test('落盘 → 重新载入：llm 耗时也要活着回来（面板不能少一截）', () => {
+  const step = {
+    n: 1, payload: { state: {}, model: 'm', questions: { 动作: {} } }, response: {},
+    llm: { messages: [{ role: 'user', content: 'x' }], raw: { choices: [] }, text: '搜索词', ms: 1234 },
+  };
+  const saved = AutoCore.buildRunRecord({ id: 'r', runCfg: { goal: 'x' }, steps: [step] });
+  assert.strictEqual(saved.steps[0].llm.ms, 1234, 'llm.ms 落盘');
+  assert.strictEqual(AutoCore.hydrateRecord(saved).steps[0].llm.ms, 1234, '读回时不能丢（丢了「生成输入」就没耗时）');
+});
+
+test('recall 行动：K 批全部失败是 error，不是永远 pending（树上不能一直转圈）', () => {
+  const bs = (err) => [{ batch: 1, response: err ? null : {}, error: err }];
+  assert.strictEqual(AutoCore.actionStatus({ kind: 'recall', batches: bs('boom') }), 'error');
+  assert.strictEqual(AutoCore.actionStatus({ kind: 'recall', batches: bs(null) }), 'ok');
+  assert.strictEqual(AutoCore.actionStatus({ kind: 'recall', batches: [{ batch: 1, response: null, error: null }] }), 'pending');
+  /* 有的批成功有的失败 → 不算整体失败 */
+  assert.strictEqual(AutoCore.actionStatus({ kind: 'recall', batches: [{ batch: 1, response: {}, error: null }, { batch: 2, response: null, error: 'x' }] }), 'ok');
+});
+
+test('dropRefMore：只剔「其他」，顺序与其他键原样保留', () => {
+  const src = { e1: 'a', 其他: '还有 5 个候选未列出', e2: 'b' };
+  const out = AutoCore.dropRefMore(src);
+  assert.deepStrictEqual(Object.keys(out), ['e1', 'e2']);
+  assert.strictEqual(out.其他, undefined);
+  assert.deepStrictEqual(Object.keys(AutoCore.dropRefMore({ e1: 'a' })), ['e1']);
+  assert.deepStrictEqual(Object.keys(AutoCore.dropRefMore(null)), []);
+});
+
+test('recallFallback：退回裁剪候选时必须剔「其他」，且候选数与实际发出的题目一致', () => {
+  /* 实测缺陷：兜底那份带「其他」，面板/记录报 81 个、实际发出 80 个，
+   * 面板还会在写着「无「其他」兜底」的区块里多渲染一行空的「其他」 */
+  const big = ['- button "发货" [ref=e1]'].concat(
+    Array.from({ length: 300 }, (_, i) => '- generic "cell ' + (i + 1) + '" [ref=e' + (i + 10) + ']')).join('\n');
+  const fb = AutoCore.recallFallback({
+    snapshot: big, goal: '给金卡会员的催单发货',
+    paramTrim: AutoCore.normalizeTrim(), mergedMeta: { batches: 2, topN: 15, totalRefs: 301 },
+  });
+  assert.strictEqual(fb.criteria['其他'], undefined, '兜底候选里不得有「其他」');
+  assert.strictEqual(fb.meta.fallback, true, '标记兜底：最终决策题的措辞不能再自称「召回合并结果」');
+  assert.strictEqual(fb.meta.merged, Object.keys(fb.criteria).length, '报的份数 = 实际持有的候选数');
+  assert.strictEqual(fb.meta.batches, 2, '召回批次信息照旧带上（面板要说清是哪个阶段兜的底）');
+  const q = AutoCore.buildRecallPickQuestions({ criteria: fb.criteria, meta: fb.meta, action: 'click' });
+  assert.strictEqual(Object.keys(q['参数'].criteria).length, fb.meta.merged, '发出的题目 = 报给面板的那一份');
+  assert.match(q['参数'].instructions, /共 \d+ 个/);
+  assert.ok(!/其他/.test(q['参数'].instructions));
+});
+
+test('hydrateRecord：没有召回的步骤原样通过（老记录零回归）', () => {
+  /* 入参是**运行时形状**（payload），落盘才叫 request —— 这条也一并锁住 */
+  const step = { n: 1, payload: { state: { 任务目标: 'x' }, model: 'm', questions: { 动作: {} } }, response: {}, recall: null, followUps: [{ kind: 'text', payload: { questions: { 文本: {} } }, text: 'a' }] };
+  const saved = AutoCore.buildRunRecord({ id: 'r', runCfg: { goal: 'x' }, steps: [step] });
+  const back = AutoCore.hydrateRecord(saved).steps[0];
+  assert.strictEqual(back.recall, null);
+  assert.strictEqual(back.payload.model, 'm');
+  assert.strictEqual(back.followUps[0].payload.questions['文本'] !== undefined, true, 'request → payload 归一');
+  assert.strictEqual(back.followUps[0].candidates, null, '非 pick 补问不编造候选数');
+});
+
+/* ---------- 快照携带器：动作带回的快照顶替下一步的 snapshot ---------- */
+
+test('makeSnapshotCarrier：只有「成功 + 非空字符串」才收下，其余一律清空', () => {
+  const c = AutoCore.makeSnapshotCarrier();
+  const SNAP = '- generic [ref=e1]';
+
+  assert.strictEqual(c.accept({ ok: true, snapshot: SNAP }), SNAP, '成功且带回文本 → 收下');
+  assert.strictEqual(c.peek(), SNAP);
+  /* 失败的动作必须把上一份清掉，不能留着冒充这次的：失败步的下一步要真取一次，
+   * 否则失败原因（弹窗 / 被遮挡）会被上一份快照盖掉 */
+  assert.strictEqual(c.accept({ ok: false, error: 'x', snapshot: SNAP }), null, '失败 → 清空');
+  assert.strictEqual(c.peek(), null);
+
+  c.accept({ ok: true, snapshot: SNAP });
+  assert.strictEqual(c.accept({ ok: true }), null, '成功但没带回（fill / check 这类上游不给）→ 清空');
+  c.accept({ ok: true, snapshot: SNAP });
+  assert.strictEqual(c.accept({ ok: true, snapshot: '' }), null, '空字符串不算数（空页面）');
+  c.accept({ ok: true, snapshot: SNAP });
+  assert.strictEqual(c.accept({ ok: true, snapshot: 123 }), null, '非字符串不算数');
+  c.accept({ ok: true, snapshot: SNAP });
+  assert.strictEqual(c.accept(null), null, '没有结果也算没带回');
+  assert.strictEqual(c.peek(), null);
+});
+
+test('makeSnapshotCarrier：取走即清（隔步绝不复用），reset 用于开跑', () => {
+  const c = AutoCore.makeSnapshotCarrier();
+  c.accept({ ok: true, snapshot: '- generic [ref=e1]' });
+  assert.ok(c.take(), '第一次取得到');
+  assert.strictEqual(c.take(), null, '取走即清 —— 快照只能被紧接着的那一步用掉');
+  assert.strictEqual(c.peek(), null);
+
+  c.accept({ ok: true, snapshot: '- generic [ref=e2]' });
+  c.reset();
+  assert.strictEqual(c.take(), null, '开跑 reset 之后，上一轮的快照绝不能跨轮生效');
+});
+
+/* ---------- 原生弹窗（modal state）：快照被拒 → 弹窗步 ---------- */
+
+/* ---------- 快照来源（上一步动作顺带带回 / 本步新取）：落盘往返 ---------- */
+
+test('buildRunRecord/hydrateRecord：快照来源往返不丢，老记录如实为 null', () => {
+  const mk = (from) => ({ n: 1, label: 'l', snapshot: '- generic [ref=e1]', payload: { state: { 任务目标: 'x' } }, snapshotFrom: from });
+  const saved = AutoCore.buildRunRecord({ id: 'r', runCfg: { goal: 'x' }, steps: [mk('action'), mk('fresh')] });
+  assert.strictEqual(saved.steps[0].snapshotFrom, 'action', '必须落盘（只写面板的话，重新载入会话就没了）');
+  assert.strictEqual(saved.steps[1].snapshotFrom, 'fresh');
+  const back = AutoCore.hydrateRecord(saved).steps;
+  assert.strictEqual(back[0].snapshotFrom, 'action', '读回与落盘一致');
+  assert.strictEqual(back[1].snapshotFrom, 'fresh');
+  /* 老记录没有这个字段：如实为 null —— 面板据此不写来源，不许编一句「本步新取」 */
+  const old = AutoCore.buildRunRecord({ id: 'r2', runCfg: { goal: 'x' }, steps: [{ n: 1, payload: { state: { 任务目标: 'x' } } }] });
+  assert.strictEqual(old.steps[0].snapshotFrom, null);
+  assert.strictEqual(AutoCore.hydrateRecord(old).steps[0].snapshotFrom, null);
+});
+
 /* ---------- 原生弹窗（modal state）：快照被拒 → 弹窗步 ---------- */
 
 test('isModalSnapshotError：只认 modal state 拒绝，不误伤其它快照失败', () => {
@@ -541,7 +1165,7 @@ test('isModalSnapshotError：只认 modal state 拒绝，不误伤其它快照�
   assert.strictEqual(AutoCore.isModalSnapshotError(null), false);
 });
 
-test('buildDialogQuestions：单道「动作」题，候选只有接受/取消弹窗（描述与 23 候选同源）', () => {
+test('buildDialogQuestions：单道「动作」题，候选只有接受/取消弹窗（描述与 22 候选同源）', () => {
   const qs = AutoCore.buildDialogQuestions();
   assert.deepStrictEqual(Object.keys(qs), ['动作']);
   assert.strictEqual(qs['动作'].type, 'choice');
@@ -971,14 +1595,27 @@ test('formatMs：毫秒/秒/空值', () => {
   assert.equal(AutoCore.formatMs(NaN), '—');
 });
 
-test('stepDurationLine：副行文案 —— 正常 / 老记录 / 无调用 / 跑动中', () => {
-  assert.equal(AutoCore.stepDurationLine(LIVE_STEP), 'Jev 6.5s · 2 次调用 · 占 65%');
-  assert.equal(AutoCore.stepDurationLine({ n: 1, request: { questions: { 动作: {} } }, response: {} }),
-    '该记录无耗时数据');
+test('stepDurationLine：右列压到纯数字宽度 —— 正常 / 老记录 / 无调用 / 跑动中', () => {
+  assert.equal(AutoCore.stepDurationLine(LIVE_STEP), 'Jev 6.5s');
+  assert.equal(AutoCore.stepDurationLine({ n: 1, request: { questions: { 动作: {} } }, response: {} }), '—');
   assert.equal(AutoCore.stepDurationLine({ n: 1 }), '');
-  /* 跑动中：Jev 还没返回，此时说「该记录无耗时数据」是错的（记录正在写）*/
-  assert.equal(AutoCore.stepDurationLine({ n: 2, payload: { questions: { 动作: {} } } }, { live: true }), 'Jev 计时中…');
-  assert.equal(AutoCore.stepDurationLine(LIVE_STEP, { live: true }), 'Jev 6.5s · 2 次调用 · 占 65%');
+  /* 跑动中：Jev 还没返回，此时写 '—' 是错的（记录正在写）*/
+  assert.equal(AutoCore.stepDurationLine({ n: 2, payload: { questions: { 动作: {} } } }, { live: true }), '计时中');
+  assert.equal(AutoCore.stepDurationLine(LIVE_STEP, { live: true }), 'Jev 6.5s');
+});
+
+test('stepDurationTitle：次数与未计时说明搬到悬停（树宽放不下）', () => {
+  /* 三种 Jev 调用都可能出现在一步里：首轮 / 并行召回的批次 / 补问 —— 文案写全，别漏召回 */
+  assert.equal(AutoCore.stepDurationTitle(LIVE_STEP), '本步 2 次 Jev 调用（首轮/召回/补问）合计');
+  const half = {
+    n: 3, ms: 8000, jevMs: 3000,
+    payload: { questions: { 动作: {} } }, response: {},
+    followUps: [{ kind: 'text', request: { questions: { 文本: {} } }, response: {} }],
+  };
+  assert.equal(AutoCore.stepDurationTitle(half), '本步 2 次 Jev 调用（首轮/召回/补问）合计，其中 1 次未计时');
+  assert.equal(AutoCore.stepDurationTitle({ n: 1, request: { questions: { 动作: {} } }, response: {} }),
+    '本步有 1 次 Jev 调用，但这条记录没有耗时数据');
+  assert.equal(AutoCore.stepDurationTitle({ n: 1 }), '');
 });
 
 test('actionsOf：把 ms 透出到每个行动（主调用 / 补问 / 生成输入）', () => {
@@ -986,52 +1623,59 @@ test('actionsOf：把 ms 透出到每个行动（主调用 / 补问 / 生成输�
   assert.deepEqual(acts.map((a) => a.ms), [3200, 3300, 1200]);
 });
 
-test('stepDurationLine：部分补问缺 ms 时说明测到几次', () => {
+test('stepDurationLine：部分补问缺 ms 时树上仍是干净的数字（说明进 title）', () => {
   const half = {
     n: 3, ms: 8000, jevMs: 3000,
     payload: { questions: { 动作: {} } }, response: {},
     followUps: [{ kind: 'text', request: { questions: { 文本: {} } }, response: {} }],
   };
-  assert.equal(AutoCore.stepDurationLine(half), 'Jev 3.0s · 2 次调用（1 次未计时） · 占 38%');
+  assert.equal(AutoCore.stepDurationLine(half), 'Jev 3.0s');
 });
 
-/* ---------- 构成条与对账（spec 2026-09-28 §6.5 §6.6） ---------- */
+/* ---------- 行动详情：单次调用的耗时 + 输入/输出 token ---------- */
 
-test('breakdownSegs：四段比例和为 100，零宽段不出现，颜色走既有 token', () => {
-  const segs = AutoCore.breakdownSegs(AutoCore.durationView(LIVE_STEP));
-  assert.deepEqual(segs.map((s) => s.key), ['jev', 'llm', 'act', 'other']);
-  assert.equal(segs.reduce((a, s) => a + s.n, 0), 100);
-  assert.equal(segs[0].n, 65);          /* 6500/9950 */
-  assert.equal(segs.find((s) => s.key === 'act').n, 14);
-  assert.equal(segs.find((s) => s.key === 'llm').color, '#0d9268');
+test('usageOf：Jev 的 input_tokens/output_tokens 与 OpenAI 的 prompt_tokens/completion_tokens 都认', () => {
+  assert.deepEqual(AutoCore.usageOf({ usage: { input_tokens: 15235, output_tokens: 1805 } }), { input: 15235, output: 1805 });
+  assert.deepEqual(AutoCore.usageOf({ usage: { prompt_tokens: 100, completion_tokens: 20 } }), { input: 100, output: 20 });
+  assert.deepEqual(AutoCore.usageOf({ usage: { input_tokens: 5 } }), { input: 5, output: null });
+  assert.deepEqual(AutoCore.usageOf({ usage: {} }), { input: null, output: null });
+  assert.deepEqual(AutoCore.usageOf({}), { input: null, output: null });
+  assert.deepEqual(AutoCore.usageOf(null), { input: null, output: null });
+  /* 0 是合法值（缓存全命中时 input 可能为 0），不能被当成「没有」 */
+  assert.deepEqual(AutoCore.usageOf({ usage: { input_tokens: 0, output_tokens: 0 } }), { input: 0, output: 0 });
 });
 
-test('breakdownSegs：段宽为 0 的段不产生（不画空段）；无步耗时 → null', () => {
-  const noLlm = AutoCore.durationView({
-    n: 1, ms: 1000, jevMs: 600, payload: { questions: { 动作: {} } }, response: {}, exec: { ok: true, elapsedMs: 400 },
-  });
-  const segs = AutoCore.breakdownSegs(noLlm);
-  assert.deepEqual(segs.map((s) => s.key), ['jev', 'act']);
-  assert.equal(segs[0].n + segs[1].n, 100);
-  assert.equal(AutoCore.breakdownSegs(AutoCore.durationView({ n: 1 })), null);
+test('formatTokens：千分位（成本核算要精确值，不做 15.2k 那种缩写）', () => {
+  assert.equal(AutoCore.formatTokens(15235), '15,235');
+  assert.equal(AutoCore.formatTokens(80), '80');
+  assert.equal(AutoCore.formatTokens(0), '0');
+  assert.equal(AutoCore.formatTokens(1234567), '1,234,567');
+  assert.equal(AutoCore.formatTokens(null), '—');
 });
+
+test('actionMetricsLine：耗时 + 输入/输出 token；缺什么省什么，全缺是空串', () => {
+  assert.equal(
+    AutoCore.actionMetricsLine({ kind: 'main', ms: 1234, response: { usage: { input_tokens: 15235, output_tokens: 1805 } } }),
+    '耗时 1.2s · 输入 15,235 tokens · 输出 1,805 tokens');
+  /* 老记录：没有 ms，但响应里有 usage —— token 照样显示 */
+  assert.equal(AutoCore.actionMetricsLine({ kind: 'main', response: { usage: { input_tokens: 5, output_tokens: 6 } } }),
+    '输入 5 tokens · 输出 6 tokens');
+  /* 调用失败：既没响应也没耗时 → 空串，这一行整体不出现 */
+  assert.equal(AutoCore.actionMetricsLine({ kind: 'main', error: 'Jev 调用失败' }), '');
+  /* 只有耗时 */
+  assert.equal(AutoCore.actionMetricsLine({ kind: 'main', ms: 800 }), '耗时 800ms');
+  /* 生成输入那次的 OpenAI 形状 */
+  assert.equal(AutoCore.actionMetricsLine({ kind: 'llm', ms: 2100, response: { usage: { prompt_tokens: 640, completion_tokens: 12 } } }),
+    '耗时 2.1s · 输入 640 tokens · 输出 12 tokens');
+});
+
+/* ---------- 步骤合计（界面不再显示，落盘的 meta 用它） ---------- */
 
 test('sumStepMs：总和 + 测到几步（老记录混排）', () => {
   const r = AutoCore.sumStepMs([{ ms: 1000 }, { ms: 2000 }, { exec: { ok: true } }, { ms: 0 }]);
   assert.equal(r.sumMs, 3000);
   assert.equal(r.measured, 3);
   assert.equal(r.total, 4);
-});
-
-test('reconcile：平账 / 超差 / 缺数据', () => {
-  const ok = AutoCore.reconcile({ wallMs: 67070, prepMs: 3100, sumStepMs: 63900, tailMs: 70 });
-  assert.equal(ok.ok, true);
-  assert.equal(ok.calcMs, 67070);
-  assert.equal(ok.deltaMs, 0);
-  const bad = AutoCore.reconcile({ wallMs: 67070, prepMs: 3100, sumStepMs: 1000, tailMs: 70 });
-  assert.equal(bad.ok, false);
-  assert.equal(bad.deltaMs, 62900);
-  assert.equal(AutoCore.reconcile({ wallMs: 67070, prepMs: null, sumStepMs: 1, tailMs: 1 }), null);
 });
 
 /* ---------- 落盘格式（spec 2026-09-28 §5） ---------- */

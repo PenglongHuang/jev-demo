@@ -756,6 +756,10 @@ table.spec td code { font-size: 11px; }
   50% { box-shadow: 0 0 0 4px rgba(245, 158, 11, .10); }
 }
 
+/* ---------- 详情的 Jev 耗时一行（步骤徽标 / 行动头部共用） ---------- */
+.ov .jev-num { color: var(--violet); }
+.fd-dur { font-family: var(--mono); font-size: 11.5px; color: var(--text-2); margin-left: 4px; }
+
 /* ---------- 会话树 + 右侧详情 ----------
  * 树的几何：所有状态点落在同一条脊柱线（x≈29.5）上；
  * 行动行经 ::before 纵轨 + ::after 肘形横线挂在父步骤下，
@@ -796,6 +800,15 @@ table.spec td code { font-size: 11px; }
   font-size: 10.5px; color: var(--text-3); font-family: var(--mono);
 }
 .tn.sel .dur { color: var(--accent); opacity: .7; }
+
+/* 步骤行右侧的 Jev 耗时（2026-09-28 收窄为只展示 Jev）：紫色与 JEV 徽标呼应。
+ * max-width 是硬护栏：右列一旦变宽就会把标签挤到第三行、被 .lb 的两行钳制吃掉
+ * （E2E S9.9 实测过一次）。文案本身已经压到「Jev 1.2s」这种宽度，正常情况下不会触发省略。 */
+.tn .dur.jev {
+  min-width: 0; max-width: 76px; color: var(--violet);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tn.sel .dur.jev { color: var(--violet); opacity: 1; }
 
 /* 会话根行：脊柱起点，略加重量；padding-left 25 使 9px 圆环中心与步骤点脊柱（x≈29.5）对齐 */
 .tn.sess-row { color: var(--text); font-weight: 600; padding-top: 8px; padding-bottom: 8px; padding-left: 25px; }
@@ -1009,6 +1022,12 @@ table.ov tbody tr:hover { background: #f7f8ff; }
 .qcard-chosen.score { color: #b45309; background: #fffbeb; }
 .qcard-conf { font-size: 11px; color: var(--text-3); font-family: var(--mono); }
 .qcard .bars { margin: 0; }
+/* 未被采纳的作答（归一剥掉 / 被后续行动改写）：分布压暗 + 虚线边框。
+ * 概率条本身是模型当时的真实输出，不该被删；但也绝不能看起来像本步的决策依据 ——
+ * 「动作=放弃 / 参数=其他」却带着高概率躺在分布里，是这个面板最误导人的一处。 */
+.qcard.stale { border-style: dashed; background: #f6f7f9; }
+.qcard.stale .bars { opacity: 0.45; }
+.qcard.stale .qcard-conf { opacity: 0.6; }
 
 /* 未完成量表 */
 .meter { display: flex; gap: 4px; }
@@ -1039,6 +1058,8 @@ table.ov tbody tr:hover { background: #f7f8ff; }
 .hist-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--text-2); }
 .ok-text { color: #15803d; }
 .bad-text { color: #b91c1c; }
+/* 「停滞提示」是喂给模型的纠正指令，在 state 卡里要一眼可见地压过上一步结果 */
+.stall-text { color: #b45309; }
 .muted { color: var(--text-3); }
 .snap-details summary { cursor: pointer; font-size: 12px; color: var(--text-3); user-select: none; }
 .snap-details summary:hover { color: var(--accent); }
@@ -1262,6 +1283,10 @@ table.ov tbody tr:hover { background: #f7f8ff; }
 .modal.config-modal { max-width: 680px; }
 /* 高级参数的两个数值字段并排，避免弹窗加宽后输入框被拉到 680px 宽 */
 .config-modal .trim-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 16px; }
+/* 切换到「并行召回」时相关性裁剪那两个字段要藏起来。
+ * .trim-fields 自带 display:grid，会盖掉 [hidden] 的 UA 样式（display:none），
+ * 只翻 hidden 属性等于没藏 —— 这一条必须显式写。 */
+.config-modal .trim-fields[hidden] { display: none; }
 
 /* ===================== Wave 0 冻结：撤销提示 / 确认弹窗 / 开跑检查 / 顶栏发送 / 步骤标签 ===================== */
 

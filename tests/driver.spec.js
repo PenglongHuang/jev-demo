@@ -7,7 +7,7 @@ const os = require('os');
 const net = require('net');
 
 const driver = require(path.join(__dirname, '..', 'browser-driver.js'));
-const { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, parseEnvelope, unwrapResult, uploadPathAllowed, parseWindowSize, buildMaximizedConfig, FULLSCREEN_SNIPPET, RECT_SNIPPET, parseTabs, summarizeError, clipMiddle, MODES, CDP_CHANNELS, PROFILE_DIR, openPlan, validateCdpTarget, tabGuardOk, ownTabRefusal, markOwnTab, tabSelectRefusal, isHttpDiscoveryDead, MODAL_GUARD_RE, MODAL_SAFE_COMMANDS, parseDevToolsPort, sessionState, newTabToken, TAB_MARK_SNIPPET, TAB_READ_SNIPPET, cdpUserDataDirs, channelPortFile, httpEndpointForPort, cdpProbe, parseDevToolsActivePort, wsEndpointForPortPath, probeTcp, cdpAttachConfig, humanCdpProbeError, humanCdpAttachError, cdpProbeHint, httpTargetPort, resolveHttpTarget } = driver._test;
+const { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, parseEnvelope, unwrapResult, uploadPathAllowed, parseWindowSize, buildMaximizedConfig, FULLSCREEN_SNIPPET, RECT_SNIPPET, parseTabs, summarizeError, clipMiddle, MODES, CDP_CHANNELS, PROFILE_DIR, openPlan, validateCdpTarget, tabGuardOk, ownTabRefusal, markOwnTab, tabSelectRefusal, isHttpDiscoveryDead, MODAL_GUARD_RE, MODAL_SAFE_COMMANDS, parseDevToolsPort, sessionState, newTabToken, TAB_MARK_SNIPPET, TAB_READ_SNIPPET, cdpUserDataDirs, channelPortFile, httpEndpointForPort, cdpProbe, parseDevToolsActivePort, wsEndpointForPortPath, probeTcp, cdpAttachConfig, humanCdpProbeError, humanCdpAttachError, cdpProbeHint, httpTargetPort, resolveHttpTarget, ACTION_TIMEOUT_MS, cliEnv, guardLines, mergedActCode, mergedShotCode, codeValue, parseRectCsv, fastPathToken, codeFilePath, MERGED_ACTIONS, GUARD_LOST_MARK, GUARD_UNKNOWN_MARK, LOST_TAB_ERROR } = driver._test;
 
 /* ---------- quoteArg：cmd.exe 引号规则 ---------- */
 
@@ -833,5 +833,126 @@ test('两次都超时：如实返回失败，不无限重试', async () => {
     assert.strictEqual(r.ok, false);
     assert.match(String(r.error), /Timeout/i, '得把超时原因带回去：' + String(r.error));
   } finally { h.restore(); }
+});
+
+/* ---------- CDP 快路径：守卫与动作合并成一条 run-code ----------
+ * 合并的动机与取舍见 browser-driver.js 的「CDP 快路径」一节。这里钉住「片段长什么样」：
+ * 片段是字符串，改错了不会报错，只会在真浏览器上静默失灵（或者更糟：静默点到别处）。 */
+
+test('cliEnv：每次现取 process.env（模块加载时快照会让测试桩的 PATH 失效），并带上动作超时', () => {
+  const before = process.env.JEVDEMO_PATH_PROBE;
+  try {
+    process.env.JEVDEMO_PATH_PROBE = 'set-after-load';
+    const env = cliEnv();
+    assert.strictEqual(env.JEVDEMO_PATH_PROBE, 'set-after-load', '运行期改过的环境变量必须看得见');
+    assert.strictEqual(env.PLAYWRIGHT_MCP_TIMEOUT_ACTION, String(ACTION_TIMEOUT_MS));
+  } finally {
+    if (before === undefined) delete process.env.JEVDEMO_PATH_PROBE; else process.env.JEVDEMO_PATH_PROBE = before;
+  }
+  /* playwright-cli 自己的 defaultConfig 把 timeouts.action 写成 5s，对真实页面太短：
+   * 一次「等元素稳定」就能吃掉它。这条防的是有人把它调回 5s。 */
+  assert.ok(ACTION_TIMEOUT_MS >= 10000, '动作超时不得回落到 CLI 默认的 5s：' + ACTION_TIMEOUT_MS);
+});
+
+test('守卫片段：认自己的 token、认不出就抛，且计时不用 setTimeout', () => {
+  const code = guardLines('jevtab-abc123-1');
+  assert.match(code, /window\.name/);
+  assert.match(code, new RegExp(GUARD_LOST_MARK), '归属不对时必须抛这个标记（前端据此停手）');
+  assert.match(code, new RegExp(GUARD_UNKNOWN_MARK), '守卫跑不出来也要有标记（用来退回老路）');
+  assert.match(code, /page\.waitForTimeout\(/, '计时要用 page 自己的计时器');
+  assert.ok(!/setTimeout/.test(code),
+    'run-code 的函数不在 Node 作用域里求值，那里没有 setTimeout —— 实测会让每一步动作都 ReferenceError');
+  assert.doesNotMatch(code, /["%\r\n]/, '片段不得含 cmd 展开字符（双引号 / 百分号 / 换行）');
+  assert.ok(!/localStorage|sessionStorage/.test(code), '不得往用户站点里写任何持久存储');
+});
+
+test('合并动作片段：动手前先确认页面在渲染，且不用 force 绕过可点性判定', () => {
+  const code = mergedActCode('jevtab-t-1', 'click', 'e12', null);
+  assert.match(code, /aria-ref=e12/);
+  assert.match(code, /\.click\(/);
+  assert.match(code, /document\.visibilityState/, '后台标签页会被节流，动手前先看这一页在不在渲染');
+  assert.match(code, /bringToFront/);
+  assert.ok(!/force/.test(code), '不得用 force:true —— 那会连「被别的东西挡住」一起跳过');
+  /* 代码是落文件传给 CLI 的（不经 cmd 引号），但片段自身仍保持「能内联」的干净度：
+   * 只禁双引号与百分号，换行是代码文件天然有的。 */
+  assert.doesNotMatch(code, /["%]/, '片段不得含 cmd 展开字符（双引号 / 百分号）');
+  /* fill 的文本走单引号字面量：双引号 / 百分号已被 validateAct 挡掉，这里只管转义 */
+  const fill = mergedActCode('jevtab-t-1', 'fill', 'e5', "it's a \\ test");
+  assert.match(fill, /\.fill\(/);
+  assert.ok(fill.indexOf("\\'") > 0, '单引号要转义：' + fill);
+  assert.ok(fill.indexOf('\\\\') > 0, '反斜杠要转义：' + fill);
+});
+
+test('合并动作只覆盖能与 CLI 逐字等价的 5 个；其余一律走老路', () => {
+  assert.deepStrictEqual(Object.keys(MERGED_ACTIONS).sort(), ['check', 'click', 'fill', 'hover', 'uncheck']);
+  ['select', 'type', 'upload', 'press', 'goto', 'reload', 'go-back', 'go-forward',
+    'tab-new', 'tab-select', 'tab-close', 'dialog-accept', 'dialog-dismiss']
+    .forEach((c) => assert.ok(!MERGED_ACTIONS[c], '这些必须留在老路（弹窗态命令要照发 / CLI 有自己的参数解析）：' + c));
+});
+
+test('合并截图片段：必须是 css 档（等于 CLI 默认），带 ref 时同刻读位置', () => {
+  const withRef = mergedShotCode('jevtab-t-1', 'step-1.png', 'e12');
+  assert.match(withRef, /scale: 'css'/,
+    'CLI 的非 hires 截图就是 CSS 像素档；不指定会拿到设备像素图（dpr=1.25 时宽高整片偏 1.25 倍），标注几何全错');
+  assert.ok(withRef.indexOf(RECT_SNIPPET) > 0, '带 ref 时要在同一条命令里读位置');
+  assert.match(withRef, /aria-ref=e12/);
+  const noRef = mergedShotCode('jevtab-t-1', 'step-2.png', null);
+  assert.ok(noRef.indexOf(RECT_SNIPPET) < 0, '没有 ref 就不读位置（goto / 终止帧那类）');
+  assert.doesNotMatch(withRef + noRef, /["%]/, '片段不得含 cmd 展开字符（双引号 / 百分号）');
+  assert.match(noRef, /document\.visibilityState/, '后台标签页的截图同样会卡在渲染上');
+});
+
+test('codeValue：run-code 的返回值被序列化过一层，要剥干净', () => {
+  assert.deepStrictEqual(codeValue('{"a":1}'), { a: 1 });
+  assert.deepStrictEqual(codeValue('"{\\"a\\":1}"'), { a: 1 }, '双层 JSON（字符串再包一层）也要剥开');
+  assert.deepStrictEqual(codeValue({ a: 1 }), { a: 1 }, '已经是对象就直接用');
+  assert.strictEqual(codeValue('plain text'), null);
+  assert.strictEqual(codeValue(''), null);
+  assert.strictEqual(codeValue(null), null);
+});
+
+test('parseRectCsv：与老路同一套解析（带引号包裹、负坐标都要认）', () => {
+  const a = parseRectCsv('10,20,30,40,1036,711');
+  assert.deepStrictEqual(a, { rect: { x: 10, y: 20, w: 30, h: 40 }, viewport: { w: 1036, h: 711 } });
+  assert.deepStrictEqual(parseRectCsv('"10,20,30,40,1036,711"'), a, 'eval 的返回值常被再包一层引号');
+  assert.deepStrictEqual(parseRectCsv('-5,-8,30,40,1036,711').rect, { x: -5, y: -8, w: 30, h: 40 }, '元素滚出视口是负数');
+  assert.strictEqual(parseRectCsv('乱码'), null);
+  assert.strictEqual(parseRectCsv(''), null);
+});
+
+test('fastPathToken：只有 cdp + 已打标记才走快路径', () => {
+  assert.strictEqual(fastPathToken('no-such-session'), null);
+  sessionState.set('fp-iso', { mode: 'isolated' });
+  sessionState.set('fp-cdp-no-token', { mode: 'cdp' });
+  sessionState.set('fp-cdp-ok', { mode: 'cdp', tabToken: 'jevtab-fp-1' });
+  sessionState.set('fp-cdp-bad-token', { mode: 'cdp', tabToken: 'bad token; rm -rf' });
+  try {
+    assert.strictEqual(fastPathToken('fp-iso'), null, '独立实例没有守卫要合并，走老路');
+    assert.strictEqual(fastPathToken('fp-cdp-no-token'), null, '没打标记时守卫本来就不生效');
+    assert.strictEqual(fastPathToken('fp-cdp-ok'), 'jevtab-fp-1');
+    assert.strictEqual(fastPathToken('fp-cdp-bad-token'), null, '形状可疑的标记不进代码片段');
+  } finally {
+    ['fp-iso', 'fp-cdp-no-token', 'fp-cdp-ok', 'fp-cdp-bad-token'].forEach((k) => sessionState.delete(k));
+  }
+});
+
+test('「专用标签页已不在」快路径与老路同一句话（前端靠它整轮停手）', async () => {
+  const sess = 'fp-lost-session-does-not-exist';
+  sessionState.set(sess, { mode: 'cdp', tabToken: 'jevtab-fp-1' });
+  try {
+    /* 这个会话在 CLI 侧并不存在 → 守卫的 eval 失败 → 判「已不在」 */
+    const r = await ownTabRefusal(sess, 'click');
+    assert.ok(r && r.lostTab, '守卫必须判成「标签页丢了」：' + JSON.stringify(r));
+    assert.strictEqual(r.error, LOST_TAB_ERROR, '两处必须是同一句话');
+  } finally { sessionState.delete(sess); }
+});
+
+test('代码文件落在 data/ 下，且按会话隔离（不互相覆盖）', () => {
+  const a = codeFilePath('sess-a');
+  const b = codeFilePath('sess-b');
+  assert.ok(a.startsWith(path.resolve(driver.dataDir)), '必须落在 data/ 下：' + a);
+  assert.notStrictEqual(a, b, '不同会话不能共用一个代码文件');
+  assert.match(path.basename(a), /^auto-cli\.code\.[A-Za-z0-9_-]+\.js$/, '文件名形状：' + path.basename(a));
+  assert.doesNotMatch(a, /["%\r\n]/, '路径要能安全通过 cmd 引号封装');
 });
 

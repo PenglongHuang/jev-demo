@@ -11,6 +11,9 @@
   "engines": {
     "node": ">=18"
   },
+  "dependencies": {
+    "playwright-core": "^1.59.0"
+  },
   "license": "MIT",
   "private": false
 }

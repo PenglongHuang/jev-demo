@@ -41,7 +41,11 @@ function refOf(re, from) {
   assert.ok(hit, '快照里找不到：' + re);
   return hit.ref;
 }
-const countMail = () => (snap.match(/- listitem "邮件/g) || []).length;
+/* 数收件箱行数。**必须容忍 YAML 的行内引号**：playwright-cli 的快照是 YAML，
+ * 元素名里含「冒号+空格」（如「Re: 周五评审会材料确认」）时整行会被包成
+ * - 'listitem "邮件 2：…"'，行首就不再是裸的 `- listitem`。原先的正则漏掉这一行，
+ * 于是 18 封被数成 17 封 —— 页面是对的，数错了。 */
+const countMail = () => (snap.match(/- '?listitem "邮件/g) || []).length;
 
 test.before(async () => {
   const srv = startServer(32000);

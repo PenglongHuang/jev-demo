@@ -1,0 +1,2170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>云上书城订单中台 · 复杂任务台</title>
+<!-- 企业外壳：模块 rail / KPI 条 / 通知中心 / 抽屉 / 状态栏 / 公告跑马灯 / 实时模拟开关。
+     与 orders.html（简单版）共用同一套外壳，本页只在“表格 + 筛选”上做重度加码：
+     列更多、字段更多、筛选控件更多样（多选 chips / 快捷区间 / 高级筛选折叠 / 排序与分页 /
+     保存的视图 / 卡片视图 / 行内展开）。 -->
+<link rel="stylesheet" href="enterprise.css" />
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --border: #e7e8ec; --border-strong: #d7d9e0;
+    --text: #1a1c20; --text-2: #565c66; --text-3: #6e7480;
+    --accent: #4f46e5; --accent-soft: #eef2ff; --green: #0d9268; --green-soft: #e7f6f0;
+    --red: #dc2626; --red-soft: #fdecec; --amber: #92400e; --amber-soft: #fef3c7;
+    --violet: #6d28d9; --violet-soft: #f3e8ff;
+    --radius: 12px;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --ent-maxw: 1680px;          /* 让 KPI 条 / 公告条与主容器同宽 */
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---------- 顶栏 ---------- */
+  .topbar {
+    position: sticky; top: 0; z-index: 30;
+    display: flex; align-items: center; gap: 12px; flex-wrap: nowrap;
+    background: rgba(255,255,255,.9); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border); padding: 8px 22px;
+  }
+  .brand { font-weight: 700; font-size: 15px; color: var(--accent); white-space: nowrap; }
+  .nav { display: flex; gap: 1px; flex-wrap: wrap; }
+  .navlink {
+    padding: 6px 9px; border-radius: 8px; font-size: 13px; color: var(--text-2);
+    text-decoration: none; font-family: inherit; border: 1px solid transparent; background: none; cursor: pointer;
+    white-space: nowrap;
+  }
+  .navlink:hover { background: #f2f3f6; color: var(--text); }
+  .navlink.active { background: var(--accent-soft); color: var(--accent); font-weight: 650; }
+  .spacer { flex: 1; }
+  .btn {
+    padding: 7px 14px; font-size: 13px; font-weight: 600; font-family: inherit; cursor: pointer;
+    border-radius: 9px; border: 1px solid var(--border-strong); background: #fff; color: var(--text-2);
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn:disabled { opacity: .55; cursor: not-allowed; border-color: var(--border-strong); color: var(--text-3); background: #f4f5f7; }
+  .btn:disabled:hover { border-color: var(--border-strong); color: var(--text-3); }
+  .btn.mini { padding: 4px 10px; font-size: 12px; font-weight: 600; }
+
+  /* ---------- 布局 ---------- */
+  .layout { max-width: 1680px; margin: 20px auto; padding: 0 22px; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+
+  /* ---------- 筛选区（五行：主条件 / 支付与时间 / 金额与仓配 / 高级筛选 / 已应用条件） ---------- */
+  .filters {
+    display: flex; flex-direction: column; gap: 10px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 13px 16px; margin-bottom: 16px;
+  }
+  .frow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .frow + .frow { border-top: 1px dashed var(--border); padding-top: 10px; }
+  .frow-lbl { font-size: 12.5px; color: var(--text-3); white-space: nowrap; }
+  .filters input[type="search"] {
+    flex: 1; min-width: 220px; max-width: 360px; padding: 8px 12px; font-size: 13.5px; font-family: inherit;
+    border: 1px solid var(--border-strong); border-radius: 9px; outline: none; background: #fbfbfc;
+  }
+  .sel, .date, .amt {
+    padding: 8px 10px; font-size: 13px; font-family: inherit; max-width: 190px;
+    border: 1px solid var(--border-strong); border-radius: 9px; background: #fff; color: var(--text-2); outline: none;
+  }
+  .date { width: 152px; max-width: none; }
+  .amt { width: 92px; max-width: none; font-family: var(--mono); }
+  .filters input:focus, .sel:focus, .date:focus, .amt:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .filters .lbl { font-size: 12.5px; color: var(--text-3); white-space: nowrap; }
+  .filters .fdivider { width: 1px; height: 20px; background: var(--border); }
+  .applied-none { font-size: 12.5px; color: var(--text-3); }
+  .check {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-2);
+    border: 1px solid var(--border-strong); border-radius: 9px; padding: 5px 10px; background: #fff; cursor: pointer;
+  }
+  .check input { accent-color: var(--accent); }
+
+  /* 高级筛选：默认折叠，展开才出现第二层字段（快照里也只多一行 summary） */
+  .adv { border: 1px solid var(--border); border-radius: 10px; background: #fbfbfd; }
+  .adv > summary {
+    cursor: pointer; padding: 8px 12px; font-size: 12.5px; color: var(--text-2); font-weight: 600;
+  }
+  .adv > summary:hover { color: var(--accent); }
+  .adv[open] > summary { border-bottom: 1px solid var(--border); color: var(--accent); }
+  .adv .frow { border-top: 0; padding: 10px 12px 4px; }
+  .adv .frow + .frow { border-top: 0; padding-top: 0; }
+
+  .list-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .list-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 13px 18px; border-bottom: 1px solid var(--border); }
+  .list-head h1 { font-size: 16px; margin: 0; }
+  .list-head .meta { font-size: 12px; color: var(--text-3); font-family: var(--mono); }
+
+  /* ---------- 二级分组 tab ---------- */
+  .tabs {
+    display: flex; align-items: center; gap: 2px; padding: 0 12px;
+    border-bottom: 1px solid var(--border); background: #fbfbfd; overflow-x: auto;
+  }
+  .tabs button {
+    display: flex; align-items: center; gap: 6px; padding: 11px 12px; font-size: 13.5px; font-family: inherit;
+    background: none; border: 0; border-bottom: 2px solid transparent; color: var(--text-3); cursor: pointer; white-space: nowrap;
+  }
+  .tabs button:hover { color: var(--text); }
+  .tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 650; }
+  .tabs .tcount {
+    font-size: 11px; font-family: var(--mono); background: #eef0f4; color: var(--text-3);
+    border-radius: 100px; padding: 1px 7px;
+  }
+  .tabs button[aria-selected="true"] .tcount { background: var(--accent-soft); color: var(--accent); }
+
+  /* ---------- 工具条（排序 / 方向 / 每页条数） ---------- */
+  .toolbar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 9px 18px; background: #fdfdfe; border-bottom: 1px solid var(--border);
+  }
+  .toolbar .lbl { font-size: 12.5px; color: var(--text-3); }
+
+  /* ---------- 订单表格 ---------- */
+  .table-wrap { overflow-x: auto; }
+  table.orders { width: 100%; min-width: 1620px; border-collapse: collapse; table-layout: fixed; font-size: 12.8px; }
+  table.orders th {
+    text-align: left; font-size: 12px; font-weight: 600; color: var(--text-3); white-space: nowrap;
+    padding: 9px 12px; background: #fafbfd; border-bottom: 1px solid var(--border);
+  }
+  table.orders th.c-pick { text-align: center; }
+  table.orders td {
+    padding: 11px 12px; border-bottom: 1px solid var(--border);
+    vertical-align: top; color: var(--text-2); line-height: 1.6; word-break: break-word;
+  }
+  table.orders td.c-pick { text-align: center; }
+  table.orders td.c-pick input { accent-color: var(--accent); }
+  table.orders tr.order:hover td { background: #fafbfd; }
+  table.orders tr.shipped td { background: #f5fcf8; }
+  table.orders tr.shipped:hover td { background: #f0faf4; }
+  table.orders tr.shipped td:first-child { box-shadow: inset 3px 0 0 var(--green); }
+  table.orders.dense td { padding: 5px 12px; }
+  table.orders.dense .note, table.orders.dense .masked, table.orders.dense .sub.opt { display: none; }
+
+  /* 行内展开：详情行整行铺开，字段以 dl 网格排布（默认不渲染，点了才插进 DOM） */
+  tr.detail-row > td { background: #fbfbfd; border-bottom: 1px solid var(--border); padding: 0; }
+  .dgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 4px 22px; padding: 14px 18px 16px; }
+  .dgrid dl { display: grid; grid-template-columns: 96px 1fr; gap: 4px 10px; margin: 0; font-size: 12.5px; }
+  .dgrid dt { color: var(--text-3); }
+  .dgrid dd { margin: 0; color: var(--text); word-break: break-word; }
+  .dgrid dd.mono { font-family: var(--mono); font-size: 12.2px; }
+  .dgrid h4 { grid-column: 1 / -1; margin: 8px 0 2px; font-size: 12.5px; color: var(--accent); }
+  .dgrid h4:first-child { margin-top: 0; }
+  .dnote {
+    grid-column: 1 / -1; border: 1px solid var(--border); border-left: 3px solid var(--accent);
+    border-radius: 10px; padding: 9px 12px; font-size: 12.6px; line-height: 1.65; background: #fff;
+  }
+  .dnote b { color: var(--text-3); font-weight: 600; }
+
+  /* ---------- 卡片视图（与表格互斥，默认隐藏） ---------- */
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(430px, 1fr)); gap: 12px; padding: 14px 18px; }
+  .cards[hidden] { display: none; }
+  .ocard { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; background: #fff; }
+  .ocard.shipped { border-color: #cceedf; background: #f7fdfa; }
+  .ocard-top { display: flex; align-items: center; gap: 10px; }
+  .ocard-top .no { font-family: var(--mono); font-weight: 700; color: var(--accent); font-size: 13px; }
+  .ocard-line { display: flex; align-items: center; gap: 8px; margin-top: 4px; flex-wrap: wrap; font-size: 12.5px; color: var(--text-2); }
+  .ocard-goods { margin: 8px 0 6px; font-size: 13px; font-weight: 650; color: var(--text); }
+  .ocard-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 14px; font-size: 12.4px; color: var(--text-2); }
+  .ocard-grid b { color: var(--text); font-weight: 650; }
+  .ocard-foot { display: flex; align-items: center; gap: 7px; margin-top: 10px; flex-wrap: wrap; }
+  .ocard-foot .ent-ring { width: 38px; height: 38px; }
+  .ocard-foot .ent-ring > span { width: 29px; height: 29px; font-size: 10.5px; }
+
+  /* ---------- 单元格里的零件 ---------- */
+  .no { font-family: var(--mono); font-size: 12.5px; font-weight: 700; color: var(--accent); display: block; }
+  button.no {
+    background: none; border: 0; padding: 0; cursor: pointer; text-align: left; font-family: var(--mono);
+    font-size: 12.5px; font-weight: 700; color: var(--accent);
+  }
+  button.no:hover { text-decoration: underline; }
+  .sub { display: block; font-size: 12px; color: var(--text-3); margin-top: 3px; font-family: var(--mono); }
+  .sub.plain { font-family: inherit; }
+  .buyer { display: block; font-weight: 650; color: var(--text); font-size: 13px; }
+  .masked { display: block; font-family: var(--mono); font-size: 12.2px; color: var(--text-3); margin-top: 3px; }
+  .goods { display: block; font-weight: 650; color: var(--text); }
+  .spec { display: block; font-size: 12px; color: var(--text-3); margin-top: 3px; }
+  .addr { display: block; }
+  .note { display: block; font-size: 12px; color: var(--text-3); margin-top: 4px; }
+  .lv {
+    display: inline-block; padding: 1.5px 8px; border-radius: 100px; font-size: 11px; font-weight: 700;
+    border: 1px solid transparent; vertical-align: 1px;
+  }
+  .lv.p { background: #f1f2f5; color: var(--text-2); border-color: #e2e6ee; }
+  .lv.s { background: #eef4ff; color: #1d4ed8; border-color: #d8e3fb; }
+  .lv.g { background: var(--amber-soft); color: var(--amber); border-color: #fde68a; }
+  .lv.d { background: var(--violet-soft); color: var(--violet); border-color: #e9d5ff; }
+  .amount { display: block; font-family: var(--mono); font-weight: 700; font-size: 13.5px; color: var(--text); }
+  table.orders td.c-qty { text-align: center; font-family: var(--mono); color: var(--text); }
+  .st-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
+  .badge {
+    display: inline-block; padding: 2.5px 9px; border-radius: 100px; font-size: 12px;
+    font-weight: 650; white-space: nowrap; border: 1px solid transparent;
+  }
+  .badge.b-wait { background: var(--amber-soft); color: var(--amber); border-color: #fde68a; }
+  .badge.b-toship { background: var(--accent-soft); color: var(--accent); border-color: #dfe3fb; }
+  .badge.b-done { background: var(--green-soft); color: var(--green); border-color: #cceedf; }
+  .badge.b-signed { background: #eef1f6; color: var(--text-2); border-color: #e2e6ee; }
+  .badge.b-cancel { background: var(--red-soft); color: var(--red); border-color: #fbd9d9; }
+  .badge.b-after { background: var(--violet-soft); color: var(--violet); border-color: #e9d5ff; }
+  .badge::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 100px;
+    margin-right: 5px; vertical-align: 1px; background: currentColor; opacity: .55;
+  }
+  /* 出库进度：一条细进度条 + 文字（纯 CSS 宽度，无 DOM 自变） */
+  .prog { width: 118px; height: 5px; border-radius: 100px; background: #eef0f4; overflow: hidden; }
+  .prog > i { display: block; height: 100%; background: var(--accent); }
+  .prog.good > i { background: var(--green); }
+  .prog-meta { font-size: 11.5px; color: var(--text-3); font-family: var(--mono); }
+  .btn.ship { padding: 5px 13px; font-size: 12.5px; }
+  /* 操作列钉在右侧：演示窗口只有 ~1036px 宽，表格必然横向滚动，
+   * 钉住「发货」这一列才能让目标按钮始终在视口里（企业后台的常规做法）。 */
+  table.orders th.c-ops, table.orders td.c-ops {
+    position: sticky; right: 0; background: #fff;
+    box-shadow: -8px 0 10px -8px rgba(16, 18, 24, .18);
+  }
+  table.orders th.c-ops { background: #fafbfd; }
+  table.orders tr.order:hover td.c-ops { background: #fafbfd; }
+  table.orders tr.shipped td.c-ops { background: #f5fcf8; }
+  table.orders tr.shipped:hover td.c-ops { background: #f0faf4; }
+  .ops { display: flex; gap: 5px; flex-wrap: wrap; }
+  .empty { padding: 56px 20px; text-align: center; color: var(--text-3); font-size: 13px; }
+  .panel-foot {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    padding: 12px 18px; border-top: 1px solid var(--border);
+  }
+  .pager { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .pager .meta { font-size: 12.5px; color: var(--text-3); font-family: var(--mono); margin-left: 6px; }
+  .pager .pg {
+    min-width: 30px; padding: 4px 8px; font-size: 12.5px; font-family: var(--mono); cursor: pointer;
+    border: 1px solid var(--border-strong); border-radius: 8px; background: #fff; color: var(--text-2);
+  }
+  .pager .pg[aria-current="page"] { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
+  .shiplog { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .shiplog .meta { font-size: 12.5px; color: var(--text-3); }
+  .shiplog b { color: var(--green); font-family: var(--mono); }
+  .foot { text-align: center; color: var(--text-3); font-size: 12px; padding: 4px 20px 30px; }
+
+  /* ---------- 抽屉里的块 ---------- */
+  .pay-list { list-style: none; margin: 0; padding: 0; }
+  .pay-list li {
+    display: flex; align-items: center; gap: 10px; padding: 9px 11px; font-size: 12.5px;
+    border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px;
+  }
+  .pay-list .pay-amt { margin-left: auto; font-family: var(--mono); font-weight: 700; color: var(--text); }
+  .pay-list .pay-amt.good { color: var(--green); }
+  .pay-list .pay-amt.warn { color: var(--amber); }
+  .pay-list .pay-meta { display: block; font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
+  .note-box {
+    border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 10px;
+    padding: 10px 12px; font-size: 12.8px; color: var(--text-2); line-height: 1.7; margin-bottom: 10px;
+  }
+  .note-box.warn { border-left-color: #f59e0b; }
+  .sent-line { font-size: 11.5px; color: var(--text-3); font-family: var(--mono); margin: 0 0 6px; }
+
+  .ent-drawer-head { flex-wrap: wrap; }
+  .ent-drawer-head h2 { word-break: break-all; }
+  .ent-drawer-head .ent-btn-mini { flex: none; }
+
+  .toast {
+    position: fixed; bottom: calc(var(--ent-status-h) + 22px); left: 50%; transform: translateX(-50%) translateY(14px);
+    background: #17181c; color: #fff; padding: 10px 18px; border-radius: 10px; font-size: 13px;
+    opacity: 0; pointer-events: none; transition: .22s; z-index: 99; max-width: 88vw; text-align: center;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%); }
+
+  @media (max-width: 820px) {
+    .layout { padding: 0 12px; }
+    .filters input[type="search"] { max-width: none; }
+    .cards { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <span class="brand">◇ 云上书城订单中台</span>
+  <nav class="nav" aria-label="主导航">
+    <a class="navlink" href="#" data-page="首页">首页</a>
+    <a class="navlink active" href="#" data-page="订单中心" aria-current="page">订单中心</a>
+    <a class="navlink" href="#" data-page="商品管理">商品管理</a>
+    <a class="navlink" href="#" data-page="客服工作台">客服工作台</a>
+    <a class="navlink" href="#" data-page="数据报表">数据报表</a>
+  </nav>
+  <button class="btn" id="resetBtn" type="button">重置演示</button>
+  <span class="spacer"></span>
+</header>
+
+<!-- KPI 条 + 系统公告（由 Enterprise.mountShell 填充） -->
+<div class="ent-kpis" id="entKpis"></div>
+<div id="entTickerHost"></div>
+
+<div class="layout">
+
+  <section class="filters" aria-label="订单筛选">
+    <!-- ① 关键词与主条件下拉 -->
+    <div class="frow">
+      <input id="kw" type="search" aria-label="搜索订单号 / 买家 / 手机号 / 商品关键字"
+             placeholder="搜索订单号 / 买家 / 手机号 / 商品关键字" />
+      <select id="scopeSel" class="sel" aria-label="搜索范围"></select>
+      <select id="statusSel" class="sel" aria-label="订单状态"></select>
+      <select id="levelSel" class="sel" aria-label="买家等级"></select>
+      <select id="channelSel" class="sel" aria-label="销售渠道"></select>
+      <span class="fdivider" aria-hidden="true"></span>
+      <button class="btn primary" id="queryBtn" type="button">查询</button>
+      <button class="btn" id="filterResetBtn" type="button">重置</button>
+      <span class="lbl" id="filterHint"></span>
+    </div>
+
+    <!-- ② 支付方式（多选 chips）+ 下单时间（区间 + 快捷档） -->
+    <div class="frow">
+      <span class="frow-lbl">支付方式</span>
+      <div class="ent-chips" id="payChips" aria-label="支付方式多选"></div>
+      <span class="fdivider" aria-hidden="true"></span>
+      <span class="frow-lbl">下单时间</span>
+      <input id="fromDate" class="date" type="text" aria-label="开始日期" placeholder="开始日期 2026-09-20" />
+      <span class="lbl">至</span>
+      <input id="toDate" class="date" type="text" aria-label="结束日期" placeholder="结束日期 2026-09-23" />
+      <div class="ent-chips" id="rangeChips" aria-label="下单时间快捷筛选"></div>
+    </div>
+
+    <!-- ③ 实付金额（区间 + 快捷档）+ 仓配 -->
+    <div class="frow">
+      <span class="frow-lbl">实付金额</span>
+      <!-- 名字刻意不叫「实付金额下限」：`spinbutton "实付金额下限"` 里含子串
+           `button "实付金额`，会把按 label 找「实付金额」列的正则抢走 -->
+      <input id="amtMin" class="amt" type="number" min="0" step="1" aria-label="金额下限" placeholder="下限" />
+      <span class="lbl">至</span>
+      <input id="amtMax" class="amt" type="number" min="0" step="1" aria-label="金额上限" placeholder="上限" />
+      <div class="ent-chips" id="amtChips" aria-label="实付金额快捷筛选"></div>
+      <span class="fdivider" aria-hidden="true"></span>
+      <label class="lbl" for="warehouseSel">发货仓库</label>
+      <select id="warehouseSel" class="sel" aria-label="发货仓库"></select>
+      <label class="lbl" for="carrierSel">承运商</label>
+      <select id="carrierSel" class="sel" aria-label="承运商"></select>
+    </div>
+
+    <!-- ④ 高级筛选：默认折叠，第二层字段（发票 / 风控 / 售后 / 客服 / 时效 + 四个只看开关） -->
+    <details class="adv" id="advBox">
+      <summary>高级筛选 · 发票 / 风控 / 售后 / 客服 / 时效</summary>
+      <div class="frow">
+        <label class="lbl" for="invoiceSel">发票类型</label>
+        <select id="invoiceSel" class="sel" aria-label="发票类型"></select>
+        <label class="lbl" for="riskSel">风控状态</label>
+        <select id="riskSel" class="sel" aria-label="风控状态"></select>
+        <label class="lbl" for="afterSel">售后状态</label>
+        <select id="afterSel" class="sel" aria-label="售后状态"></select>
+        <label class="lbl" for="serviceSel">客服跟进</label>
+        <select id="serviceSel" class="sel" aria-label="客服跟进状态"></select>
+        <label class="lbl" for="etaSel">物流时效</label>
+        <select id="etaSel" class="sel" aria-label="物流时效"></select>
+      </div>
+      <div class="frow">
+        <label class="check"><input type="checkbox" id="urgentOnly" aria-label="只看加急订单" />只看加急</label>
+        <label class="check"><input type="checkbox" id="giftOnly" aria-label="只看含赠品订单" />只看含赠品</label>
+        <label class="check"><input type="checkbox" id="lateOnly" aria-label="只看超时未发货订单" />只看超时未发货</label>
+        <label class="check"><input type="checkbox" id="vipOnly" aria-label="只看金卡以上买家" />只看金卡以上买家</label>
+      </div>
+    </details>
+
+    <!-- ⑤ 已应用条件（每个都能单独移除） -->
+    <div class="frow">
+      <span class="frow-lbl">已应用条件</span>
+      <div class="ent-chips" id="appliedHost"></div>
+    </div>
+  </section>
+
+  <main class="list-panel">
+    <div class="list-head">
+      <h1>订单管理（复杂）</h1>
+      <span class="meta" id="listMeta"></span>
+      <span class="spacer"></span>
+      <div class="ent-chips" id="viewChips" aria-label="保存的筛选视图"></div>
+      <button class="btn mini" id="cardViewBtn" type="button">卡片视图</button>
+      <button class="btn mini" id="densityBtn" type="button">密度 舒适</button>
+      <button class="btn mini" id="exportBtn" type="button">导出当前结果</button>
+      <button class="btn mini" id="refreshBtn" type="button">刷新</button>
+      <span class="meta">下单时间倒序 · 每笔订单出库前均需人工复核</span>
+    </div>
+
+    <div class="tabs" role="tablist" aria-label="订单分组" id="tabBar"></div>
+
+    <div id="bulkHost"></div>
+
+    <div class="toolbar">
+      <label class="lbl" for="sortSel">排序</label>
+      <select id="sortSel" class="sel" aria-label="排序字段"></select>
+      <button class="btn mini" id="dirBtn" type="button">降序 ↓</button>
+      <span class="fdivider" aria-hidden="true"></span>
+      <label class="lbl" for="pageSizeSel">每页条数</label>
+      <select id="pageSizeSel" class="sel" aria-label="每页条数"></select>
+      <span class="spacer"></span>
+      <span class="meta" id="toolbarMeta"></span>
+    </div>
+
+    <div id="tableHost">
+      <div class="table-wrap" id="tableWrap">
+        <table class="orders" aria-label="订单列表（下单时间倒序，默认展示全部 18 笔）">
+          <colgroup>
+            <col style="width:40px" />
+            <col style="width:200px" />
+            <col style="width:150px" />
+            <col style="width:300px" />
+            <col style="width:176px" />
+            <col style="width:230px" />
+            <col style="width:230px" />
+            <col style="width:180px" />
+            <col style="width:210px" />
+          </colgroup>
+          <thead>
+            <tr>
+              <th scope="col" class="c-pick"><input type="checkbox" id="pickAll" aria-label="全选本页订单" /></th>
+              <th scope="col">订单信息</th>
+              <th scope="col">买家</th>
+              <th scope="col">商品明细</th>
+              <th scope="col">金额</th>
+              <th scope="col">收货信息</th>
+              <th scope="col">服务与风控</th>
+              <th scope="col">状态</th>
+              <th scope="col" class="c-ops">操作</th>
+            </tr>
+          </thead>
+          <tbody id="orderBody"></tbody>
+        </table>
+      </div>
+      <div class="cards" id="cardHost" hidden></div>
+      <div class="empty" id="emptyState" hidden>没有匹配当前筛选条件的订单</div>
+    </div>
+
+    <div class="panel-foot">
+      <nav class="pager" aria-label="分页">
+        <button class="btn mini" id="firstPage" type="button" disabled>首页</button>
+        <button class="btn mini" id="prevPage" type="button" disabled>上一页</button>
+        <span id="pageNums"></span>
+        <button class="btn mini" id="nextPage" type="button" disabled>下一页</button>
+        <button class="btn mini" id="lastPage" type="button" disabled>末页</button>
+        <span class="meta" id="pageMeta"></span>
+      </nav>
+      <div class="shiplog">
+        <span class="meta">本次演示已发货 <b id="shipCount">0</b> 笔</span>
+        <span class="meta" id="shipLog">暂无发货记录</span>
+      </div>
+    </div>
+  </main>
+
+  <p class="foot">© 2026 云上书城订单中台 · 内部系统请勿外传 · 演示数据均为虚构</p>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="enterprise.js"></script>
+<script>
+/* ============ 内置演示订单后台（复杂版） ============
+ * 18 笔订单按下单时间倒序。相对 orders.html（简单版），这里加码在三处：
+ *   ① 字段更多：会员等级 / 销售渠道 / SKU / 赠品 / 序列号 / 单价 / 运费 / 优惠 /
+ *      积分抵扣 / 发票类型 / 风控状态 / 售后状态 / 客服跟进 / 内部标签 / 出库进度。
+ *   ② 筛选更复杂：搜索范围下拉、支付方式多选、时间与金额的快捷档、高级筛选折叠层
+ *      （发票 / 风控 / 售后 / 客服 / 时效 + 四个只看开关）、排序字段 + 方向、每页条数、
+ *      保存的筛选视图、二级分组 tab、已应用条件可逐条移除。
+ *   ③ 组件更多样：表格 + 卡片视图、行内展开详情行、进度条、等级徽标、状态徽标、
+ *      KPI 条、通知中心、抽屉（五个分栏，含时间线 / 步骤条 / 键值表）、骨架屏、通知栈。
+ *
+ * 面向 Jev 的“唯一目标”（Auto 模式场景「🧾 订单后台（复杂）」用的就是它）：
+ *   全表有且只有一笔「会员等级 = 金卡」+「已付款待发货」+「商品 = AirPods Pro 2 正品」：
+ *   ORD-20260921-5271（周雅琴，第 11 行）。干扰项一律只差一个条件：
+ *     钻石 + 已发货 + 正品（顾清和）、金卡 + 售后处理中 + 正品（何书瑶）、
+ *     金卡 + 已取消 + 正品（王小明）、银卡 + 已付款待发货 + 正品（孙丽华）、
+ *     金卡 + 已付款待发货 + 保护套 / 耳塞（配件，张伟 / 周子航）、
+ *     金卡 + 已付款待发货 + AirPods 4（陈思远，型号不同）。
+ *   所以“会员等级 / 商品型号 / 配件 vs 正品”三个维度必须一起读，按单品名或按状态单筛都会选错。
+ *
+ * ⚠️ 加组件时最容易踩的四条（与 orders.html 同源，这里再钉一遍）：
+ *   1. **每行只能有一个可访问名正好是「发货」的按钮**，且它的文案由状态决定
+ *      （待付款 → 去收款、已发货 → 催签收…）。想加别的按钮就用「打印面单 / 快速发货」
+ *      这类名字 —— 「批量发货」不含子串 `button "发货"`，安全。
+ *   2. 行内新增节点必须插在订单号之后、发货按钮之前；订单号的可见文本与发货按钮的
+ *      相对顺序不能变，发货按钮也不能挪到其它按钮后面。
+ *   3. **默认排序必须仍是下单时间倒序**（原数组顺序），sortKey / sortDir 为默认值时
+ *      直接返回原数组、不做任何 sort，保证行序逐字节不变。
+ *   4. 默认态不许有任何 JS 驱动的文本自变：定时器一律挂在「实时模拟」开关上；
+ *      分页 / 排序 / 密度 / 卡片视图的初值都写死成「全部 18 笔都在第 1 页」。
+ */
+'use strict';
+
+/* ---------- 常量：下拉与 chips 的可选项 ---------- */
+const SCOPES = ['全部字段', '订单号', '买家昵称', '收件手机号', '商品名称', '收货地址', '运单号'];
+const STATUSES = ['全部状态', '已付款待发货', '待付款', '已发货', '已签收', '已取消', '售后处理中'];
+const LEVELS = ['全部等级', '普通', '银卡', '金卡', '钻石'];
+const CHANNELS = ['全部渠道', 'App 客户端', '微信小程序', 'H5 商城', '天猫旗舰店', '线下门店'];
+const PAYS = ['微信支付', '支付宝', '云闪付', '花呗分期', 'Apple Pay', '货到付款'];
+const WAREHOUSES = ['全部仓库', '上海仓', '广州仓', '成都仓', '西安仓', '北京仓'];
+const CARRIERS = ['全部承运商', '顺丰速运', '京东物流', '中通快递', '圆通速递', '韵达快递'];
+const INVOICES = ['全部发票类型', '电子普通发票', '增值税专用发票', '不开发票'];
+const RISKS = ['全部风控状态', '已通过', '待复核', '已拦截'];
+const AFTERS = ['全部售后状态', '无', '退货审核中', '已退款'];
+const SERVICES = ['全部跟进状态', '已回复', '跟进中', '待回复'];
+const ETAS = ['全部时效', '正常', '已超时'];
+const SORTS = [['ts', '下单时间'], ['amount', '实付金额'], ['qty', '件数'], ['level', '买家等级']];
+const PAGESIZES = [20, 10, 5];
+
+/* 时间快捷档：写死的字符串区间（不用 Date，避免解析差异） */
+const RANGES = [
+  { id: 'all', label: '全部时间', from: '', to: '' },
+  { id: 'd0', label: '仅 09-23', from: '2026-09-23', to: '2026-09-23' },
+  { id: 'd1', label: '近 3 天', from: '2026-09-20', to: '2026-09-23' },
+  { id: 'd2', label: '09-21 及以前', from: '', to: '2026-09-21' }
+];
+/* 金额快捷档 */
+const AMTS = [
+  { id: 'all', label: '不限金额', min: '', max: '' },
+  { id: 'a0', label: '100 元以下', min: '', max: '100' },
+  { id: 'a1', label: '100 至 1000', min: '100', max: '1000' },
+  { id: 'a2', label: '1000 以上', min: '1000', max: '' },
+  { id: 'a3', label: '2000 以上', min: '2000', max: '' }
+];
+
+const BADGE = {
+  '待付款': 'b-wait',
+  '已付款待发货': 'b-toship',
+  '已发货': 'b-done',
+  '已签收': 'b-signed',
+  '已取消': 'b-cancel',
+  '售后处理中': 'b-after'
+};
+const LEVEL_CLS = { '普通': 'p', '银卡': 's', '金卡': 'g', '钻石': 'd' };
+const LEVEL_RANK = { '普通': 1, '银卡': 2, '金卡': 3, '钻石': 4 };
+
+/* 行内主按钮按状态给不同文案：全表每个状态只有一种，且「发货」只属于「已付款待发货」 */
+const PRIMARY = {
+  '待付款': '去收款',
+  '已付款待发货': '发货',
+  '已发货': '催签收',
+  '已签收': '查看回单',
+  '已取消': '查看退款',
+  '售后处理中': '处理售后'
+};
+
+/* 二级分组 tab。标签一律不以「订单状态」开头（下拉框的可访问名要独占那个名字）。 */
+const TABS = [
+  { id: 'all',   label: '全部订单' },
+  { id: 'pay',   label: '待付款' },
+  { id: 'ship',   label: '待出库' },
+  { id: 'after', label: '售后' },
+  { id: 'risk',  label: '异常单' },
+  { id: 'urgent', label: '加急单' }
+];
+
+/* 保存的筛选视图：一键套一组条件（组件更多样的一环） */
+const VIEWS = [
+  { id: 'all',   label: '全部订单' },
+  { id: 'ship',  label: '待出库视图' },
+  { id: 'urgent', label: '加急视图' },
+  { id: 'big',   label: '大额视图' },
+  { id: 'after', label: '售后视图' }
+];
+
+/* 出库进度：状态 → 已完成节点数 / 总节点数（4 段：支付 / 拣货 / 出库 / 交接） */
+const STAGE = { '待付款': 0, '已付款待发货': 1, '已发货': 3, '已签收': 4, '已取消': 0, '售后处理中': 1 };
+const STAGE_MAX = 4;
+
+/* 超时未发货的判定线：已付款待发货且下单早于这个时刻（固定字符串比较，不用 Date） */
+const LATE_LINE = '2026-09-21 16:00';
+const BIG_AMOUNT = 1500;
+
+/* 买家留言（按订单下标取用；长文本用于把快照撑到真实体量） */
+const NOTES = [
+  '麻烦发货前发消息和我确认一下颜色还有没有货，我下午 6 点以后才下班到家，快递直接放门口快递柜就行，谢谢师傅了。',
+  '收货地址写的是公司，周末没人签收，请尽量安排工作日白天派送；电话一时接不通请先转交一楼前台代收并拍照留底。',
+  '这一单是送人的生日礼物，麻烦帮忙用礼盒包装一下，外面不要贴任何价格标签和商品明细，包装盒也请不要打胶带。',
+  '上次在同一家店买过同款，左耳有电流声，这次收到货请先帮我试一下左右耳再发出来，如果还有问题直接联系我换货。',
+  '我 25 号一早要出差，25 号之前一定要送到；如果物流来不及，请提前打电话跟我商量是不是改寄到我公司地址，谢谢。',
+  '发票抬头开公司名称，电子发票即可，抬头：某某（上海）网络科技有限公司；请勿随包裹寄纸质发票，税号我私信发你。',
+  '备注一下：商品如有任何瑕疵直接给我退货退款就好，不需要换货了，运费险我已经买好了，你们尽管放心发出。',
+  '家里装修刚完快递柜还没通电，麻烦派送前打我电话，我下楼来取；中午 12 点到 14 点我在午休，请尽量避开这个时间段。'
+];
+
+/* ---------- 订单数据（18 笔，字段刻意比简单版多一倍） ---------- */
+const ORDERS = [
+  { no: 'ORD-20260923-5201', ts: '2026-09-23 10:42', buyer: '陆嘉宁', level: '银卡', phone: '138****2914',
+    qty: 1, unit: 499, freight: 0, discount: 20, points: 120, urgent: false,
+    goods: '小米 Buds 5 主动降噪无线耳机（48dB 深降噪 星耀金 官方标配）',
+    sku: 'MI-BUDS5-GD-001', spec: '星耀金 / 国行 / 一年整机保修', gift: '原厂保护壳', sn: 'SN88410201',
+    channel: '微信小程序', status: '待付款', pay: '微信支付', receiver: '陆嘉宁',
+    address: '北京市朝阳区望京街道方恒国际中心 B 座 1201 室（前台代收）',
+    invoice: '电子普通发票', risk: '已通过', after: '无', service: '已回复', tags: ['回头客'],
+    remark: '常规订单，按当日波次拣货出库，赠品随包裹一并放入。' },
+
+  { no: 'ORD-20260923-5208', ts: '2026-09-23 09:58', buyer: '沈亦舟', level: '金卡', phone: '139****4471',
+    qty: 2, unit: 79, freight: 0, discount: 0, points: 0, urgent: false,
+    goods: 'AirPods Pro 2 保护套（液态硅胶 防摔 带挂绳孔 适配 2023 USB-C 款）',
+    sku: 'AP-PRO2-CASE-BK', spec: '午夜黑 / 通用 / 无保修', gift: '无', sn: '无序列号（配件）',
+    channel: '天猫旗舰店', status: '已发货', pay: '支付宝', receiver: '沈亦舟',
+    address: '上海市浦东新区世纪大道 100 号环球金融中心 56 楼市场部',
+    invoice: '电子普通发票', risk: '已通过', after: '无', service: '已回复', tags: ['配件单'],
+    remark: '配件类订单，走小件通道出库，无需二次质检。' },
+
+  { no: 'ORD-20260923-5215', ts: '2026-09-23 09:12', buyer: '顾清和', level: '钻石', phone: '137****9920',
+    qty: 1, unit: 1899, freight: 0, discount: 100, points: 300, urgent: false,
+    goods: 'Apple/苹果 AirPods Pro 2 (USB-C) 主动降噪无线蓝牙耳机（国行正品 全国联保）',
+    sku: 'AP-PRO2-USBC-WH', spec: '星光白 / 国行 / 一年整机保修', gift: '原厂保护壳', sn: 'SN88410215',
+    channel: 'App 客户端', status: '已发货', pay: '云闪付', receiver: '顾清和',
+    address: '广州市天河区珠江新城华夏路 10 号富力中心 21 层 2107 室（需走访客登记）',
+    invoice: '增值税专用发票', risk: '已通过', after: '无', service: '已回复', tags: ['高价值'],
+    remark: '高价值订单，出库前二次质检并录像，随单附手写感谢卡。' },
+
+  { no: 'ORD-20260923-5222', ts: '2026-09-23 08:35', buyer: '苏晚棠', level: '普通', phone: '186****3312',
+    qty: 1, unit: 2499, freight: 0, discount: 0, points: 0, urgent: false,
+    goods: '索尼 WH-1000XM5 头戴式无线降噪耳机（铂金银 含原厂收纳包）',
+    sku: 'SONY-XM5-PT', spec: '铂金银 / 国行 / 两年质保', gift: '收纳包', sn: 'SN88410222',
+    channel: '线下门店', status: '待付款', pay: '货到付款', receiver: '苏晚棠',
+    address: '成都市武侯区天府大道北段 1700 号环球中心 N2 区 1136 室',
+    invoice: '不开发票', risk: '待复核', after: '无', service: '跟进中', tags: ['大额'],
+    remark: '门店代客下单，付款前需电话与买家确认。' },
+
+  { no: 'ORD-20260922-5229', ts: '2026-09-22 21:47', buyer: '郑小龙', level: '银卡', phone: '135****7781',
+    qty: 1, unit: 1299, freight: 0, discount: 0, points: 200, urgent: false,
+    goods: '华为 FreeBuds Pro 3 真无线降噪耳机（星闪连接版 曜金黑 官方标配）',
+    sku: 'HW-FBP3-YJ', spec: '曜金黑 / 国行 / 一年整机保修', gift: '原厂保护壳', sn: 'SN88410229',
+    channel: '微信小程序', status: '已付款待发货', pay: '微信支付', receiver: '郑小龙',
+    address: '北京市朝阳区建国路 88 号现代城 A 座 1806 室（工作日 10 点后有人在）',
+    invoice: '电子普通发票', risk: '已通过', after: '无', service: '已回复', tags: [],
+    remark: '常规订单，按当日波次拣货出库。' },
+
+  { no: 'ORD-20260922-5236', ts: '2026-09-22 20:15', buyer: '张伟', level: '金卡', phone: '139****7726',
+    qty: 2, unit: 78, freight: 0, discount: 6, points: 0, urgent: true,
+    goods: 'AirPods Pro 2 保护套（液态硅胶 防摔 带挂绳孔 适配 2023 USB-C 款）',
+    sku: 'AP-PRO2-CASE-BK', spec: '午夜黑 / 通用 / 无保修', gift: '无', sn: '无序列号（配件）',
+    channel: '天猫旗舰店', status: '已付款待发货', pay: '支付宝', receiver: '张伟',
+    address: '上海市浦东新区世纪大道 100 号环球金融中心 56 楼市场部',
+    invoice: '电子普通发票', risk: '已通过', after: '无', service: '已回复', tags: ['配件单', '催单'],
+    remark: '买家催过一次，实际是配件单，按小件通道出库即可。' },
+
+  { no: 'ORD-20260922-5243', ts: '2026-09-22 18:33', buyer: '李婷婷', level: '银卡', phone: '137****5580',
+    qty: 1, unit: 699, freight: 0, discount: 0, points: 0, urgent: false,
+    goods: '小米 Buds 4 Pro 主动降噪无线耳机（48dB 深降噪 星耀金 限量礼盒装）',
+    sku: 'MI-BUDS4P-YJ', spec: '星耀金 / 国行 / 半年电池保修', gift: '收纳包', sn: 'SN88410243',
+    channel: 'App 客户端', status: '已发货', pay: '云闪付', receiver: '李婷婷',
+    address: '广州市天河区珠江新城华夏路 10 号富力中心 2107 室',
+    invoice: '电子普通发票', risk: '已通过', after: '无', service: '已回复', tags: [],
+    remark: '常规订单，按当日波次拣货出库。' },
+
+  { no: 'ORD-20260922-5250', ts: '2026-09-22 16:08', buyer: '陈思远', level: '金卡', phone: '136****3361',
+    qty: 1, unit: 1299, freight: 0, discount: 60, points: 150, urgent: false,
+    goods: 'Apple/苹果 AirPods 4 无线蓝牙耳机（主动降噪版 白色 国行正品）',
+    sku: 'AP-4-ANC-WH', spec: '白色 / 国行 / 一年整机保修', gift: '耳帽两副', sn: 'SN88410250',
+    channel: '微信小程序', status: '已付款待发货', pay: '花呗分期', receiver: '陈思远',
+    address: '深圳市南山区科技园南区深南大道 9988 号 5 栋 802（无电梯，请安排上楼）',
+    invoice: '电子普通发票', risk: '已通过', after: '无', service: '已回复', tags: [],
+    remark: '买家留言要求礼盒包装，外层不要贴价格标签。' },
+
+  { no: 'ORD-20260922-5257', ts: '2026-09-22 14:52', buyer: '何书瑶', level: '金卡', phone: '158****4417',
+    qty: 1, unit: 1899, freight: 0, discount: 0, points: 400, urgent: false,
+    goods: 'Apple/苹果 AirPods Pro 2 (USB-C) 主动降噪无线蓝牙耳机（国行正品 全国联保）',
+    sku: 'AP-PRO2-USBC-WH', spec: '深空灰 / 国行 / 一年整机保修', gift: '贴膜服务', sn: 'SN88410257',
+    channel: 'App 客户端', status: '售后处理中', pay: '支付宝', receiver: '何书瑶',
+    address: '杭州市西湖区文三路 478 号华星世纪大厦 6 层 618 室（快递放 1 层收发室）',
+    invoice: '增值税专用发票', risk: '已通过', after: '退货审核中', service: '跟进中', tags: ['售后'],
+    remark: '买家反馈左耳有电流声，已转售后，出库前请勿发货。' },
+
+  { no: 'ORD-20260921-5264', ts: '2026-09-21 22:31', buyer: '赵强', level: '钻石', phone: '188****6642',
+    qty: 1, unit: 2499, freight: 0, discount: 200, points: 500, urgent: false,
+    goods: '索尼 WH-1000XM5 头戴式无线降噪耳机（铂金银 含原厂收纳包 国行）',
+    sku: 'SONY-XM5-PT', spec: '铂金银 / 国行 / 两年碎屏宝', gift: '收纳包', sn: 'SN88410264',
+    channel: '天猫旗舰店', status: '已签收', pay: '微信支付', receiver: '赵强',
+    address: '成都市武侯区天府大道北段 1700 号环球中心 N2 区 1136 室',
+    invoice: '增值税专用发票', risk: '已通过', after: '无', service: '已回复', tags: ['高价值', '回头客'],
+    remark: '该买家为本店第 6 次下单，已升级优先发货。' },
+
+  { no: 'ORD-20260921-5271', ts: '2026-09-21 20:04', buyer: '周雅琴', level: '金卡', phone: '150****3308',
+    qty: 1, unit: 1899, freight: 0, discount: 0, points: 260, urgent: true,
+    goods: 'Apple/苹果 AirPods Pro 2 (USB-C) 主动降噪无线蓝牙耳机（国行正品 全国联保）',
+    sku: 'AP-PRO2-USBC-WH', spec: '星光白 / 国行 / 一年整机保修', gift: '原厂保护壳', sn: 'SN88410271',
+    channel: 'App 客户端', status: '已付款待发货', pay: '微信支付', receiver: '周雅琴',
+    address: '西安市雁塔区高新路 25 号世纪大厦 1808 室（工作日家里有人，请务必送上门）',
+    invoice: '电子普通发票', risk: '已通过', after: '无', service: '跟进中', tags: ['催单'],
+    remark: '买家今天催过一次，仓库优先安排这一单出库。' },
+
+  { no: 'ORD-20260921-5278', ts: '2026-09-21 17:39', buyer: '孙丽华', level: '银卡', phone: '186****2277',
+    qty: 1, unit: 1899, freight: 0, discount: 0, points: 0, urgent: false,
+    goods: 'Apple/苹果 AirPods Pro 2 (USB-C) 主动降噪无线蓝牙耳机（国行正品 全国联保）',
+    sku: 'AP-PRO2-USBC-WH', spec: '深空灰 / 国行 / 一年整机保修', gift: '耳帽两副', sn: 'SN88410278',
+    channel: 'H5 商城', status: '已付款待发货', pay: '支付宝', receiver: '孙丽华',
+    address: '武汉市洪山区光谷步行街世界城广场 35 层 3502 室（需刷身份证上楼）',
+    invoice: '电子普通发票', risk: '待复核', after: '无', service: '已回复', tags: [],
+    remark: '收货地址与常用地不一致，已触发风控人工复核。' },
+
+  { no: 'ORD-20260921-5285', ts: '2026-09-21 15:12', buyer: '周子航', level: '金卡', phone: '150****9931',
+    qty: 3, unit: 19.9, freight: 0, discount: 0, points: 0, urgent: false,
+    goods: 'AirPods Pro 专用耳塞（硅胶防滑 三副装 适配 Pro 2 / Pro 3）',
+    sku: 'AP-PRO-EARTIP-3', spec: 'S/M/L 三副装 / 通用 / 无保修', gift: '无', sn: '无序列号（配件）',
+    channel: '微信小程序', status: '已付款待发货', pay: '微信支付', receiver: '周子航',
+    address: '南京市鼓楼区中山北路 30 号城市名人广场 2 幢 1808 室（到楼下打电话）',
+    invoice: '电子普通发票', risk: '已通过', after: '无', service: '已回复', tags: ['配件单'],
+    remark: '配件类订单，走小件通道出库，无需二次质检。' },
+
+  { no: 'ORD-20260921-5292', ts: '2026-09-21 12:26', buyer: '王小明', level: '金卡', phone: '135****1103',
+    qty: 1, unit: 1899, freight: 0, discount: 0, points: 0, urgent: false,
+    goods: 'Apple/苹果 AirPods Pro 2 (USB-C) 主动降噪无线蓝牙耳机（国行正品 全国联保）',
+    sku: 'AP-PRO2-USBC-WH', spec: '星光白 / 国行 / 一年整机保修', gift: '原厂保护壳', sn: 'SN88410292',
+    channel: 'App 客户端', status: '已取消', pay: '微信支付', receiver: '王小明',
+    address: '北京市海淀区中关村大街 27 号中关村大厦 18 层 1806 室',
+    invoice: '电子普通发票', risk: '已通过', after: '已退款', service: '已回复', tags: ['已取消'],
+    remark: '买家在出库前取消，款项已原路退回，包裹作废。' },
+
+  { no: 'ORD-20260920-5299', ts: '2026-09-20 21:58', buyer: '吴敏', level: '银卡', phone: '133****4458',
+    qty: 1, unit: 1299, freight: 0, discount: 0, points: 0, urgent: false,
+    goods: '三星 Galaxy Buds3 Pro 智能主动降噪耳机（银色 支持实时翻译 海外版）',
+    sku: 'SS-BUDS3P-SV', spec: '银色 / 海外版 / 半年电池保修', gift: '耳帽两副', sn: 'SN88410299',
+    channel: '天猫旗舰店', status: '已付款待发货', pay: '云闪付', receiver: '吴敏',
+    address: '重庆市渝北区新南路 166 号 2 幢 1 单元 22 楼 4 号（小区门在南门）',
+    invoice: '电子普通发票', risk: '已通过', after: '无', service: '已回复', tags: [],
+    remark: '海外版商品，已随包裹附中文说明书与保修卡。' },
+
+  { no: 'ORD-20260920-5306', ts: '2026-09-20 19:40', buyer: '张伟', level: '银卡', phone: '139****7726',
+    qty: 1, unit: 79, freight: 12, discount: 0, points: 0, urgent: false,
+    goods: 'AirPods Pro 2 保护套（液态硅胶 防摔 带挂绳孔 适配 2023 USB-C 款）',
+    sku: 'AP-PRO2-CASE-BK', spec: '午夜黑 / 通用 / 无保修', gift: '无', sn: '无序列号（配件）',
+    channel: 'H5 商城', status: '已付款待发货', pay: '微信支付', receiver: '张伟',
+    address: '上海市浦东新区世纪大道 100 号环球金融中心 56 楼市场部',
+    invoice: '不开发票', risk: '已通过', after: '无', service: '已回复', tags: ['配件单'],
+    remark: '配件类订单，走小件通道出库，运费到付已改为商家承担。' },
+
+  { no: 'ORD-20260920-5313', ts: '2026-09-20 16:22', buyer: '冯雪', level: '金卡', phone: '158****6027',
+    qty: 1, unit: 899, freight: 0, discount: 50, points: 0, urgent: false,
+    goods: 'OPPO Enco X3 丹拿联合调音真无线降噪耳机（云波蓝 双设备同时连接）',
+    sku: 'OPPO-X3-YB', spec: '云波蓝 / 国行 / 一年整机保修', gift: '原厂保护壳', sn: 'SN88410313',
+    channel: '微信小程序', status: '已取消', pay: '花呗分期', receiver: '冯雪',
+    address: '北京市海淀区中关村大街 27 号中关村大厦 18 层 1806 室',
+    invoice: '电子普通发票', risk: '已通过', after: '已退款', service: '已回复', tags: ['已取消'],
+    remark: '买家在出库前取消，分期手续费已同步退回。' },
+
+  { no: 'ORD-20260920-5320', ts: '2026-09-20 11:07', buyer: '蒋文明', level: '普通', phone: '159****8814',
+    qty: 1, unit: 1749, freight: 0, discount: 0, points: 90, urgent: false,
+    goods: 'Apple/苹果 AirPods Pro 2 (USB-C) 主动降噪无线蓝牙耳机（港版 全国联保）',
+    sku: 'AP-PRO2-USBC-HK', spec: '星光白 / 港版 / 一年整机保修', gift: '贴膜服务', sn: 'SN88410320',
+    channel: '线下门店', status: '已签收', pay: '支付宝', receiver: '蒋文明',
+    address: '天津市和平区南京路 189 号津汇广场 2 座 23 层 2307 室（19 点关门）',
+    invoice: '电子普通发票', risk: '已通过', after: '无', service: '已回复', tags: ['回头客'],
+    remark: '港版商品，已附中文保修说明；买家签收无异常。' }
+];
+
+/* 「实时模拟」打开后逐笔进入的新订单（固定脚本，不是随机 —— 演示要可复述）。
+ * 一律「待付款」，商品不含 AirPods（不污染既有干扰项），也不影响唯一目标的成立。 */
+const INCOMING = [
+  { no: 'ORD-20260924-5327', ts: '2026-09-24 09:12', buyer: '陆一鸣', level: '普通', phone: '135****7781',
+    qty: 1, unit: 699, freight: 0, discount: 0, points: 0, urgent: false,
+    goods: '罗技 MX Master 3S 无线蓝牙鼠标（石墨黑 静音版 官方标配）',
+    sku: 'LOG-MX3S-GR', spec: '石墨黑 / 国行 / 一年整机保修', gift: '鼠标垫', sn: 'SN88420327',
+    channel: 'App 客户端', status: '待付款', pay: '微信支付', receiver: '陆一鸣',
+    address: '北京市朝阳区建国路 88 号现代城 A 座 1806 室（工作日 10 点后有人在）',
+    invoice: '电子普通发票', risk: '已通过', after: '无', service: '待回复', tags: [],
+    remark: '实时模拟进入的新订单，等待买家付款。' },
+  { no: 'ORD-20260924-5334', ts: '2026-09-24 09:18', buyer: '沈佳', level: '银卡', phone: '186****2205',
+    qty: 1, unit: 89, freight: 0, discount: 0, points: 0, urgent: false,
+    goods: 'Anker 65W 氮化镓多口充电器（双 C 口 支持 PD 快充 便携装）',
+    sku: 'ANK-65W-GAN', spec: '白色 / 国行 / 两年质保', gift: '无', sn: 'SN88420334',
+    channel: 'H5 商城', status: '待付款', pay: '支付宝', receiver: '沈佳',
+    address: '杭州市余杭区文一西路 969 号西溪园区 3 号楼（需提前报备访客）',
+    invoice: '电子普通发票', risk: '已通过', after: '无', service: '待回复', tags: [],
+    remark: '实时模拟进入的新订单，等待买家付款。' },
+  { no: 'ORD-20260924-5341', ts: '2026-09-24 09:25', buyer: '唐睿', level: '普通', phone: '133****9917',
+    qty: 2, unit: 129, freight: 0, discount: 10, points: 0, urgent: false,
+    goods: '小米移动电源 20000mAh 双向快充版（白色 支持 22.5W 输出）',
+    sku: 'MI-PB20-WH', spec: '白色 / 国行 / 一年质保', gift: '数据线', sn: 'SN88420341',
+    channel: '微信小程序', status: '待付款', pay: '云闪付', receiver: '唐睿',
+    address: '成都市高新区天府五街 200 号菁蓉汇 5 号楼 A 区（20 点关门）',
+    invoice: '电子普通发票', risk: '已通过', after: '无', service: '待回复', tags: [],
+    remark: '实时模拟进入的新订单，等待买家付款。' }
+];
+
+/* 物流轨迹的固定步骤与起始进度（按下单时的状态定格，不含任何实时数据） */
+const TRACE_STEPS = {
+  '待付款': ['买家提交订单', '等待买家付款', '超时未付款自动关闭'],
+  '已付款待发货': ['买家提交订单', '支付成功', '仓库接单待拣货', '打包出库', '承运商揽收', '运输中', '已签收'],
+  '已发货': ['买家提交订单', '支付成功', '仓库接单待拣货', '打包出库', '承运商揽收', '运输中', '已签收'],
+  '已签收': ['买家提交订单', '支付成功', '仓库接单待拣货', '打包出库', '承运商揽收', '运输中', '已签收'],
+  '已取消': ['买家提交订单', '支付成功', '买家申请取消', '订单已关闭'],
+  '售后处理中': ['买家提交订单', '支付成功', '仓库接单待拣货', '买家申请售后', '售后审核中']
+};
+const TRACE_NOW = { '待付款': 1, '已付款待发货': 2, '已发货': 5, '已签收': 6, '已取消': 3, '售后处理中': 3 };
+
+/* KPI 条的四张卡（数值写死，实时模拟只动「今日订单」；重置演示要能整条还原） */
+const KPI_ITEMS = [
+  { icon: '🧾', label: '今日订单', value: '1,642', delta: '▲ 9.6% 较昨日', tone: 'up',
+    spark: [1180, 1244, 1216, 1332, 1298, 1406, 1520, 1642] },
+  { icon: '📦', label: '待发货', value: 8, unit: '笔', note: '其中 3 笔已超 24 小时未出库',
+    bar: { pct: 38, tone: 'warn' } },
+  { icon: '💰', label: '今日 GMV', value: '¥412,860', delta: '▲ 6.4% 较昨日', tone: 'up',
+    spark: [288, 306, 298, 342, 336, 378, 396, 412] },
+  { icon: '⚠', label: '超时未发货', value: 3, unit: '笔', note: '最早一笔已滞留 52 小时',
+    bar: { pct: 16, tone: '' } }
+];
+
+const state = {
+  orders: [],
+  query: '', scope: '全部字段', status: '全部状态', level: '全部等级', channel: '全部渠道',
+  pays: [], from: '', to: '', amountMin: '', amountMax: '', amountChip: 'all', rangeChip: 'all',
+  warehouse: '全部仓库', carrier: '全部承运商',
+  invoice: '全部发票类型', risk: '全部风控状态', after: '全部售后状态', service: '全部跟进状态', eta: '全部时效',
+  urgentOnly: false, giftOnly: false, lateOnly: false, vipOnly: false,
+  tab: 'all', sortKey: 'ts', sortDir: 'desc', density: 'cozy', view: 'table',
+  page: 1, pageSize: 20, picked: [], expanded: [], log: [], arrivals: 0
+};
+
+/* 每笔订单的物流轨迹进度（只被「模拟物流更新」这一个用户动作推进） */
+const TRACE = {};
+
+const $ = (id) => document.getElementById(id);
+let toastTimer;
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
+}
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined && text !== null) n.textContent = text;
+  return n;
+}
+
+function money(n) {
+  return '¥' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function round2(n) { return Math.round(n * 100) / 100; }
+
+function tradeOf(i) { return '42009' + String(18307461205 + i * 13337); }
+function waybillOf(i) { return ['SF', 'JD', 'YTO', 'ZTO', 'EMS', 'YD'][i % 6] + String(770100 + i * 29); }
+
+/* 纯字符串时间推进（避免 Date 解析差异）：把 "2026-09-21 12:26" 往后推 n 小时 */
+function shiftTs(ts, hours) {
+  const day = ts.slice(0, 10), hm = ts.slice(11);
+  let h = parseInt(hm.slice(0, 2), 10) + hours;
+  let d = parseInt(day.slice(8, 10), 10);
+  while (h >= 24) { h -= 24; d += 1; }
+  return day.slice(0, 8) + String(d).padStart(2, '0') + ' ' + String(h).padStart(2, '0') + hm.slice(2);
+}
+
+/* ---------- 初始化 / 重置 ---------- */
+function decorate(o, i) {
+  return Object.assign({
+    id: i + 1,
+    idx: i,
+    shipped: false,
+    fresh: false,
+    trade: tradeOf(i),
+    waybill: waybillOf(i),
+    eta: shiftTs(o.ts, 30 + (i % 4) * 6).slice(0, 10),
+    amount: round2(o.qty * o.unit - o.discount),
+    warehouse: WAREHOUSES[1 + (i % 5)],
+    carrier: CARRIERS[1 + (i % 5)],
+    late: o.status === '已付款待发货' && o.ts < LATE_LINE
+  }, o);
+}
+
+function reset() {
+  state.orders = ORDERS.map((o, i) => decorate(o, i));
+  state.query = '';
+  state.scope = '全部字段';
+  state.status = '全部状态';
+  state.level = '全部等级';
+  state.channel = '全部渠道';
+  state.pays = [];
+  state.from = '';
+  state.to = '';
+  state.amountMin = '';
+  state.amountMax = '';
+  state.amountChip = 'all';
+  state.rangeChip = 'all';
+  state.warehouse = '全部仓库';
+  state.carrier = '全部承运商';
+  state.invoice = '全部发票类型';
+  state.risk = '全部风控状态';
+  state.after = '全部售后状态';
+  state.service = '全部跟进状态';
+  state.eta = '全部时效';
+  state.urgentOnly = false;
+  state.giftOnly = false;
+  state.lateOnly = false;
+  state.vipOnly = false;
+  state.tab = 'all';
+  state.sortKey = 'ts';
+  state.sortDir = 'desc';
+  state.density = 'cozy';
+  state.view = 'table';
+  state.page = 1;
+  state.pageSize = 20;
+  state.picked = [];
+  state.expanded = [];
+  state.log = [];
+  state.arrivals = 0;
+  Object.keys(TRACE).forEach((k) => { delete TRACE[k]; });
+
+  $('kw').value = '';
+  $('fromDate').value = '';
+  $('toDate').value = '';
+  $('amtMin').value = '';
+  $('amtMax').value = '';
+  $('scopeSel').value = '全部字段';
+  $('statusSel').value = '全部状态';
+  $('levelSel').value = '全部等级';
+  $('channelSel').value = '全部渠道';
+  $('warehouseSel').value = '全部仓库';
+  $('carrierSel').value = '全部承运商';
+  $('invoiceSel').value = '全部发票类型';
+  $('riskSel').value = '全部风控状态';
+  $('afterSel').value = '全部售后状态';
+  $('serviceSel').value = '全部跟进状态';
+  $('etaSel').value = '全部时效';
+  $('urgentOnly').checked = false;
+  $('giftOnly').checked = false;
+  $('lateOnly').checked = false;
+  $('vipOnly').checked = false;
+  $('sortSel').value = '下单时间';
+  $('dirBtn').textContent = '降序 ↓';
+  $('pageSizeSel').value = '20 条';
+  $('advBox').open = false;
+  $('cardViewBtn').textContent = '卡片视图';
+  $('tableWrap').hidden = false;
+  $('cardHost').hidden = true;
+
+  /* KPI 的数字会被「实时模拟」与发货递增，重置要整条还原成写死的初始值 */
+  Enterprise.kpis($('entKpis'), KPI_ITEMS);
+  document.querySelector('table.orders').classList.remove('dense');
+  $('densityBtn').textContent = '密度 舒适';
+  $('pickAll').checked = false;
+  $('pickAll').indeterminate = false;
+  render();
+}
+
+/* 抽屉开着时，重置要把它收掉，免得正文停在一笔已经不存在的订单上；
+ * 同时必须把「实时模拟」关掉 —— 否则刚到的新订单会立刻破坏「初始 18 笔」。 */
+function hardReset() {
+  Enterprise.drawer.close();
+  const cb = document.querySelector('.ent-sim input');
+  if (cb && cb.checked) {
+    cb.checked = false;
+    cb.dispatchEvent(new Event('change'));
+  }
+  reset();
+}
+
+function fillSelect(sel, items, keep) {
+  sel.innerHTML = '';
+  items.forEach((s) => sel.appendChild(el('option', '', s)));
+  sel.value = keep;
+}
+
+function fillSelects() {
+  fillSelect($('scopeSel'), SCOPES, '全部字段');
+  fillSelect($('statusSel'), STATUSES, '全部状态');
+  fillSelect($('levelSel'), LEVELS, '全部等级');
+  fillSelect($('channelSel'), CHANNELS, '全部渠道');
+  fillSelect($('warehouseSel'), WAREHOUSES, '全部仓库');
+  fillSelect($('carrierSel'), CARRIERS, '全部承运商');
+  fillSelect($('invoiceSel'), INVOICES, '全部发票类型');
+  fillSelect($('riskSel'), RISKS, '全部风控状态');
+  fillSelect($('afterSel'), AFTERS, '全部售后状态');
+  fillSelect($('serviceSel'), SERVICES, '全部跟进状态');
+  fillSelect($('etaSel'), ETAS, '全部时效');
+  fillSelect($('sortSel'), SORTS.map((s) => s[1]), '下单时间');
+  fillSelect($('pageSizeSel'), PAGESIZES.map((n) => n + ' 条'), '20 条');
+
+  /* 支付方式：多选 chips（默认全不选 = 不生效） */
+  const pc = $('payChips');
+  pc.innerHTML = '';
+  PAYS.forEach((p) => {
+    const b = el('button', 'ent-chip', p);
+    b.type = 'button';
+    b.dataset.pay = p;
+    b.onclick = () => {
+      state.pays = state.pays.indexOf(p) === -1 ? state.pays.concat([p]) : state.pays.filter((x) => x !== p);
+      state.page = 1;
+      render();
+    };
+    pc.appendChild(b);
+  });
+
+  /* 下单时间快捷档 */
+  const rc = $('rangeChips');
+  rc.innerHTML = '';
+  RANGES.forEach((r) => {
+    const b = el('button', 'ent-chip', r.label);
+    b.type = 'button';
+    b.dataset.range = r.id;
+    b.onclick = () => {
+      state.rangeChip = state.rangeChip === r.id ? 'all' : r.id;
+      const hit = RANGES.find((x) => x.id === state.rangeChip) || RANGES[0];
+      state.from = hit.from;
+      state.to = hit.to;
+      $('fromDate').value = hit.from;
+      $('toDate').value = hit.to;
+      state.page = 1;
+      render();
+    };
+    rc.appendChild(b);
+  });
+
+  /* 金额快捷档 */
+  const ac = $('amtChips');
+  ac.innerHTML = '';
+  AMTS.forEach((a) => {
+    const b = el('button', 'ent-chip', a.label);
+    b.type = 'button';
+    b.dataset.amt = a.id;
+    b.onclick = () => {
+      state.amountChip = state.amountChip === a.id ? 'all' : a.id;
+      const hit = AMTS.find((x) => x.id === state.amountChip) || AMTS[0];
+      state.amountMin = hit.min;
+      state.amountMax = hit.max;
+      $('amtMin').value = hit.min;
+      $('amtMax').value = hit.max;
+      state.page = 1;
+      render();
+    };
+    ac.appendChild(b);
+  });
+
+  /* 保存的筛选视图 */
+  const vc = $('viewChips');
+  vc.innerHTML = '';
+  VIEWS.forEach((v) => {
+    const b = el('button', 'ent-chip', v.label);
+    b.type = 'button';
+    b.dataset.view = v.id;
+    b.onclick = () => applyView(v.id);
+    vc.appendChild(b);
+  });
+}
+
+/* 视图之间互斥：先清空全部筛选字段，再套上这个视图自己的条件（「全部订单」即纯清空） */
+function applyView(id) {
+  const v = VIEWS.find((x) => x.id === id) || VIEWS[0];
+  clearFilters();
+  if (v.id === 'ship') { state.status = '已付款待发货'; $('statusSel').value = state.status; }
+  if (v.id === 'urgent') { state.urgentOnly = true; $('urgentOnly').checked = true; }
+  if (v.id === 'big') { state.amountMin = String(BIG_AMOUNT); $('amtMin').value = state.amountMin; }
+  if (v.id === 'after') { state.after = '退货审核中'; $('afterSel').value = state.after; }
+  render();
+  toast(v.id === 'all' ? '已回到全部订单' : '已套用「' + v.label + '」');
+}
+
+/* 清空全部筛选字段（不碰排序 / 每页条数 / 视图 / 勾选 / 分组之外的任何展示状态） */
+function clearFilters() {
+  state.query = '';
+  state.scope = '全部字段';
+  state.status = '全部状态';
+  state.level = '全部等级';
+  state.channel = '全部渠道';
+  state.pays = [];
+  state.from = '';
+  state.to = '';
+  state.amountMin = '';
+  state.amountMax = '';
+  state.amountChip = 'all';
+  state.rangeChip = 'all';
+  state.warehouse = '全部仓库';
+  state.carrier = '全部承运商';
+  state.invoice = '全部发票类型';
+  state.risk = '全部风控状态';
+  state.after = '全部售后状态';
+  state.service = '全部跟进状态';
+  state.eta = '全部时效';
+  state.urgentOnly = false;
+  state.giftOnly = false;
+  state.lateOnly = false;
+  state.vipOnly = false;
+  state.tab = 'all';
+  state.page = 1;
+  $('kw').value = '';
+  $('fromDate').value = '';
+  $('toDate').value = '';
+  $('amtMin').value = '';
+  $('amtMax').value = '';
+  $('scopeSel').value = '全部字段';
+  $('statusSel').value = '全部状态';
+  $('levelSel').value = '全部等级';
+  $('channelSel').value = '全部渠道';
+  $('warehouseSel').value = '全部仓库';
+  $('carrierSel').value = '全部承运商';
+  $('invoiceSel').value = '全部发票类型';
+  $('riskSel').value = '全部风控状态';
+  $('afterSel').value = '全部售后状态';
+  $('serviceSel').value = '全部跟进状态';
+  $('etaSel').value = '全部时效';
+  $('urgentOnly').checked = false;
+  $('giftOnly').checked = false;
+  $('lateOnly').checked = false;
+  $('vipOnly').checked = false;
+}
+
+function viewActive(id) {
+  if (id === 'all') {
+    return state.status === '全部状态' && state.level === '全部等级' && state.amountMin === '' &&
+      state.amountMax === '' && !state.urgentOnly && state.after === '全部售后状态' && state.tab === 'all';
+  }
+  if (id === 'ship') return state.status === '已付款待发货';
+  if (id === 'urgent') return state.urgentOnly;
+  if (id === 'big') return state.amountMin !== '' && Number(state.amountMin) >= BIG_AMOUNT;
+  if (id === 'after') return state.after === '退货审核中';
+  return false;
+}
+
+function filtersActive() {
+  return state.query.trim() !== '' || state.scope !== '全部字段' || state.status !== '全部状态' ||
+    state.level !== '全部等级' || state.channel !== '全部渠道' || state.pays.length > 0 ||
+    state.from !== '' || state.to !== '' || state.amountMin !== '' || state.amountMax !== '' ||
+    state.warehouse !== '全部仓库' || state.carrier !== '全部承运商' ||
+    state.invoice !== '全部发票类型' || state.risk !== '全部风控状态' || state.after !== '全部售后状态' ||
+    state.service !== '全部跟进状态' || state.eta !== '全部时效' ||
+    state.urgentOnly || state.giftOnly || state.lateOnly || state.vipOnly || state.tab !== 'all';
+}
+
+/* 已生效的筛选条件（每个都能单独移除） */
+function conditions() {
+  const out = [];
+  const q = state.query.trim();
+  if (q) {
+    out.push({ id: 'q', label: '关键词 ' + q + (state.scope === '全部字段' ? '' : '（限 ' + state.scope + '）'),
+      clear: () => { state.query = ''; $('kw').value = ''; } });
+  }
+  if (state.scope !== '全部字段') out.push({ id: 'scope', label: '搜索范围 ' + state.scope, clear: () => { state.scope = '全部字段'; $('scopeSel').value = '全部字段'; } });
+  if (state.status !== '全部状态') out.push({ id: 'status', label: '状态 ' + state.status, clear: () => { state.status = '全部状态'; $('statusSel').value = '全部状态'; } });
+  if (state.level !== '全部等级') out.push({ id: 'level', label: '买家等级 ' + state.level, clear: () => { state.level = '全部等级'; $('levelSel').value = '全部等级'; } });
+  if (state.channel !== '全部渠道') out.push({ id: 'channel', label: '渠道 ' + state.channel, clear: () => { state.channel = '全部渠道'; $('channelSel').value = '全部渠道'; } });
+  state.pays.forEach((p) => {
+    out.push({ id: 'pay-' + p, label: '支付 ' + p, clear: () => { state.pays = state.pays.filter((x) => x !== p); } });
+  });
+  if (state.from || state.to) out.push({ id: 'date', label: '下单日期 ' + (state.from || '不限') + ' 至 ' + (state.to || '不限'),
+    clear: () => { state.from = ''; state.to = ''; state.rangeChip = 'all'; $('fromDate').value = ''; $('toDate').value = ''; } });
+  if (state.amountMin !== '' || state.amountMax !== '') {
+    out.push({ id: 'amount', label: '实付金额 ' + (state.amountMin !== '' ? '不低于 ' + state.amountMin : '不限') + ' 至 ' + (state.amountMax !== '' ? '不高于 ' + state.amountMax : '不限'),
+      clear: () => { state.amountMin = ''; state.amountMax = ''; state.amountChip = 'all'; $('amtMin').value = ''; $('amtMax').value = ''; } });
+  }
+  if (state.warehouse !== '全部仓库') out.push({ id: 'warehouse', label: '仓库 ' + state.warehouse, clear: () => { state.warehouse = '全部仓库'; $('warehouseSel').value = '全部仓库'; } });
+  if (state.carrier !== '全部承运商') out.push({ id: 'carrier', label: '承运商 ' + state.carrier, clear: () => { state.carrier = '全部承运商'; $('carrierSel').value = '全部承运商'; } });
+  if (state.invoice !== '全部发票类型') out.push({ id: 'invoice', label: '发票 ' + state.invoice, clear: () => { state.invoice = '全部发票类型'; $('invoiceSel').value = '全部发票类型'; } });
+  if (state.risk !== '全部风控状态') out.push({ id: 'risk', label: '风控 ' + state.risk, clear: () => { state.risk = '全部风控状态'; $('riskSel').value = '全部风控状态'; } });
+  if (state.after !== '全部售后状态') out.push({ id: 'after', label: '售后 ' + state.after, clear: () => { state.after = '全部售后状态'; $('afterSel').value = '全部售后状态'; } });
+  if (state.service !== '全部跟进状态') out.push({ id: 'service', label: '客服 ' + state.service, clear: () => { state.service = '全部跟进状态'; $('serviceSel').value = '全部跟进状态'; } });
+  if (state.eta !== '全部时效') out.push({ id: 'eta', label: '物流时效 ' + state.eta, clear: () => { state.eta = '全部时效'; $('etaSel').value = '全部时效'; } });
+  if (state.urgentOnly) out.push({ id: 'urgent', label: '只看加急', clear: () => { state.urgentOnly = false; $('urgentOnly').checked = false; } });
+  if (state.giftOnly) out.push({ id: 'gift', label: '只看含赠品', clear: () => { state.giftOnly = false; $('giftOnly').checked = false; } });
+  if (state.lateOnly) out.push({ id: 'late', label: '只看超时未发货', clear: () => { state.lateOnly = false; $('lateOnly').checked = false; } });
+  if (state.vipOnly) out.push({ id: 'vip', label: '只看金卡以上', clear: () => { state.vipOnly = false; $('vipOnly').checked = false; } });
+  if (state.tab !== 'all') {
+    const t = TABS.find((x) => x.id === state.tab);
+    out.push({ id: 'tab', label: '分组 ' + t.label, clear: () => { state.tab = 'all'; } });
+  }
+  return out;
+}
+
+/* 搜索范围：只在选中的字段里做子串匹配（默认「全部字段」= 与简单版逐条等价） */
+function scopeHit(o, q) {
+  const pick = {
+    '全部字段': o.no + ' ' + o.buyer + ' ' + o.phone + ' ' + o.goods + ' ' + o.address + ' ' + o.waybill + ' ' + o.receiver + ' ' + o.sku,
+    '订单号': o.no,
+    '买家昵称': o.buyer,
+    '收件手机号': o.phone,
+    '商品名称': o.goods,
+    '收货地址': o.address,
+    '运单号': o.waybill
+  };
+  return String(pick[state.scope] === undefined ? pick['全部字段'] : pick[state.scope]).toLowerCase().indexOf(q) !== -1;
+}
+
+/* 发货后的那一行不再受状态筛选影响，保证状态变化始终可见。
+ * 新增的筛选一律「空值 = 不生效」，默认态与改造前逐条等价。 */
+function visible() {
+  const q = state.query.trim().toLowerCase();
+  return state.orders.filter((o) => {
+    if (state.status !== '全部状态' && !o.shipped && o.status !== state.status) return false;
+    if (state.level !== '全部等级' && o.level !== state.level) return false;
+    if (state.channel !== '全部渠道' && o.channel !== state.channel) return false;
+    if (state.pays.length && state.pays.indexOf(o.pay) === -1) return false;
+    if (state.from && o.ts.slice(0, 10) < state.from) return false;
+    if (state.to && o.ts.slice(0, 10) > state.to) return false;
+    if (state.amountMin !== '' && o.amount < Number(state.amountMin)) return false;
+    if (state.amountMax !== '' && o.amount > Number(state.amountMax)) return false;
+    if (state.warehouse !== '全部仓库' && o.warehouse !== state.warehouse) return false;
+    if (state.carrier !== '全部承运商' && o.carrier !== state.carrier) return false;
+    if (state.invoice !== '全部发票类型' && o.invoice !== state.invoice) return false;
+    if (state.risk !== '全部风控状态' && o.risk !== state.risk) return false;
+    if (state.after !== '全部售后状态' && o.after !== state.after) return false;
+    if (state.service !== '全部跟进状态' && o.service !== state.service) return false;
+    if (state.eta !== '全部时效' && ((o.late && !o.shipped) ? '已超时' : '正常') !== state.eta) return false;
+    if (state.urgentOnly && !o.urgent) return false;
+    if (state.giftOnly && o.gift === '无') return false;
+    if (state.lateOnly && !(o.late && !o.shipped)) return false;
+    if (state.vipOnly && !(o.level === '金卡' || o.level === '钻石')) return false;
+    if (state.tab === 'pay' && o.status !== '待付款') return false;
+    if (state.tab === 'ship' && o.status !== '已付款待发货') return false;
+    if (state.tab === 'after' && o.status !== '售后处理中') return false;
+    if (state.tab === 'risk' && !(o.late && !o.shipped)) return false;
+    if (state.tab === 'urgent' && !o.urgent) return false;
+    if (q && !scopeHit(o, q)) return false;
+    return true;
+  });
+}
+
+/* 默认排序（下单时间倒序）**原样返回原数组**，绝不走 sort —— 保证默认行序逐字节不变 */
+function sortedList(list) {
+  if (state.sortKey === 'ts' && state.sortDir === 'desc') return list;
+  const copy = list.slice();
+  copy.sort((a, b) => {
+    let r;
+    if (state.sortKey === 'amount') r = a.amount - b.amount;
+    else if (state.sortKey === 'qty') r = a.qty - b.qty;
+    else if (state.sortKey === 'level') r = (LEVEL_RANK[a.level] || 0) - (LEVEL_RANK[b.level] || 0);
+    else r = (a.ts < b.ts ? -1 : (a.ts > b.ts ? 1 : 0));
+    return state.sortDir === 'asc' ? r : -r;
+  });
+  return copy;
+}
+
+/* ---------- 分页（默认每页 20 条 ≥ 18 笔，所以首屏一直是「全部 18 笔都在第 1 页」） ---------- */
+function pageCount() {
+  const n = Math.max(1, Math.ceil(sortedList(visible()).length / state.pageSize));
+  return n;
+}
+function pageList() {
+  const list = sortedList(visible());
+  const start = (state.page - 1) * state.pageSize;
+  return list.slice(start, start + state.pageSize);
+}
+
+/* ---------- 勾选 / 批量操作条 ---------- */
+function isPicked(no) { return state.picked.indexOf(no) !== -1; }
+
+/* 批量操作条：只在有勾选时**才创建**，绝不常驻。 */
+function renderBulk() {
+  const host = $('bulkHost');
+  host.innerHTML = '';
+  const n = state.picked.length;
+  if (!n) return;
+  const bar = el('div', 'ent-bulkbar');
+  const lab = el('span');
+  lab.appendChild(document.createTextNode('已选中 '));
+  lab.appendChild(el('b', 'ent-bulk-n', String(n)));
+  lab.appendChild(document.createTextNode(' 笔订单'));
+  bar.appendChild(lab);
+  const amt = state.orders.filter((o) => isPicked(o.no)).reduce((s, o) => s + o.amount, 0);
+  bar.appendChild(el('span', 'meta', '合计 ' + money(amt)));
+  bar.appendChild(el('span', 'spacer'));
+  const mk = (label, fn) => {
+    const b = el('button', 'btn mini', label);
+    b.type = 'button';
+    b.onclick = fn;
+    return b;
+  };
+  bar.appendChild(mk('批量发货', () => {
+    const nos = state.picked.slice();
+    const cur = state.orders.filter((o) => nos.indexOf(o.no) !== -1 && !o.shipped && o.status !== '待付款' && o.status !== '已取消' && o.status !== '已签收');
+    if (!cur.length) { toast('演示：选中的订单当前都不可发货'); return; }
+    cur.forEach((o) => shipOrder(o.no, true));
+    state.picked = [];
+    render();
+    toast('已批量发货 ' + cur.length + ' 笔订单');
+  }));
+  bar.appendChild(mk('批量打印面单', () => toast('演示：不会真的打印 ' + n + ' 张面单')));
+  bar.appendChild(mk('批量导出', () => toast('演示：不会真的导出文件')));
+  bar.appendChild(mk('取消选择', () => { state.picked = []; render(); }));
+  host.appendChild(bar);
+}
+
+/* ---------- 行内展开（详情行） ---------- */
+function isExpanded(no) { return state.expanded.indexOf(no) !== -1; }
+
+function expandRow(o) {
+  const tr = el('tr', 'detail-row');
+  const td = el('td');
+  td.colSpan = 9;
+  const grid = el('div', 'dgrid');
+
+  const block = (title, pairs) => {
+    grid.appendChild(el('h4', null, title));
+    const dl = el('dl');
+    pairs.forEach((p) => {
+      dl.appendChild(el('dt', null, p[0]));
+      dl.appendChild(el('dd', p[2] ? 'mono' : null, p[1]));
+    });
+    grid.appendChild(dl);
+  };
+
+  block('订单与渠道', [
+    ['订单号', o.no, true], ['下单时间', o.ts, true], ['销售渠道', o.channel],
+    ['支付方式', o.pay], ['交易号', o.trade, true], ['内部标签', o.tags.length ? o.tags.join('、') : '无']
+  ]);
+  block('商品与库存', [
+    ['SKU', o.sku, true], ['规格', o.spec], ['单价', money(o.unit), true],
+    ['数量', '×' + o.qty, true], ['赠品', o.gift], ['序列号', o.sn, true]
+  ]);
+  block('金额', [
+    ['实付金额', money(o.amount), true], ['运费', money(o.freight), true],
+    ['优惠抵扣', '-' + money(o.discount), true], ['积分抵扣', o.points + ' 分', true],
+    ['应付合计', money(round2(o.qty * o.unit)), true]
+  ]);
+  block('仓配', [
+    ['发货仓库', o.warehouse], ['承运商', o.carrier], ['运单号', o.waybill, true],
+    ['预计送达', o.eta, true], ['出库波次', 'WF-' + (4100 + o.idx), true], ['复核员', ['A037', 'B112', 'C058', 'D093', 'E021'][o.idx % 5], true]
+  ]);
+  block('服务与合规', [
+    ['发票类型', o.invoice], ['风控状态', o.risk], ['售后状态', o.after],
+    ['客服跟进', o.service], ['实名核验', ['一要素', '二要素', '三要素'][o.idx % 3]],
+    ['授权书编号', 'BR-' + (20250 + o.idx), true]
+  ]);
+
+  const n1 = el('div', 'dnote');
+  n1.appendChild(el('b', null, '买家留言 · '));
+  n1.appendChild(document.createTextNode(NOTES[o.idx % NOTES.length]));
+  grid.appendChild(n1);
+  const n2 = el('div', 'dnote');
+  n2.appendChild(el('b', null, '商家备注 · '));
+  n2.appendChild(document.createTextNode(o.remark));
+  grid.appendChild(n2);
+
+  td.appendChild(grid);
+  tr.appendChild(td);
+  return tr;
+}
+
+/* ---------- 订单详情抽屉 ---------- */
+function traceSteps(o) { return TRACE_STEPS[o.status] || TRACE_STEPS['已付款待发货']; }
+function traceNow(o) {
+  const t = TRACE[o.no] || (TRACE[o.no] = { advance: 0 });
+  const last = traceSteps(o).length - 1;
+  const base = TRACE_NOW[o.status] === undefined ? 0 : TRACE_NOW[o.status];
+  return Math.min(base + t.advance, last);
+}
+function traceBody(o, step, i) {
+  switch (step) {
+    case '买家提交订单': return '订单由「' + o.buyer + '」通过' + o.channel + '提交，支付方式 ' + o.pay + '，件数 ×' + o.qty + '。';
+    case '等待买家付款': return '等待买家完成支付，超过 24 小时未付款将自动关闭订单。';
+    case '超时未付款自动关闭': return '已超时未付款，系统将在下一个批处理周期关闭订单并释放库存。';
+    case '支付成功': return '实付 ' + money(o.amount) + '，交易号 ' + o.trade + '。';
+    case '仓库接单待拣货': return o.warehouse + ' 已接单，等待当日波次拣货，预计 ' + shiftTs(o.ts, 6 + i) + ' 出库。';
+    case '打包出库': return '商品质检与打包已完成，出库复核通过，等待交接 ' + o.carrier + '。';
+    case '承运商揽收': return o.carrier + ' 已揽收，运单号 ' + o.waybill + '，包裹进入干线运输。';
+    case '运输中': return '包裹在途，预计 ' + o.eta + ' 前送达收件城市。';
+    case '已签收': return '包裹已签收，签收人 ' + o.buyer + '（演示数据）。';
+    case '买家申请取消': return '买家发起取消申请，订单转入售后流程，仓库已停止拣货。';
+    case '订单已关闭': return '订单已关闭，款项原路退回，预计 1 至 3 个工作日到账。';
+    case '买家申请售后': return '买家发起售后申请（' + o.after + '），出库已冻结，等待质检结论。';
+    case '售后审核中': return '售后单已进入审核队列，审核通过后按' + o.after + '流程处理。';
+    default: return '';
+  }
+}
+function traceTimeline(o) {
+  const steps = traceSteps(o);
+  const now = traceNow(o);
+  const ul = el('ul', 'ent-timeline');
+  steps.forEach((s, i) => {
+    let cls = i < now ? 'done' : (i === now ? 'now' : '');
+    if (o.status === '已取消' && s === '买家申请取消') cls = i <= now ? 'warn' : '';
+    if (o.status === '售后处理中' && s === '买家申请售后') cls = i <= now ? 'warn' : '';
+    if (now === steps.length - 1 && i === now) cls = 'done';
+    const li = el('li', cls);
+    li.appendChild(el('span', 'ent-tl-title', s));
+    li.appendChild(el('span', 'ent-tl-meta', shiftTs(o.ts, i * 7) + ' · 处理节点 ' + (i + 1) + ' / ' + steps.length));
+    /* 还没走到的节点只留标题与时间，不写正文 —— 免得把「未来」当既成事实陈述 */
+    li.appendChild(el('span', 'ent-tl-body', i > now ? '该节点尚未到达' : traceBody(o, s, i)));
+    ul.appendChild(li);
+  });
+  return ul;
+}
+
+function kvBlock(title, pairs) {
+  const sec = el('section', 'ent-sec');
+  sec.appendChild(el('h3', null, title));
+  const dl = el('dl', 'ent-kv');
+  pairs.forEach((p) => {
+    dl.appendChild(el('dt', null, p[0]));
+    dl.appendChild(el('dd', p[2] ? 'mono' : null, p[1]));
+  });
+  sec.appendChild(dl);
+  return sec;
+}
+
+function detailOverview(o) {
+  const wrap = el('div');
+  wrap.appendChild(kvBlock('订单基本信息', [
+    ['订单号', o.no, true], ['下单时间', o.ts, true], ['销售渠道', o.channel],
+    ['买家', o.buyer + '（' + o.level + '会员）'], ['收件手机', o.phone, true], ['支付方式', o.pay],
+    ['实付金额', money(o.amount), true], ['优惠抵扣', '-' + money(o.discount), true],
+    ['积分抵扣', o.points + ' 分', true], ['交易号', o.trade, true],
+    ['发货仓库', o.warehouse], ['承运商', o.carrier], ['运单号', o.waybill, true],
+    ['当前状态', o.status], ['预计送达', o.eta, true],
+    ['发货时效', (o.late && !o.shipped) ? '已超时（超过 ' + LATE_LINE.slice(11) + ' 的出库时限）' : '正常']
+  ]));
+
+  const sec2 = el('section', 'ent-sec');
+  sec2.appendChild(el('h3', null, '订单流转进度'));
+  const stage = STAGE[o.status] === undefined ? 0 : STAGE[o.status];
+  const step = el('ol', 'ent-stepper');
+  ['下单', '支付', '拣货', '出库', '签收'].forEach((label, i) => {
+    step.appendChild(el('li', i < stage ? 'done' : (i === stage ? 'now' : ''), label));
+  });
+  sec2.appendChild(step);
+  wrap.appendChild(sec2);
+
+  wrap.appendChild(kvBlock('商品明细', [
+    ['商品', o.goods], ['SKU', o.sku, true], ['规格', o.spec], ['单价', money(o.unit), true],
+    ['件数', '×' + o.qty, true], ['赠品', o.gift], ['序列号', o.sn, true]
+  ]));
+
+  const sec4 = el('section', 'ent-sec');
+  sec4.appendChild(el('h3', null, '收货信息'));
+  const addr = el('div', 'note-box');
+  addr.appendChild(el('div', null, '收件人 ' + o.receiver + ' · ' + o.phone));
+  addr.appendChild(el('div', null, o.address));
+  addr.appendChild(el('div', 'sent-line', '买家留言 · ' + NOTES[o.idx % NOTES.length]));
+  sec4.appendChild(addr);
+  wrap.appendChild(sec4);
+  return wrap;
+}
+
+function detailPay(o) {
+  const wrap = el('div');
+  const sec = el('section', 'ent-sec');
+  sec.appendChild(el('h3', null, '支付流水'));
+  const ul = el('ul', 'pay-list');
+  const row = (name, amt, cls, meta) => {
+    const li = el('li');
+    const box = el('div');
+    box.appendChild(el('div', null, name));
+    box.appendChild(el('span', 'pay-meta', meta));
+    li.appendChild(box);
+    li.appendChild(el('span', 'pay-amt ' + (cls || ''), amt));
+    ul.appendChild(li);
+  };
+  row('订单应付', money(round2(o.qty * o.unit)), '', '单价 ' + money(o.unit) + ' × ' + o.qty + ' 件');
+  row('商品优惠', '-' + money(o.discount), '', '店铺满减活动，已从应付金额中扣除');
+  row('积分抵扣', '-' + money(o.points) + '（' + o.points + ' 分）', '', '会员积分按 1 分抵 1 元，已随单核销');
+  row('运费', money(o.freight), '', o.freight ? '偏远地区加收运费' : '包邮订单，运费由商家承担');
+  row('实付入账', money(o.amount), 'good', o.pay + ' · ' + o.trade.slice(0, 12) + ' · ' + o.ts);
+  if (o.status === '已取消') row('退款入账', '-' + money(o.amount), 'warn', '原路退回，预计 1 至 3 个工作日到账');
+  sec.appendChild(ul);
+  wrap.appendChild(sec);
+
+  wrap.appendChild(kvBlock('资金汇总', [
+    ['应付', money(round2(o.qty * o.unit)), true], ['实付', money(o.amount), true],
+    ['已退', o.status === '已取消' ? money(o.amount) : '¥0.00', true],
+    ['发票类型', o.invoice], ['对账批次', 'BILL-202609-' + String((o.idx % 20) + 1).padStart(2, '0'), true]
+  ]));
+  return wrap;
+}
+
+function detailTrace(o) {
+  const wrap = el('div');
+  const sec = el('section', 'ent-sec');
+  sec.appendChild(el('h3', null, '物流轨迹'));
+  sec.appendChild(traceTimeline(o));
+  wrap.appendChild(sec);
+  wrap.appendChild(kvBlock('承运信息', [
+    ['承运商', o.carrier], ['运单号', o.waybill, true], ['发货仓库', o.warehouse],
+    ['预计送达', o.eta, true],
+    ['异常标记', (o.late && !o.shipped) ? '已超时未发货，已进入异常池' : '无']
+  ]));
+  return wrap;
+}
+
+function detailOps(o) {
+  const sec = el('section', 'ent-sec');
+  sec.appendChild(el('h3', null, '操作日志（系统留痕）'));
+  const ul = el('ul', 'ent-timeline');
+  const entry = (title, meta, body, cls) => {
+    const li = el('li', cls || 'done');
+    li.appendChild(el('span', 'ent-tl-title', title));
+    li.appendChild(el('span', 'ent-tl-meta', meta));
+    li.appendChild(el('span', 'ent-tl-body', body));
+    ul.appendChild(li);
+  };
+  entry('订单创建', o.ts, '自助下单渠道创建订单，来源 ' + o.channel + '。');
+  entry('风控核验', shiftTs(o.ts, 1), o.risk === '已通过' ? '收货人实名信息核验通过，未命中黑名单与风险地址库。' : '命中风控规则（' + o.risk + '），已转人工复核。');
+  if (o.status !== '待付款') entry('支付确认', shiftTs(o.ts, 1), '支付网关回调确认成功，交易号 ' + o.trade.slice(0, 12) + '。');
+  if (o.status === '已取消') {
+    entry('买家申请取消', shiftTs(o.ts, 3), '买家提交取消申请，客服已确认无异议。', 'warn');
+    entry('订单关闭', shiftTs(o.ts, 4), '订单与库存占用已释放，退款单据自动生成。');
+  } else if (o.status === '售后处理中') {
+    entry('买家申请售后', shiftTs(o.ts, 3), '买家发起售后（' + o.after + '），出库冻结。', 'warn');
+  } else if (o.shipped) {
+    entry('仓库出库', shiftTs(o.ts, 8), o.warehouse + ' 完成拣货打包，交接 ' + o.carrier + '，运单 ' + o.waybill + '。');
+    entry('发货确认', shiftTs(o.ts, 9), '操作人 张运营（仓储主管），面单已打印并回传。');
+  } else if (o.status === '已付款待发货') {
+    entry('仓库接单', shiftTs(o.ts, 5), o.warehouse + ' 已接单，等待波次拣货。');
+  }
+  const adv = (TRACE[o.no] && TRACE[o.no].advance) || 0;
+  if (adv) entry('人工推进轨迹', o.ts, '运营在订单详情里手动推进了 ' + adv + ' 步物流轨迹（演示动作）。', 'now');
+  sec.appendChild(ul);
+  return sec;
+}
+
+function detailNotes(o) {
+  const wrap = el('div');
+  const sec = el('section', 'ent-sec');
+  sec.appendChild(el('h3', null, '内部备注'));
+  const b1 = el('div', 'note-box');
+  b1.appendChild(el('div', null, '商家备注 · ' + o.remark));
+  sec.appendChild(b1);
+  const b2 = el('div', 'note-box warn');
+  b2.appendChild(el('div', null, '仓储备注 · 该订单由 ' + o.warehouse + ' 负责，交接承运商 ' + o.carrier +
+    '；出库前请核对买家留言中的派送要求与内部标签（' + (o.tags.length ? o.tags.join('、') : '无') + '）。'));
+  sec.appendChild(b2);
+  wrap.appendChild(sec);
+
+  const sec2 = el('section', 'ent-sec');
+  sec2.appendChild(el('h3', null, '客服跟进记录'));
+  const ul = el('ul', 'ent-timeline');
+  const c1 = el('li', 'done');
+  c1.appendChild(el('span', 'ent-tl-title', '客服工单已登记'));
+  c1.appendChild(el('span', 'ent-tl-meta', shiftTs(o.ts, 2)));
+  c1.appendChild(el('span', 'ent-tl-body', '坐席 王倩 登记工单 CS-2026-' + String(9000 + o.idx) + '，买家咨询发货时间与发票开具方式。'));
+  ul.appendChild(c1);
+  const c2 = el('li', o.service === '已回复' ? 'done' : 'now');
+  c2.appendChild(el('span', 'ent-tl-title', o.service));
+  c2.appendChild(el('span', 'ent-tl-meta', shiftTs(o.ts, 3)));
+  c2.appendChild(el('span', 'ent-tl-body', o.service === '已回复'
+    ? '已告知买家当前进度（' + o.status + '），电子发票随包裹发出后同步开票。'
+    : '待仓库确认出库时间后回复买家，承诺 24 小时内给出明确答复。'));
+  ul.appendChild(c2);
+  sec2.appendChild(ul);
+  wrap.appendChild(sec2);
+  return wrap;
+}
+
+function openDetail(no) {
+  const o = state.orders.find((x) => x.no === no);
+  if (!o) return;
+  const renders = [
+    () => detailOverview(o),
+    () => detailPay(o),
+    () => detailTrace(o),
+    () => detailOps(o),
+    () => detailNotes(o)
+  ];
+
+  const foot = document.createDocumentFragment();
+  const upd = el('button', 'btn', '模拟物流更新');
+  upd.type = 'button';
+  const syncUpd = () => {
+    const end = traceNow(o) >= traceSteps(o).length - 1;
+    upd.textContent = end ? '物流已完结' : '模拟物流更新';
+    upd.disabled = end;
+  };
+  syncUpd();
+  upd.onclick = () => {
+    if (!TRACE[o.no]) TRACE[o.no] = { advance: 0 };
+    TRACE[o.no].advance += 1;
+    refresh();
+    toast('演示：已推进一步物流轨迹（' + o.no + '）');
+  };
+  foot.appendChild(upd);
+  const prt = el('button', 'btn', '打印面单');
+  prt.type = 'button';
+  prt.onclick = () => toast('演示：不会真的打印面单（' + o.no + '）');
+  foot.appendChild(prt);
+  const cp = el('button', 'btn', '复制订单号');
+  cp.type = 'button';
+  cp.onclick = () => toast('演示：订单号 ' + o.no + ' 已展示在标题栏');
+  foot.appendChild(cp);
+
+  /* 轨迹推进后只重画「当前选中的那个 tab」，不整抽屉重开 */
+  function refresh() {
+    const tabsEl = document.querySelector('.ent-drawer-tabs');
+    const body = document.querySelector('.ent-drawer-body');
+    if (!tabsEl || !body) return;
+    let idx = 0;
+    Array.prototype.forEach.call(tabsEl.children, (b, i) => {
+      if (b.getAttribute('aria-selected') === 'true') idx = i;
+    });
+    Enterprise.clear(body);
+    body.appendChild(renders[idx]());
+    syncUpd();
+  }
+
+  Enterprise.drawer.open({
+    title: o.no,
+    sub: o.buyer + ' · ' + o.level + '会员 · ' + o.status,
+    tabs: [
+      { label: '订单概览', render: renders[0] },
+      { label: '支付与对账', render: renders[1] },
+      { label: '物流轨迹', render: renders[2] },
+      { label: '操作日志', render: renders[3] },
+      { label: '备注与客服', render: renders[4] }
+    ],
+    footer: foot
+  });
+}
+
+/* ---------- 渲染：表格行 / 卡片 / 单元格零件 ---------- */
+function levelTag(o) {
+  const s = el('span', 'lv ' + (LEVEL_CLS[o.level] || 'p'), o.level);
+  s.setAttribute('data-level', o.level);
+  return s;
+}
+
+function progressBar(o) {
+  const wrap = el('div');
+  const stage = STAGE[o.status] === undefined ? 0 : STAGE[o.status];
+  const pct = Math.round((stage / STAGE_MAX) * 100);
+  const bar = el('div', 'prog' + (o.status === '已发货' || o.status === '已签收' ? ' good' : ''));
+  const fill = el('i');
+  fill.style.width = pct + '%';
+  bar.appendChild(fill);
+  wrap.appendChild(bar);
+  wrap.appendChild(el('span', 'prog-meta', '出库进度 ' + stage + ' / ' + STAGE_MAX + ' · ' + pct + '%'));
+  return wrap;
+}
+
+/* 每行唯一的「发货」按钮（文案由状态决定，全表只有「已付款待发货」这一种状态叫发货） */
+function primaryBtn(o) {
+  const label = PRIMARY[o.status] || '处理';
+  const b = el('button', label === '发货' ? 'btn ship' : 'btn mini', label);
+  b.type = 'button';
+  b.setAttribute('aria-label', label);
+  b.setAttribute('data-order-no', o.no);
+  b.disabled = !!o.shipped;
+  b.onclick = () => {
+    if (label === '发货') shipOrder(o.no);
+    else toast('演示：该订单当前状态为「' + o.status + '」，无需发货');
+  };
+  return b;
+}
+
+function buildRow(o) {
+  const tr = el('tr', 'order' + (o.shipped ? ' shipped' : '') + (o.fresh ? ' ent-flash' : ''));
+  tr.id = 'order-' + o.no;
+  tr.setAttribute('data-order-no', o.no);
+
+  const td0 = el('td', 'c-pick');
+  const pick = document.createElement('input');
+  pick.type = 'checkbox';
+  pick.checked = isPicked(o.no);
+  pick.setAttribute('aria-label', '选择本行订单');
+  pick.onchange = () => {
+    state.picked = isPicked(o.no) ? state.picked.filter((x) => x !== o.no) : state.picked.concat([o.no]);
+    render();
+  };
+  td0.appendChild(pick);
+  tr.appendChild(td0);
+
+  const td1 = el('td');
+  const noBtn = el('button', 'no', o.no);
+  noBtn.type = 'button';
+  noBtn.setAttribute('aria-label', o.no);
+  noBtn.title = '查看订单详情';
+  noBtn.onclick = () => openDetail(o.no);
+  td1.appendChild(noBtn);
+  td1.appendChild(el('span', 'sub plain', '下单时间 ' + o.ts));
+  td1.appendChild(el('span', 'sub plain', o.channel + ' · ' + o.pay));
+  td1.appendChild(el('span', 'sub opt', '交易号 ' + o.trade));
+  td1.appendChild(el('span', 'sub opt', '仓库 ' + o.warehouse));
+  tr.appendChild(td1);
+
+  const td2 = el('td');
+  td2.appendChild(el('span', 'buyer', o.buyer));
+  td2.appendChild(levelTag(o));
+  td2.appendChild(el('span', 'masked', '手机 ' + o.phone));
+  td2.appendChild(el('span', 'sub plain', '共 ' + state.orders.filter((x) => x.buyer === o.buyer).length + ' 笔订单'));
+  td2.appendChild(el('span', 'sub opt', '积分 ' + o.points + ' 分'));
+  tr.appendChild(td2);
+
+  const td3 = el('td');
+  td3.appendChild(el('span', 'goods', o.goods));
+  td3.appendChild(el('span', 'spec', 'SKU ' + o.sku + ' · 规格：' + o.spec));
+  td3.appendChild(el('span', 'sub plain', '单价 ' + money(o.unit) + ' ×' + o.qty + ' · 赠品 ' + o.gift));
+  td3.appendChild(el('span', 'sub opt', '序列号 ' + o.sn));
+  td3.appendChild(el('span', 'note', '买家留言：' + NOTES[o.idx % NOTES.length]));
+  tr.appendChild(td3);
+
+  const td4 = el('td');
+  td4.appendChild(el('span', 'amount', money(o.amount)));
+  td4.appendChild(el('span', 'sub plain', '运费 ' + money(o.freight) + ' · 优惠 -' + money(o.discount)));
+  td4.appendChild(el('span', 'sub plain', '积分抵扣 ' + o.points + ' 分'));
+  td4.appendChild(el('span', 'sub opt', '应付 ' + money(round2(o.qty * o.unit))));
+  tr.appendChild(td4);
+
+  const td5 = el('td');
+  td5.appendChild(el('span', 'addr', '收件人 ' + o.receiver + ' · ' + o.phone));
+  td5.appendChild(el('span', 'note', o.address));
+  td5.appendChild(el('span', 'sub plain', o.carrier + ' · 运单 ' + o.waybill));
+  td5.appendChild(el('span', 'sub opt', '预计送达 ' + o.eta));
+  tr.appendChild(td5);
+
+  const td6 = el('td');
+  td6.appendChild(el('span', 'sub plain', '发票 ' + o.invoice));
+  td6.appendChild(el('span', 'sub plain', '风控 ' + o.risk + ' · 售后 ' + o.after));
+  td6.appendChild(el('span', 'sub plain', '客服 ' + o.service));
+  const tagBox = el('div', 'ent-chips');
+  if (o.tags.length) o.tags.forEach((t) => tagBox.appendChild(el('span', 'ent-tag' + (t === '催单' ? ' warn' : (t === '高价值' ? ' info' : '')), t)));
+  else tagBox.appendChild(el('span', 'ent-tag', '无标签'));
+  td6.appendChild(tagBox);
+  tr.appendChild(td6);
+
+  const td7 = el('td');
+  const stc = el('div', 'st-cell');
+  const badge = el('span', 'badge ' + (BADGE[o.status] || ''), o.status);
+  badge.setAttribute('data-status', o.status);
+  stc.appendChild(badge);
+  if (o.late && !o.shipped) stc.appendChild(el('span', 'ent-tag warn', '超时未发货'));
+  if (o.shipped) stc.appendChild(el('span', 'ent-tag good', '本轮已发货'));
+  if (o.urgent) stc.appendChild(el('span', 'ent-tag bad', '加急'));
+  stc.appendChild(progressBar(o));
+  td7.appendChild(stc);
+  tr.appendChild(td7);
+
+  const td8 = el('td', 'c-ops');
+  const ops = el('div', 'ops');
+  ops.appendChild(primaryBtn(o));
+  const prt = el('button', 'btn mini', '打印面单');
+  prt.type = 'button';
+  prt.setAttribute('aria-label', '打印面单 ' + o.no);
+  prt.onclick = () => toast('演示：不会真的打印面单（' + o.no + '）');
+  ops.appendChild(prt);
+  const dtl = el('button', 'btn mini', '订单详情');
+  dtl.type = 'button';
+  dtl.setAttribute('aria-label', '查看订单详情 ' + o.no);
+  dtl.onclick = () => openDetail(o.no);
+  ops.appendChild(dtl);
+  const exp = el('button', 'btn mini', isExpanded(o.no) ? '收起' : '展开');
+  exp.type = 'button';
+  exp.setAttribute('aria-label', (isExpanded(o.no) ? '收起' : '展开') + ' ' + o.no);
+  exp.onclick = () => {
+    state.expanded = isExpanded(o.no) ? state.expanded.filter((x) => x !== o.no) : state.expanded.concat([o.no]);
+    render();
+  };
+  ops.appendChild(exp);
+  td8.appendChild(ops);
+  tr.appendChild(td8);
+
+  return tr;
+}
+
+function buildCard(o) {
+  const c = el('article', 'ocard' + (o.shipped ? ' shipped' : '') + (o.fresh ? ' ent-flash' : ''));
+  c.setAttribute('aria-label', '订单卡片 ' + o.no);
+
+  const top = el('div', 'ocard-top');
+  const noBtn = el('button', 'no', o.no);
+  noBtn.type = 'button';
+  noBtn.setAttribute('aria-label', o.no);
+  noBtn.onclick = () => openDetail(o.no);
+  top.appendChild(noBtn);
+  top.appendChild(el('span', 'badge ' + (BADGE[o.status] || ''), o.status));
+  if (o.urgent) top.appendChild(el('span', 'ent-tag bad', '加急'));
+  top.appendChild(el('span', 'spacer'));
+  top.appendChild(progressBar(o));
+  c.appendChild(top);
+
+  const l1 = el('div', 'ocard-line');
+  l1.appendChild(el('span', null, o.buyer));
+  l1.appendChild(levelTag(o));
+  l1.appendChild(el('span', null, '手机 ' + o.phone));
+  l1.appendChild(el('span', null, o.channel));
+  c.appendChild(l1);
+  c.appendChild(el('div', 'ocard-goods', o.goods));
+
+  const grid = el('div', 'ocard-grid');
+  const pair = (k, v) => {
+    const d = el('div');
+    d.appendChild(document.createTextNode(k + ' '));
+    d.appendChild(el('b', null, v));
+    grid.appendChild(d);
+  };
+  pair('SKU', o.sku);
+  pair('规格', o.spec);
+  pair('实付', money(o.amount));
+  pair('单价 × 件数', money(o.unit) + ' ×' + o.qty);
+  pair('仓库', o.warehouse);
+  pair('承运商', o.carrier);
+  pair('运单', o.waybill);
+  pair('预计送达', o.eta);
+  pair('发票', o.invoice);
+  pair('风控 / 售后', o.risk + ' / ' + o.after);
+  pair('客服', o.service);
+  pair('赠品', o.gift);
+  c.appendChild(grid);
+
+  const foot = el('div', 'ocard-foot');
+  foot.appendChild(primaryBtn(o));
+  const dtl = el('button', 'btn mini', '订单详情');
+  dtl.type = 'button';
+  dtl.setAttribute('aria-label', '查看订单详情 ' + o.no);
+  dtl.onclick = () => openDetail(o.no);
+  foot.appendChild(dtl);
+  if (o.tags.length) o.tags.forEach((t) => foot.appendChild(el('span', 'ent-tag' + (t === '催单' ? ' warn' : ''), t)));
+  c.appendChild(foot);
+  return c;
+}
+
+function tabCount(id) {
+  const s = state.orders;
+  if (id === 'pay') return s.filter((o) => o.status === '待付款').length;
+  if (id === 'ship') return s.filter((o) => o.status === '已付款待发货').length;
+  if (id === 'after') return s.filter((o) => o.status === '售后处理中').length;
+  if (id === 'risk') return s.filter((o) => o.late && !o.shipped).length;
+  if (id === 'urgent') return s.filter((o) => o.urgent).length;
+  return s.length;
+}
+
+function renderTabs() {
+  const host = $('tabBar');
+  host.innerHTML = '';
+  TABS.forEach((t) => {
+    const b = el('button');
+    b.type = 'button';
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', state.tab === t.id ? 'true' : 'false');
+    b.appendChild(el('span', null, t.label));
+    b.appendChild(el('span', 'tcount', String(tabCount(t.id))));
+    b.onclick = () => {
+      state.tab = t.id;
+      state.picked = [];
+      state.page = 1;
+      render();
+      toast('已切换到「' + t.label + '」分组');
+    };
+    host.appendChild(b);
+  });
+}
+
+function renderApplied() {
+  const host = $('appliedHost');
+  host.innerHTML = '';
+  const conds = conditions();
+  if (!conds.length) {
+    host.appendChild(el('span', 'applied-none', '无筛选条件'));
+    return;
+  }
+  conds.forEach((c) => {
+    const b = el('button', 'ent-chip on', c.label);
+    b.type = 'button';
+    b.setAttribute('aria-label', '移除条件 ' + c.label);
+    b.appendChild(el('span', 'ent-chip-x', '×'));
+    b.onclick = () => {
+      c.clear();
+      state.page = 1;
+      render();
+      toast('已移除筛选条件 ' + c.label);
+    };
+    host.appendChild(b);
+  });
+}
+
+function renderPager(total) {
+  const pages = pageCount();
+  $('firstPage').disabled = state.page <= 1;
+  $('prevPage').disabled = state.page <= 1;
+  $('nextPage').disabled = state.page >= pages;
+  $('lastPage').disabled = state.page >= pages;
+  const nums = $('pageNums');
+  nums.innerHTML = '';
+  for (let i = 1; i <= pages; i++) {
+    const b = el('button', 'pg', String(i));
+    b.type = 'button';
+    b.setAttribute('aria-label', '第 ' + i + ' 页');
+    if (i === state.page) b.setAttribute('aria-current', 'page');
+    b.onclick = () => { state.page = i; render(); };
+    nums.appendChild(b);
+  }
+  const from = total ? (state.page - 1) * state.pageSize + 1 : 0;
+  const to = Math.min(state.page * state.pageSize, total);
+  $('pageMeta').textContent = '第 ' + state.page + ' / ' + pages + ' 页 · 当前显示 ' + from + ' 至 ' + to +
+    ' 条 · 筛选后共 ' + total + ' 笔';
+}
+
+function render() {
+  const list = sortedList(visible());
+  /* 先把页码夹回合法范围，再取当页 —— 否则筛掉一批后可能停在一张不存在的页上 */
+  const pages = Math.max(1, Math.ceil(list.length / state.pageSize));
+  if (state.page > pages) state.page = pages;
+  if (state.page < 1) state.page = 1;
+  const pageRows = pageList();
+
+  const body = $('orderBody');
+  body.innerHTML = '';
+  pageRows.forEach((o) => {
+    body.appendChild(buildRow(o));
+    if (isExpanded(o.no)) body.appendChild(expandRow(o));
+  });
+
+  const cardHost = $('cardHost');
+  cardHost.innerHTML = '';
+  pageRows.forEach((o) => cardHost.appendChild(buildCard(o)));
+
+  $('emptyState').hidden = list.length > 0;
+  $('tableWrap').hidden = state.view !== 'table' || list.length === 0;
+  cardHost.hidden = state.view !== 'card' || list.length === 0;
+
+  const shipped = state.orders.filter((o) => o.shipped).length;
+  const kept = (state.status !== '全部状态') ? list.filter((o) => o.shipped).length : 0;
+  $('listMeta').textContent = '共 ' + list.length + ' 笔'
+    + (kept ? '（含本轮已发货 ' + kept + ' 笔，便于核对）' : '')
+    + ' · 待出库 ' + state.orders.filter((o) => o.status === '已付款待发货').length + ' 笔'
+    + ' · 加急 ' + state.orders.filter((o) => o.urgent).length + ' 笔'
+    + ' · 超时未发货 ' + state.orders.filter((o) => o.late && !o.shipped).length + ' 笔'
+    + ' · 大额 ' + state.orders.filter((o) => o.amount >= BIG_AMOUNT).length + ' 笔';
+
+  $('filterHint').textContent = filtersActive() ? '已启用筛选条件' : '未使用任何筛选';
+
+  $('shipCount').textContent = String(shipped);
+  $('shipLog').textContent = state.log.length ? '发货记录：' + state.log.join('、') : '暂无发货记录';
+
+  $('toolbarMeta').textContent = '排序字段 ' + sortLabel() + ' · ' + (state.sortDir === 'desc' ? '降序' : '升序') +
+    ' · 每页 ' + state.pageSize + ' 条';
+
+  renderTabs();
+  renderBulk();
+  renderApplied();
+  renderPager(list.length);
+
+  /* chips / 开关 / 视图的选中态：由 state 推出，不另存 */
+  Array.prototype.forEach.call($('payChips').children, (b) => {
+    b.classList.toggle('on', state.pays.indexOf(b.dataset.pay) !== -1);
+  });
+  Array.prototype.forEach.call($('rangeChips').children, (b) => {
+    b.classList.toggle('on', b.dataset.range === state.rangeChip);
+  });
+  Array.prototype.forEach.call($('amtChips').children, (b) => {
+    b.classList.toggle('on', b.dataset.amt === state.amountChip);
+  });
+  Array.prototype.forEach.call($('viewChips').children, (b) => {
+    b.classList.toggle('on', viewActive(b.dataset.view));
+  });
+
+  const sel = pageRows.filter((o) => isPicked(o.no)).length;
+  $('pickAll').checked = pageRows.length > 0 && sel === pageRows.length;
+  $('pickAll').indeterminate = sel > 0 && sel < pageRows.length;
+  $('pickAll').disabled = pageRows.length === 0;
+}
+
+function sortLabel() {
+  const hit = SORTS.find((s) => s[0] === state.sortKey);
+  return hit ? hit[1] : '下单时间';
+}
+
+/* ---------- 发货 ---------- */
+function shipOrder(no, silent) {
+  const cur = state.orders.find((o) => o.no === no);
+  if (!cur || cur.shipped) return;
+  state.orders = state.orders.map((o) => (o.no === no ? Object.assign({}, o, { shipped: true, status: '已发货' }) : o));
+  state.log = state.log.concat(no);
+  render();
+  Enterprise.bumpKpi($('entKpis'), '待发货', -1);
+  if (!silent) toast('已发货：订单 ' + no + '（' + cur.buyer + ' · ' + cur.goods.slice(0, 16) + '…）');
+}
+
+/* ---------- 顶部与筛选交互 ---------- */
+Array.prototype.forEach.call(document.querySelectorAll('.navlink'), (a) => {
+  a.addEventListener('click', (e) => {
+    e.preventDefault();
+    toast('演示页：当前仅「订单中心」有数据，其它菜单不可用');
+  });
+});
+
+/* 任何筛选变化都回到第 1 页 —— 否则会停在一张已经不存在的页码上 */
+function onFilterChange() { state.page = 1; render(); }
+
+$('kw').addEventListener('input', (e) => { state.query = e.target.value; onFilterChange(); });
+$('kw').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); onFilterChange(); toast('已按关键词查询：共 ' + visible().length + ' 笔'); }
+});
+$('scopeSel').addEventListener('change', (e) => { state.scope = e.target.value; onFilterChange(); });
+$('statusSel').addEventListener('change', (e) => { state.status = e.target.value; onFilterChange(); });
+$('levelSel').addEventListener('change', (e) => { state.level = e.target.value; onFilterChange(); });
+$('channelSel').addEventListener('change', (e) => { state.channel = e.target.value; onFilterChange(); });
+$('fromDate').addEventListener('change', (e) => { state.from = e.target.value.trim(); state.rangeChip = 'all'; onFilterChange(); });
+$('toDate').addEventListener('change', (e) => { state.to = e.target.value.trim(); state.rangeChip = 'all'; onFilterChange(); });
+$('amtMin').addEventListener('change', (e) => { state.amountMin = e.target.value.trim(); state.amountChip = 'all'; onFilterChange(); });
+$('amtMax').addEventListener('change', (e) => { state.amountMax = e.target.value.trim(); state.amountChip = 'all'; onFilterChange(); });
+$('warehouseSel').addEventListener('change', (e) => { state.warehouse = e.target.value; onFilterChange(); });
+$('carrierSel').addEventListener('change', (e) => { state.carrier = e.target.value; onFilterChange(); });
+$('invoiceSel').addEventListener('change', (e) => { state.invoice = e.target.value; onFilterChange(); });
+$('riskSel').addEventListener('change', (e) => { state.risk = e.target.value; onFilterChange(); });
+$('afterSel').addEventListener('change', (e) => { state.after = e.target.value; onFilterChange(); });
+$('serviceSel').addEventListener('change', (e) => { state.service = e.target.value; onFilterChange(); });
+$('etaSel').addEventListener('change', (e) => { state.eta = e.target.value; onFilterChange(); });
+$('urgentOnly').addEventListener('change', (e) => { state.urgentOnly = e.target.checked; onFilterChange(); });
+$('giftOnly').addEventListener('change', (e) => { state.giftOnly = e.target.checked; onFilterChange(); });
+$('lateOnly').addEventListener('change', (e) => { state.lateOnly = e.target.checked; onFilterChange(); });
+$('vipOnly').addEventListener('change', (e) => { state.vipOnly = e.target.checked; onFilterChange(); });
+
+$('queryBtn').onclick = () => {
+  state.query = $('kw').value;
+  state.from = $('fromDate').value.trim();
+  state.to = $('toDate').value.trim();
+  state.amountMin = $('amtMin').value.trim();
+  state.amountMax = $('amtMax').value.trim();
+  state.page = 1;
+  render();
+  toast('查询完成：当前条件下共 ' + visible().length + ' 笔订单');
+};
+
+$('filterResetBtn').onclick = () => {
+  clearFilters();
+  render();
+  toast('已重置筛选条件，恢复全部 18 笔订单');
+};
+
+$('resetBtn').onclick = () => {
+  hardReset();
+  toast('演示已重置为初始 18 笔订单');
+};
+
+$('sortSel').addEventListener('change', (e) => {
+  const hit = SORTS.find((s) => s[1] === e.target.value);
+  state.sortKey = hit ? hit[0] : 'ts';
+  state.page = 1;
+  render();
+  toast('已按「' + e.target.value + '」' + (state.sortDir === 'desc' ? '降序' : '升序') + '排列');
+});
+$('dirBtn').onclick = () => {
+  state.sortDir = state.sortDir === 'desc' ? 'asc' : 'desc';
+  $('dirBtn').textContent = state.sortDir === 'desc' ? '降序 ↓' : '升序 ↑';
+  state.page = 1;
+  render();
+  toast('已切换为' + (state.sortDir === 'desc' ? '降序' : '升序'));
+};
+$('pageSizeSel').addEventListener('change', (e) => {
+  state.pageSize = parseInt(e.target.value, 10) || 20;
+  state.page = 1;
+  render();
+});
+
+/* 密度切换：只切 class，不改任何文本以外的结构 */
+$('densityBtn').onclick = () => {
+  const dense = document.querySelector('table.orders').classList.toggle('dense');
+  state.density = dense ? 'compact' : 'cozy';
+  $('densityBtn').textContent = '密度 ' + (dense ? '紧凑' : '舒适');
+  toast(dense ? '已切换为紧凑密度' : '已切换为舒适密度');
+};
+
+/* 卡片 / 表格视图切换：只切 hidden，不重建 DOM 文本 */
+$('cardViewBtn').onclick = () => {
+  state.view = state.view === 'card' ? 'table' : 'card';
+  $('cardViewBtn').textContent = state.view === 'card' ? '表格视图' : '卡片视图';
+  render();
+  toast(state.view === 'card' ? '已切换到卡片视图' : '已切换到表格视图');
+};
+
+$('exportBtn').onclick = () => toast('演示：不会真的导出文件（当前 ' + visible().length + ' 笔）');
+
+/* 刷新走骨架屏：这是**用户触发**的动作，不会自己发生，因此不影响快照确定性 */
+$('refreshBtn').onclick = () => {
+  const wrap = $('tableWrap');
+  wrap.hidden = true;
+  Enterprise.skeleton($('tableHost'), 420, () => {
+    render();
+    toast('已同步订单数据（最近同步 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + '）');
+  });
+};
+
+$('pickAll').addEventListener('change', (e) => {
+  const rows = pageList();
+  state.picked = e.target.checked ? rows.map((o) => o.no) : [];
+  render();
+});
+
+$('firstPage').onclick = () => { state.page = 1; render(); };
+$('prevPage').onclick = () => { state.page = Math.max(1, state.page - 1); render(); };
+$('nextPage').onclick = () => { state.page = Math.min(pageCount(), state.page + 1); render(); };
+$('lastPage').onclick = () => { state.page = pageCount(); render(); };
+
+/* 便于脚本化核对：window.__ordersComplex.shipped / .log / .orders */
+window.__ordersComplex = {
+  get shipped() { return state.orders.filter((o) => o.shipped).map((o) => o.no); },
+  get log() { return state.log.slice(); },
+  get orders() { return state.orders.map((o) => ({ no: o.no, goods: o.goods, status: o.status, buyer: o.buyer, level: o.level })); }
+};
+
+/* ---------- 企业外壳 ---------- */
+Enterprise.mountShell({
+  rail: {
+    logo: '云', modules: [
+      { id: 'orders', icon: '🧾', label: '订单', active: true, badge: 8 },
+      { id: 'goods', icon: '📦', label: '商品' },
+      { id: 'stock', icon: '🏬', label: '库存' },
+      { id: 'finance', icon: '💰', label: '财务' },
+      { id: 'service', icon: '🎧', label: '客服', badge: 3 },
+      { sep: true },
+      { id: 'report', icon: '📊', label: '报表' }
+    ],
+    onPick: (m) => {
+      if (m.active) return;
+      toast('演示页：仅「订单」模块可用，「' + m.label + '」未实现');
+    }
+  },
+  kpis: KPI_ITEMS,
+  tickerHost: 'entTickerHost',
+  ticker: '2026 年双 11 大促首波预售已开启。自 10 月 31 日起各仓停止接单时间调整为 22 点，超时未发货订单将自动进入异常池并触发客服回访；中通快递华东路由将于 10 月 28 日凌晨 02:00–04:00 维护，期间面单打印可能失败，请提前切换承运商。',
+  notices: [
+    { icon: '⚠', title: '3 笔订单已超时未发货', body: '最早一笔 ORD-20260920-5299 已滞留 52 小时，请优先安排出库。', time: '09-24 08:40', unread: true },
+    { icon: '🧾', title: '大额订单待二次复核', body: 'ORD-20260923-5222 实付超过 2000 元，已触发人工复核流程。', time: '09-24 07:55', unread: true },
+    { icon: '🚚', title: '承运商面单额度不足', body: '中通快递电子面单剩余 1,240 张，低于 3 日用量，请及时充值。', time: '09-23 19:10', unread: true },
+    { icon: '✅', title: '昨日批次已全部出库', body: '9 月 23 日应出库 31 笔订单已全部交接承运商，无滞留。', time: '09-24 06:30', unread: false },
+    { icon: '🛡', title: '风控命中一笔异常订单', body: 'ORD-20260921-5278 的收货地址与历史订单差异较大，已转入人工审核。', time: '09-23 15:26', unread: false }
+  ],
+  user: {
+    initial: '张', name: '张运营', role: '仓储主管',
+    email: 'admin@bookstore.example.com',
+    items: [
+      { icon: '👤', label: '个人资料', onPick: () => toast('演示：个人资料页未实现') },
+      { icon: '📈', label: '我的绩效看板', onPick: () => toast('演示：绩效看板页未实现') },
+      { icon: '🏬', label: '切换发货仓库', onPick: () => toast('演示：仓库切换未实现') },
+      { sep: true },
+      { icon: '↩', label: '退出登录', onPick: () => toast('演示：不会真实退出') }
+    ]
+  },
+  sim: {
+    label: '实时模拟', onLabel: '模拟中', everyMs: 5000,
+    hint: '打开后每 5 秒进入 1 笔新订单（最多 3 笔），KPI 与订单列表会自行变化'
+  },
+  statusbar: {
+    left: [{ dot: true, text: '订单服务正常' }, { text: '在线坐席 8 位' }, { text: '待处理工单 12 单' }],
+    right: [{ text: '云上书城 订单中台 v4.2.0' }, { text: '接口延迟 18ms' }]
+  },
+  searchSelector: '#kw',
+  onReady: ({ sim }) => {
+    /* 实时模拟：逐笔进入新订单。这是**唯一**会自己改页面的机制，且必须由用户显式打开。
+     * 单号、买家、金额全在固定脚本里，不随机 —— 演示要可复述、可核对。 */
+    sim.subscribe((step) => {
+      if (step > INCOMING.length) {
+        Enterprise.toast({ icon: '✔', title: '模拟已跑完固定脚本', meta: '共进入 ' + INCOMING.length + ' 笔新订单' });
+        return;
+      }
+      /* 新的一笔到达时把上一笔的高亮摘掉 —— 用状态做，不另起定时器 */
+      state.orders = state.orders.map((o) => (o.fresh ? Object.assign({}, o, { fresh: false }) : o));
+      const src = INCOMING[step - 1];
+      const o = Object.assign({
+        id: 100 + step, idx: step, shipped: false, fresh: true,
+        trade: '42009' + String(18307461205 + (step + 40) * 13337),
+        waybill: 'SF' + String(880100 + step * 17),
+        eta: shiftTs(src.ts, 32).slice(0, 10),
+        amount: round2(src.qty * src.unit - src.discount),
+        warehouse: WAREHOUSES[1 + (step % 5)], carrier: CARRIERS[1 + (step % 5)],
+        late: false
+      }, src);
+      state.orders = [o].concat(state.orders);
+      state.arrivals = step;
+      render();
+      Enterprise.bumpKpi($('entKpis'), '今日订单', 1);
+      Enterprise.toast({ icon: '🧾', title: '新订单 · ' + o.buyer, meta: o.no + ' · ' + money(o.amount) + ' · ' + o.status });
+    });
+  }
+});
+
+fillSelects();
+reset();
+</script>
+</body>
+</html>

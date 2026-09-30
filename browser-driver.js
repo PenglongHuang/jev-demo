@@ -31,10 +31,124 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const net = require('net');
 const path = require('path');
+const { createInprocBackend } = require('./browser-inproc.js');
+
+/* ---------------- 后端选择（两条后端：进程内 playwright-core / playwright-cli） ----------------
+ * 进程内是默认：每条命令不再新起一个 node 进程，实测把每步机械开销从 ~8.4s 压到 ~1.0s
+ * （见 browser-inproc.js 文件头）。playwright-cli 那条完整保留作兜底 ——
+ * 环境变量 JEVDEMO_BACKEND=cli 或 UI 上的「驱动后端」都能切回去。
+ *
+ * 选择只认三处，优先级从高到低：open 的 opts.backend（UI 传的）→ 环境变量 → 默认 inproc。
+ * 非法值一律按默认走（不抛错：一个拼错的字符串不该让整轮跑不起来）。 */
+const BACKENDS = { inproc: true, cli: true };
+const DEFAULT_BACKEND = 'inproc';
+function resolveBackend(o) {
+  const explicit = o && o.backend != null ? String(o.backend) : '';
+  if (BACKENDS[explicit]) return explicit;
+  const env = process.env.JEVDEMO_BACKEND != null ? String(process.env.JEVDEMO_BACKEND) : '';
+  if (BACKENDS[env]) return env;
+  return DEFAULT_BACKEND;
+}
+
+const INPROC_HINT = '（执行 npm i playwright-core 安装，或把「运行参数 → 驱动后端」切回 playwright-cli）';
+
+/* 进程内后端实例：懒建一次。共享面在这里注入 —— 白名单校验、快照可用性判定、矩形片段
+ * 与解析、模式计划、错误翻译、CDP 端点发现**全部取自本文件**，browser-inproc.js 里
+ * 不再写第二份（两套行为迟早漂移，而白名单与 ref 解析漂移是静默的那种错）。 */
+let inprocInstance = null;
+let inprocTried = false;
+function inprocBackend() {
+  if (inprocTried) return inprocInstance;
+  inprocTried = true;
+  try {
+    inprocInstance = createInprocBackend({
+      getDataDir: () => dataDir,
+      ACTION_TIMEOUT_MS: ACTION_TIMEOUT_MS,
+      SETTLE_MS: SETTLE_MS, SETTLE_REQ_CAP_MS: SETTLE_REQ_CAP_MS,
+      SETTLE_NAV_MS: SETTLE_NAV_MS, SNAPSHOT_CAP_MS: SNAPSHOT_CAP_MS,
+      REF_RE: REF_RE, OPS: OPS, BROWSERS: BROWSERS, MODES: MODES,
+      PROFILE_DIR: PROFILE_DIR, CDP_CHANNELS: CDP_CHANNELS,
+      SNAPSHOT_TRUSTED_ACTIONS: SNAPSHOT_TRUSTED_ACTIONS, HTTP_URL_RE: HTTP_URL_RE,
+      validateAct: validateAct, usableSnapshot: usableSnapshot, summarizeError: summarizeError,
+      parseRectCsv: parseRectCsv, parseTabs: parseTabs, parseWindowSize: parseWindowSize,
+      RECT_SNIPPET: RECT_SNIPPET, uploadPathAllowed: uploadPathAllowed,
+      buildMaximizedConfig: buildMaximizedConfig, openPlan: openPlan,
+      tabSelectRefusal: tabSelectRefusal,
+      looksLikeBrowserMissing: looksLikeBrowserMissing,
+      humanBrowserError: humanBrowserError, humanProfileError: humanProfileError,
+      humanCdpProbeError: humanCdpProbeError, humanCdpAttachError: humanCdpAttachError,
+      cdpProbe: cdpProbe, channelPortFile: channelPortFile, resolveHttpTarget: resolveHttpTarget,
+    });
+  } catch (e) {
+    inprocInstance = null;
+  }
+  return inprocInstance;
+}
+
+/* 这条会话现在归哪条后端：**以进程内后端自己的会话表为唯一判据**（inst.state —— 它手上
+ * 还留着这个会话就归它），不再在 sessionState 里另存一份后端字段（两份状态迟早不同步）。
+ *
+ * 判据必须是「会话还在不在它手上」，而**不是** isOpen 那个「页还活着吗」——
+ * 这两件事在真实场景里会分开：用户在专用标签页上手动关掉它（或那一页崩了）时，进程内
+ * 那边的会话仍在、只是 st.page.isClosed() 为真。按 isOpen 判就会误判成「这条会话不归
+ * 进程内」→ close 走 CLI → CLI 侧压根没有这个会话（它的 close 是空操作，还回 ok）→
+ * 那个真实窗口与 isolated 的临时 profile 目录永远收不了尾（下次 open 撞 profile 占用），
+ * 而 inproc 那条能把「关页 / 关上下文 / 删临时 profile / 清会话表」一次做全的 close
+ * 从头到尾没被调用过；act / snapshot 这些入口也会被推去 CLI，报出 CLI 的「没有这个会话」，
+ * 而不是前端认得、据此整轮停手的「专用标签页已不在」。
+ * isOpen 的对外语义保持原样（它表达「页还在、能继续操作」，前端与守卫依赖这个判断），
+ * 两件事分开问：liveness 走 isOpen，归属走 state。
+ *
+ * 没开的会话一律走 CLI —— 那条路会给出「请先 open」的人话报错，与改动前一致。 */
+function useInproc(session) {
+  const inst = inprocBackend();
+  if (!inst) return false;
+  /* state 是本文件与进程内后端之间的既有接口（两条后端共享的那份 api）。万一它将来不在，
+   * 退回旧判据 —— 行为与改动前一致，总好过把整条会话默认推给 CLI。 */
+  if (typeof inst.state !== 'function') return Boolean(inst.isOpen(session));
+  return Boolean(inst.state(session));
+}
 
 const IS_WIN = process.platform === 'win32';
 const CMD_TIMEOUT_MS = 30000;      // 每条命令 30s 超时（设计 §11）
 const VERSION_CACHE_MS = 60000;    // playwright-cli 安装探测缓存 60s（设计 §4）
+
+/* 单个浏览器动作（click / fill…）的 actionability 预算。
+ * playwright-cli 的 defaultConfig 写死 timeouts.action = 5000（coreBundle 的 defaultConfig），
+ * 对真实页面太短：动作要等元素「visible, enabled and stable」，稳定判定靠注入脚本的两帧
+ * rAF，标签页被切到后台或窗口被遮挡时 rAF 会被节流，5s 一眨眼就到 —— 报出来的就是
+ * `TimeoutError: Timeout 5000ms exceeded. | - waiting for element to be visible, enabled and stable`。
+ * Playwright 自己的默认动作超时是 30s，这里对齐（实测同一元素隔一会儿重试就过）。
+ * 走环境变量而不是 config 文件：daemon 是 open/attach 那一次起的，env 随 spawn 传下去即可，
+ * 三种模式一起生效，也不用为「不开最大化」再多写一个 config 文件。
+ * JEVDEMO_ACTION_TIMEOUT_MS 只影响我们起的 CLI 进程，不动用户的任何设置。 */
+const ACTION_TIMEOUT_MS = Number(process.env.JEVDEMO_ACTION_TIMEOUT_MS) > 0
+  ? Number(process.env.JEVDEMO_ACTION_TIMEOUT_MS)
+  : 30000;
+
+/* 动作之后「等页面稳定」的那几个数：与上游 playwright-mcp 的 waitForCompletion 逐条对齐
+ * （coreBundle 里 click 等动作的 handle 就是 setIncludeSnapshot() + await waitForCompletion()）。
+ * 上游这么做是因为它把动作之后的快照当成「下一步的页面依据」交回给模型 —— 我们复用这份
+ * 快照，就必须等得一样多，否则拿到的是动作那一瞬间的页面（异步渲染还没落地）。
+ * 差别有一处：上游 hover / select / uncheck / navigate / reload 这类**根本不等**，
+ * 动作返回即拍；我们自己控制这条命令，把它们也一并等上。 */
+const SETTLE_MS = 500;             // 动作之后先给的固定静默期
+const SETTLE_REQ_CAP_MS = 5000;    // 等动作期间发出的请求完成的上限
+const SETTLE_NAV_MS = 10000;       // 触发了导航时等 load 的上限
+const SNAPSHOT_CAP_MS = 10000;     // 取快照自己的上限（原生弹窗挂着时上游是 race 掉的，我们没有那层）
+
+/* 合并命令（动作 + 等稳定 + 取快照）的子进程超时。
+ * 必须盖住这条命令里**所有**会等待的段：动作本身（ACTION_TIMEOUT_MS）、守卫的
+ * Promise.race（GUARD_RACE_MS）、settle（静默 500 + 请求上限 5000 + 再静默 500，
+ * 导航则 SETTLE_NAV_MS）、以及取快照自己的上限（SNAPSHOT_CAP_MS）。
+ * 少算哪一段，表现都是「动作其实已经做成了，这一步却报超时失败」—— 比慢更糟。 */
+const ACT_FAST_TIMEOUT_MS = ACTION_TIMEOUT_MS + 2 * (SETTLE_MS + SETTLE_REQ_CAP_MS + SETTLE_NAV_MS + SNAPSHOT_CAP_MS);
+
+/* 子进程环境：**每次 spawn 时现取** process.env（不能模块加载时就快照 —— 那样运行期
+ * 改过的 PATH 等一律看不见，测试里换 playwright-cli 桩会直接失效）。 */
+function cliEnv() {
+  return Object.assign({}, process.env, { PLAYWRIGHT_MCP_TIMEOUT_ACTION: String(ACTION_TIMEOUT_MS) });
+}
 
 /* ---------------- 白名单 + 参数形状（设计 §7：19 个浏览器操作） ----------------
  * ref:    需要 ref（元素定位，来自快照）
@@ -68,6 +182,13 @@ const OPS = {
 };
 
 const REF_RE = /^[A-Za-z0-9_-]+$/;
+
+/* 「这个字符串是不是 http(s) URL」的唯一一份判定：起点 URL（openViaCli 与进程内后端的
+ * open 都要在**起浏览器之前**挡掉非 http(s) 的起点）与 `url` 形命令参数共用它。
+ * 进程内后端经 shared 注入拿到**同一个对象** —— 别在那边的注入行里再写一份字面量，
+ * 两边文本一旦分叉，就是「CLI 拒了、进程内放了」这种查起来最费劲的静默不一致。
+ * （另有两处 /^https?:\/\// 是取主机名用的 CDP 端点解析，语义不同，不并进来。） */
+const HTTP_URL_RE = /^https?:\/\//i;
 
 /* 可选浏览器内核（open 的 --browser 只认这几个 chromium 系通道；
  * firefox/webkit 对 accessibility 快照支持差，不开放）。 */
@@ -234,7 +355,7 @@ async function ownTabRefusal(session, command) {
   }
   return {
     ok: false, lostTab: true,
-    error: '专用标签页已不在（被关闭或被切走）：为免误动你自己的页面，这里停手了。重新开始即可开一个新标签页。',
+    error: LOST_TAB_ERROR,   /* 与快路径同一句（前端据此整轮停手，两处必须字字相同） */
   };
 }
 
@@ -271,9 +392,220 @@ function tabSelectRefusal(preExisting, url) {
   };
 }
 
+/* ---------------- CDP 快路径：守卫 + 动作合并成一条 run-code ----------------
+ *
+ * 为什么合并（2026-09-28 本机实测）：
+ *   ① 每条命令都是一次新进程（底价 0.9~1.0s），而 CDP 的守卫是**每条命令前再单跑一次
+ *      eval**（实测 1.5s）。合并成一条 run-code 后，一次进程把「查归属 + 干活」都做完，
+ *      每步少 3~5 次进程。
+ *   ② 更要紧的是原子性：分两条命令时，「查到归属」与「真动手」之间隔着一次进程往返，
+ *      用户在那个窗口里关掉或切走专用标签页，动作就落到他自己的页面上了。同一条
+ *      run-code 里 page 句柄在命令开始时就绑定了，判完立刻动手，那个窗口不存在。
+ *
+ * 代码走 --filename 落文件，不塞进命令行：quoteArg 会拒双引号与百分号（cmd 展开面），
+ * 而 fill 的文本里什么都可能有。文件放 data/ 下（与截图同域，随 data/ 一起 gitignore），
+ * cmd 层完全不经手；片段本身仍只用单引号，保持「片段自身干净」这条纪律。
+ *
+ * 失败收场三条路，都不静默：
+ *   JEV_OWN_TAB_LOST  —— 归属不对：与老路同一句话，前端据此整轮停手
+ *   JEV_GUARD_UNKNOWN —— 守卫跑不出来（原生弹窗占住渲染主线程时 evaluate 既不返回也不
+ *                        报错，见 MODAL_GUARD_RE）：**退回老路**，让原来的守卫去认弹窗态
+ *   其它              —— 原样带回（summarizeError 会保住行尾根因）
+ */
+const GUARD_LOST_MARK = 'JEV_OWN_TAB_LOST';
+const GUARD_UNKNOWN_MARK = 'JEV_GUARD_UNKNOWN';
+/* 守卫 evaluate 的等待上限。弹窗占住渲染主线程时它不会返回，只能主动放弃并退回老路。 */
+const GUARD_RACE_MS = 2500;
+const LOST_TAB_ERROR = '专用标签页已不在（被关闭或被切走）：为免误动你自己的页面，这里停手了。'
+  + '重新开始即可开一个新标签页。';
+
+/* 能做进快路径的动作：形状都是「定位到 ref 再调 locator 同名 API」，与 CLI 内部
+ * （coreBundle 的 frame.click / fill / hover / check / uncheck）逐字等价。
+ * select / type / upload / press / goto / 标签页类 / 弹窗类**不在**此列：它们要么有 CLI
+ * 自己的参数解析（select 的选项名匹配），要么是弹窗态下必须照发的命令 —— 走老路更稳。 */
+const MERGED_ACTIONS = { click: 1, fill: 1, hover: 1, check: 1, uncheck: 1 };
+
+/* 标签页标记是运行时生成的（jevtab-<会话>-<序号>），这里再挡一道：形状不对就不用快路径，
+ * 免得把可疑字符拼进代码片段。 */
+const TOKEN_SAFE_RE = /^[A-Za-z0-9_-]+$/;
+
+/* 片段里的单引号 JS 字面量。validateAct 已挡掉双引号 / 百分号 / 换行，
+ * 这里只需处理反斜杠与单引号本身。 */
+function jsLiteral(s) {
+  return '\'' + String(s).replace(/\\/g, '\\\\').replace(/'/g, '\\\'') + '\'';
+}
+
+/* 守卫片段：先判归属，归属不对就抛标记。守卫本身也设了等待上限（见 GUARD_RACE_MS）。
+ * 计时必须用 page.waitForTimeout，**不能用 setTimeout**：run-code 的函数不在 Node 作用域里
+ * 求值，那里没有 setTimeout（实测：CDP 真机跑出来就是 `ReferenceError: setTimeout is not defined`，
+ * 合并后的每一步动作都会当场失败）。 */
+function guardLines(token) {
+  return 'const __g = await Promise.race([page.evaluate(() => window.name || \'\'),'
+    + ' page.waitForTimeout(' + GUARD_RACE_MS + ').then(() => \'__jev_guard_timeout__\')]);'
+    + ' if (__g === \'__jev_guard_timeout__\') throw new Error(\'' + GUARD_UNKNOWN_MARK + '\');'
+    + ' if (__g !== \'' + String(token) + '\') throw new Error(\'' + GUARD_LOST_MARK + '\');';
+}
+
+/* 动手前先确认这一页真的在渲染。
+ * 2026-09-28 用真 CDP 会话实测（临时 profile 的 Chrome，driver attach 后 tab-new）：
+ *   ① 我们那个专用标签页的 document.visibilityState = **hidden**（后台标签页）
+ *   ② 老路直接 click → TimeoutError（稳定判定永远不满足）
+ *   ③ page.bringToFront() → visibilityState 变 visible，同一个元素 **1.58s 点成功**
+ * 原因：后台标签页被 Chrome 节流，rAF 不跑，而 Playwright 的 actionability「stable」要
+ * 连续两帧包围盒不变 —— 等不到就是等到超时为止。这不是超时设小了，给多久都没用。
+ * 只在**确实被隐藏**时才把自己提到前台：用户正看着我们这一页时不抢焦点。
+ * 也**不用 force:true** 绕过判定：那会连「有没有被别的东西挡住」一起跳过，撞上登录
+ * 遮罩会直接点穿过去，比失败更糟（会话 r-0926-0046-qrys 就是被遮罩反复挡住直到终止）。 */
+const VISIBLE_FIRST_LINE = 'if (await page.evaluate(() => document.visibilityState) !== \'visible\')'
+  + ' { try { await page.bringToFront(); } catch (__ev) {} }';
+
+/* 动作之后：等页面稳定，再把无障碍快照取回来（与上游 waitForCompletion + setIncludeSnapshot
+ * 同语义，见 SETTLE_MS 的说明）。**必须用 page.waitForTimeout**：run-code 的函数不在 Node
+ * 作用域里求值，那里没有 setTimeout（同 guardLines 踩过的坑）。
+ * 只在动作真的成功了才取（__err 为空）：失败了就让调用方照旧走「真取一次快照」那条路，
+ * 失败步的快照时点与现在完全一致，不叠加新的变量。
+ * 取到的文本里没有 ref 就当作没取到（下游全按 ref 行解析，无 ref 等于空页面）——
+ * 这条同时兜住「这个 Playwright 版本不认 mode:'ai'」与「弹窗期间取不到快照」两种情形。 */
+function settleAndSnapshotLines() {
+  return [
+    'let __snap = null;',
+    /* 整段「等稳定 + 取快照」都不许把动作的成功改写成失败：动作已经做成了，这里再出什么岔子
+     * （标签页在静默期被关掉、页面被销毁、waitForTimeout 跟着 reject）也只当「这次没取到」，
+     * 交给下一步真取一次。所以外面这一层 try/catch 是**语义**上的：宁可多跑一次快照，
+     * 也不能让 driver 报「这一步失败了」——前端会据此把已经生效的动作再喂回模型。 */
+    'if (!__err) {',
+    '  try {',
+    /* 500ms 静默期**在摘监听之前**等：上游就是「动作 → page.waitForTimeout(500) → 才 dispose」
+     * （waitForCompletion 的 finally），静默期内才发出的请求（debounce 的 fetch、链式请求）
+     * 同样算这个动作引出来的。摘早了就会漏掉它们，等于没等。
+     * 监听本身在整段结束处统一摘（成功失败都摘得到，见 mergedActCode）。
+     * 已知边界（与上游一致，不是我们的缺口）：静默期结束之后才**发起**的请求不在等待范围内 ——
+     * 例如 800ms 后才开始的 debounce fetch，这份快照就是它之前的样子。上游同样如此。 */
+    '    await page.waitForTimeout(' + SETTLE_MS + ');',
+    '    if (__reqs.some((__r) => __r.isNavigationRequest())) {',
+    '      await page.mainFrame().waitForLoadState(\'load\', { timeout: ' + SETTLE_NAV_MS + ' }).catch(() => {});',
+    '    } else {',
+    '      const __waits = __reqs.filter((__r) => [\'document\', \'stylesheet\', \'script\', \'xhr\', \'fetch\'].indexOf(__r.resourceType()) >= 0)',
+    '        .map((__r) => __r.response().then((__x) => __x && __x.finished()).catch(() => {}));',
+    '      await Promise.race([Promise.all(__waits), page.waitForTimeout(' + SETTLE_REQ_CAP_MS + ')]);',
+    '      if (__reqs.length) await page.waitForTimeout(' + SETTLE_MS + ');',
+    '    }',
+    /* 取快照也要有上限：动作成功、随后页面弹出原生弹窗时，上游那条调用是被
+     * _raceAgainstModalStates 包住的（弹窗一出现就立刻放弃），我们这里没有那层 ——
+     * 只 try/catch 兜不住「一直挂着不返回」。所以自己跟一个超时赛跑，超时当作没取到。 */
+    '    __snap = await Promise.race([',
+    '      page.ariaSnapshot({ mode: \'ai\' }),',
+    '      page.waitForTimeout(' + SNAPSHOT_CAP_MS + ').then(() => null),',
+    '    ]);',
+    '  } catch (__es) { __snap = null; }',
+    '}',
+  ];
+}
+
+function mergedActCode(token, command, ref, text) {
+  const opts = '{ timeout: ' + ACTION_TIMEOUT_MS + ' }';
+  const call = command === 'fill'
+    ? 'await __loc.fill(' + jsLiteral(text) + ', ' + opts + ');'
+    : 'await __loc.' + command + '(' + opts + ');';
+  /* 动手前先确认自己在渲染（见 VISIBLE_FIRST_LINE 的说明）：后台标签页的 rAF 被节流，
+   * 稳定判定（要两帧）永远不满足 —— 那正是 `waiting for element to be visible, enabled
+   * and stable` 那条超时的来路。只在**确实被隐藏**时才把自己提到前台，用户正看着
+   * 我们这一页时不抢焦点。 */
+  return [
+    'async page => {',
+    guardLines(token),
+    VISIBLE_FIRST_LINE,
+    'const __loc = page.locator(\'aria-ref=' + ref + '\').first();',
+    'let __err = null;',
+    /* 请求监听必须在动作之前挂上：settle 要等的正是「这个动作自己引出来的请求」。
+     * 摘监听放在整段最后（成功失败都过那里）—— 失败路径不 settle，但也不能把监听留在页面上。 */
+    'const __reqs = [];',
+    'const __onReq = (__r) => __reqs.push(__r);',
+    'page.on(\'request\', __onReq);',
+    'try { ' + call + ' } catch (__e) { __err = String((__e && __e.message) || __e); }',
+  ].concat(settleAndSnapshotLines()).concat([
+    'page.off(\'request\', __onReq);',
+    'return { actError: __err, snapshot: __snap };',
+    '}',
+  ]).join('\n');
+}
+
+/* 截图 + 读位置合并成一条命令。
+ * scale 必须是 'css'：CLI 的 screenshot 默认就是 CSS 像素档（--hires 才是设备像素），
+ * 2026-09-28 实测两条路产出的 PNG **尺寸与字节数完全相同**（dpr=1.25 的机器上，
+ * 不指定 scale 会得到 1295×889 的设备像素图，标注几何会整片偏 1.25 倍）。
+ * ref 为空（goto / press / 终止帧这类没有目标元素的动作）时只截图。 */
+function mergedShotCode(token, name, ref) {
+  const lines = [
+    'async page => {',
+    guardLines(token),
+    VISIBLE_FIRST_LINE,   /* 后台标签页的截图同样会卡在渲染上（老路的截图重试就是为它加的） */
+    'const __r = { rectCsv: null, rectError: null };',
+    'try { await page.screenshot({ path: ' + jsLiteral(name) + ', scale: \'css\' }); }'
+      + ' catch (__e) { return { shotError: String((__e && __e.message) || __e) }; }',
+  ];
+  if (ref) {
+    lines.push('try {');
+    lines.push('  const __el = page.locator(\'aria-ref=' + ref + '\').first();');
+    lines.push('  __r.rectCsv = await __el.evaluate(' + RECT_SNIPPET + ');');
+    lines.push('} catch (__e) { __r.rectError = String((__e && __e.message) || __e); }');
+  }
+  lines.push('return __r;');
+  lines.push('}');
+  return lines.join('\n');
+}
+
+/* 合并命令的代码落哪个文件：每个会话一个（会话内顺序执行，写完即用，用完即覆盖）。 */
+function codeFilePath(session) {
+  const safe = String(session == null ? '' : session).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 's';
+  return path.join(dataDir, 'auto-cli.code.' + safe + '.js');
+}
+
+/* run-code 的返回值被 CLI 又序列化了一次：字符串带引号、对象变成 JSON 字符串。 */
+function codeValue(raw) {
+  let v = raw;
+  if (typeof v === 'string') {
+    const t = v.trim();
+    if (/^".*"$/.test(t)) { try { v = JSON.parse(t); } catch (_) { return null; } }
+  }
+  if (typeof v === 'string') { try { v = JSON.parse(v); } catch (_) { return null; } }
+  return v && typeof v === 'object' ? v : null;
+}
+
+/* 跑一条合并命令。返回：
+ *   { ok:true, value }                        —— 命令跑通（value 是片段返回的对象）
+ *   { ok:false, lostTab:true, error }         —— 归属不对，前端据此停手
+ *   { ok:false, error }                       —— 其它失败，原样带回
+ *   { fallback:true }                         —— 这条不该用快路径（退回老路，不算失败） */
+async function execCode(session, code, opts) {
+  const file = codeFilePath(session);
+  try { quoteArg(file); } catch (_) { return { fallback: true }; }   // 路径进不了命令行（罕见字符）
+  try {
+    fs.writeFileSync(file, code, 'utf8');
+  } catch (_) {
+    return { fallback: true };                                       // 写不了文件就退回老路
+  }
+  const out = await exec(session, ['run-code', '--filename=' + file], opts);
+  if (out.ok) return { ok: true, value: out.result };
+  const err = String(out.error || '');
+  if (err.indexOf(GUARD_LOST_MARK) >= 0) return { ok: false, lostTab: true, error: LOST_TAB_ERROR };
+  /* 守卫跑不出来（弹窗态）或这个 CLI 版本不认 run-code：退回老路，由它去认弹窗态 */
+  if (err.indexOf(GUARD_UNKNOWN_MARK) >= 0 || /unknown command|not supported|不允许的命令/i.test(err)) {
+    return { fallback: true };
+  }
+  return { ok: false, error: out.error };
+}
+
+/* 这个会话能不能走快路径（CDP + 已打标记 + 标记形状安全）。其余模式没有守卫要合并，
+ * 走老路零风险 —— 快路径只用来省 CDP 的守卫进程。 */
+function fastPathToken(session) {
+  const st = sessionState.get(session);
+  if (!st || st.mode !== 'cdp' || !st.tabToken) return null;
+  return TOKEN_SAFE_RE.test(String(st.tabToken)) ? String(st.tabToken) : null;
+}
+
 /* attach 失败是不是「http 形态在默认 profile 上必然 404」这条死路。
- * 必须与 403 分开：403 是「授权没点」，重试会把「允许远程调试」弹窗打掉（见 cdpAttachConfig）。 */
-function isHttpDiscoveryDead(raw) {
+ * 必须与 403 分开：403 是「授权没点」，重试会把「允许远程调试」弹窗打掉（见 cdpAttachConfig）。 */function isHttpDiscoveryDead(raw) {
   const s = String(raw || '');
   if (/403|forbidden|connection rejected/i.test(s)) return false;
   return /does not look like a DevTools server|Unexpected status 404/i.test(s);
@@ -546,7 +878,7 @@ function validateAct(command, ref, text) {
     const t = String(text);
     if (!shape.text) throw new Error('命令 ' + command + ' 不接受文本参数');
     if (/["%\r\n]/.test(t)) throw new Error('文本参数含有不允许的字符（双引号、百分号或换行）');
-    if (shape.url && !/^https?:\/\//i.test(t)) throw new Error('命令 ' + command + ' 的文本必须是 http:// 或 https:// 开头的 URL');
+    if (shape.url && !HTTP_URL_RE.test(t)) throw new Error('命令 ' + command + ' 的文本必须是 http:// 或 https:// 开头的 URL');
     if (shape.int && !/^\d+$/.test(t)) throw new Error('命令 ' + command + ' 的文本必须是非负整数（标签页序号）');
     outText = t;
   }
@@ -594,9 +926,9 @@ function run(session, args, opts) {
       if (IS_WIN) {
         // npm 全局命令是 .cmd：Node 安全策略要求 shell:true，引号自行拼装
         const line = ['playwright-cli'].concat(argv.map(quoteArg)).join(' ');
-        child = spawn(line, { shell: true, cwd: dataDir, windowsHide: true, stdio: STDIO });
+        child = spawn(line, { shell: true, env: cliEnv(), cwd: dataDir, windowsHide: true, stdio: STDIO });
       } else {
-        child = spawn('playwright-cli', argv, { cwd: dataDir, windowsHide: true, stdio: STDIO });
+        child = spawn('playwright-cli', argv, { env: cliEnv(), cwd: dataDir, windowsHide: true, stdio: STDIO });
       }
     } catch (e) {
       return resolve({ code: -1, stdout: '', stderr: String(e && e.message || e), timedOut: false });
@@ -714,8 +1046,20 @@ function parseEnvelope(out) {
   }
   try {
     const j = JSON.parse(text);
-    if (j && j.isError) return { ok: false, error: summarizeError(j.error) || 'playwright-cli 执行出错' };
-    if (j && typeof j === 'object') return { ok: true, result: unwrapResult(j) };   // 覆盖 {result} 与 {snapshot} 两种形状
+    /* 工件路径在成功与失败两个分支上都要带出去：**失败的动作同样会写工件**
+     * （CLI 的响应里 Error 段与 Snapshot 段并不互斥），只报成功的那个分支等于
+     * 让失败动作的文件永远没人删。读不读由调用方决定。 */
+    const rel = j && typeof j === 'object' ? snapshotArtifactRel(j) : null;
+    if (j && j.isError) {
+      const out = { ok: false, error: summarizeError(j.error) || 'playwright-cli 执行出错' };
+      if (rel) out.artifact = rel;
+      return out;
+    }
+    if (j && typeof j === 'object') {
+      const out = { ok: true, result: unwrapResult(j) };   // 覆盖 {result} 与 {snapshot} 两种形状
+      if (rel) out.artifact = rel;
+      return out;
+    }
     return { ok: true, result: text };
   } catch (_) {
     if (out.code !== 0 || String(out.stderr || '').trim()) {
@@ -734,6 +1078,99 @@ async function exec(session, args, opts) {
   return parseEnvelope(out);
 }
 
+/* ---------------- 动作之后的快照工件 ----------------
+ * playwright-cli 的部分动作会在结果里附一份「动作之后」的无障碍快照：
+ *   click  → {snapshot:{file:'.playwright-cli\\page-<ISO>.yml'}}
+ *   open   → {result:{snapshot:{file:…}}}（同一个东西，嵌了一层）
+ * 2026-09-29 实测（v0.1.17，text 与 --json 两种输出都看过）：**只有可能改变页面结构的
+ * 动作才有** —— click / hover / select / uncheck / goto / reload / go-back / go-forward /
+ * upload / tab-new(带 url) / press(仅 Enter) 有；fill / check / 非 Enter 的 press /
+ * tab-list 没有（返回 {}）。源码里就是这么写的：browser_type 只在 pressSequentially 分支
+ * 调 setIncludeSnapshot()，browser_press_key 只在 key === 'Enter' 时调。
+ * 所以调用方**必须**能接受「这次没有」，退回真取一次快照。 */
+function snapshotArtifactRel(j) {
+  const cands = [j && j.snapshot, j && j.result && j.result.snapshot];
+  for (const c of cands) {
+    if (c && typeof c === 'object' && !Array.isArray(c) && typeof c.file === 'string' && c.file) return c.file;
+  }
+  return null;
+}
+
+/* 工件路径 → data/ 沙箱内的绝对路径；出格或不成立一律 null。
+ * 路径是 CLI 给的（相对 dataDir 的 cwd），照 uploadPathAllowed 的规矩关进 data/。 */
+function artifactAbsPath(rel) {
+  const t = String(rel == null ? '' : rel).trim();
+  if (!t) return null;
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(t)) return null;   // file:// 之类一律不当路径用
+  const root = path.resolve(dataDir);
+  const abs = path.resolve(root, t);
+  return abs.startsWith(root + path.sep) ? abs : null;
+}
+
+/* 读回工件文本；任何一步不成立就返回 null —— 调用方退回真取一次快照，
+ * 绝不拿「半截文本」或「空字符串」当下一步的页面依据。
+ * 读完即删：每个动作一个文件，不删会无限堆积。 */
+function readArtifactSnapshot(rel) {
+  const abs = artifactAbsPath(rel);
+  if (!abs) return null;
+  let text;
+  try { text = fs.readFileSync(abs, 'utf8'); } catch (_) { return null; }
+  try { fs.unlinkSync(abs); } catch (_) { /* 删不掉不影响这一次的使用 */ }
+  return normalizeArtifactText(text);
+}
+
+/* 不要这份工件，但**必须把它删掉**：CLI 每次动作都可能写一个文件（失败的动作也写），
+ * 不删就是每步一个 yml 永远留在 data/.playwright-cli 里（实测该目录已 3550 个文件 / 68MB）。
+ * 读不读由调用方决定，收尾一律走这里。 */
+function discardArtifact(rel) {
+  const abs = artifactAbsPath(rel);
+  if (!abs) return false;
+  try { fs.unlinkSync(abs); return true; } catch (_) { return false; }
+}
+
+/* 0.1.18+ 的工件可能是结构化树（JSON）而不是 YAML 文本 —— 用已有的转写器统一成 YAML 行，
+ * 认不出的形状一律 null（退回真取）。0.1.17 的工件是文本，直接原样返回。 */
+function normalizeArtifactText(raw) {
+  const text = String(raw == null ? '' : raw).trim();
+  if (!text) return null;
+  if (text[0] !== '[' && text[0] !== '{') return text;
+  try {
+    const j = JSON.parse(text);
+    if (Array.isArray(j)) return treeToSnapshotYaml(j).trim() || null;
+  } catch (_) { /* 不是 JSON：按文本处理 */ }
+  return null;
+}
+
+/* 哪些动作自带的快照可以当「下一步的页面依据」用。
+ * 判据是**动作自身的完成条件有没有包住页面更新**，不是「有没有工件」：
+ *   · click / upload / press —— 上游 setIncludeSnapshot() + await waitForCompletion()
+ *     （动作后固定 500ms + 等动作期间发出的请求），页面已稳。
+ *   · goto / reload —— Playwright 的导航 API 默认等 'load'。
+ *   · tab-new / tab-select / tab-close —— 切过去的那一页本来就是加载好的。
+ * 不带的三个（工件照样有，读完即弃，下一步真取一次）：
+ *   · hover / select / uncheck —— 上游**不等稳定**（动作返回即拍）；select 触发的 fetch
+ *     通常还没回来，拿这种「半路」快照顶替下一步依据，等于让模型看着上一页做决策。
+ *   · go-back / go-forward —— 上游显式写的是 `waitUntil: 'commit'`（实测源码：goBack/goForward
+ *     都是 { waitUntil: 'commit', ... }），只等导航提交，页面内容几乎还没到。
+ * 丢掉快照的代价只是那几步没省下进程，与改动前完全一致。
+ * （CDP 快路径不受这张表约束：那条命令里的等稳定是我们自己做的。） */
+const SNAPSHOT_TRUSTED_ACTIONS = {
+  click: 1, upload: 1, press: 1, goto: 1, reload: 1,
+  'tab-new': 1, 'tab-select': 1, 'tab-close': 1,
+};
+
+/* 一份「能当下一步页面依据用」的快照：**是字符串**、非空、且带 ref。
+ * 为什么必须有 ref：下游（refCriteria / paramCriteria / 召回 / 标注 / checkSelectOption）
+ * 全部按 ref 行解析，没有 ref 的文本喂进去等于空页面 —— 会静默变成「页面上没有可操作元素」。
+ * 为什么必须是字符串：数组/对象到这里只可能是形状不对（String([…]) 会把元素拼成一串，
+ * 看起来「像」快照），一律当没拿到。
+ * 这条同时保住了原生弹窗那条路：弹窗期间取不到快照（工件为空 / ariaSnapshot 抛错），
+ * 于是这里返回 null、下一步真取一次，由 snapshot 接口照旧报出 modal state 错误。 */
+function usableSnapshot(text) {
+  if (typeof text !== 'string') return null;
+  return text.indexOf('[ref=') >= 0 ? text : null;
+}
+
 /* ---------------- 对外接口 ---------------- */
 
 let versionCache = { at: 0, value: null };
@@ -743,18 +1180,39 @@ async function status() {
   if (versionCache.value && now - versionCache.at < VERSION_CACHE_MS) return versionCache.value;
 
   const out = await run(null, ['--version'], { json: false });
-  let value;
+  let cli;
   if (out.code === 0 && out.stdout.trim()) {
-    value = { available: true, version: out.stdout.trim().split(/\r?\n/)[0] };
+    cli = { available: true, version: out.stdout.trim().split(/\r?\n/)[0] };
   } else {
     const all = (out.stderr + '\n' + out.stdout);
     const notInstalled = /not recognized|not found|enoent|commandnotfound/i.test(all);
-    value = {
+    cli = {
       available: false,
       reason: notInstalled ? 'not-installed' : 'error',
       error: notInstalled ? 'playwright-cli 未安装：请执行 npm i -g @playwright/cli' : all.trim().slice(0, 300) || '未知错误',
     };
   }
+
+  /* 进程内后端：这里只问「playwright-core 能不能加载」（真正的能力探测需要一个活页面，
+   * 放在 open 时做，见 browser-inproc.js 的 probeCapability）。
+   * **available 取两条后端的或**：装了 playwright-core、没装 playwright-cli 的机器
+   * 照样能驱动浏览器，按 CLI 单独报会让前端把「引擎未安装」显示成红的。
+   * version 优先报 CLI 的（既有 pill 文案不变），CLI 缺席时报进程内那份。 */
+  const inst = inprocBackend();
+  const ip = inst ? inst.available() : { ok: false, version: null, error: '进程内后端模块加载失败' };
+  const inprocSt = ip.ok
+    ? { available: true, version: ip.version }
+    : { available: false, reason: 'not-installed', error: ip.error };
+  const preferred = resolveBackend(null);
+  const value = {
+    available: cli.available || inprocSt.available,
+    version: cli.version || inprocSt.version,
+    reason: cli.available ? undefined : cli.reason,
+    error: cli.available ? undefined : cli.error,
+    /* 这一轮实际会走哪条：选了 inproc 但它不可用就落到 cli，反之亦然 */
+    backend: preferred === 'inproc' ? (inprocSt.available ? 'inproc' : 'cli') : 'cli',
+    backends: { cli: cli, inproc: inprocSt },
+  };
   versionCache = { at: now, value };
   return value;
 }
@@ -795,6 +1253,9 @@ async function startOwnTab(session, plan) {
   const preExisting = pre.ok ? parseTabs(pre.result).map((t) => t.url) : [];
 
   const tab = await exec(session, plan.commands[1]);   // ['tab-new', url]
+  /* tab-new 也会写一份工件，而这一步不消费它（第 1 步的快照永远是**真取**的：
+   * 人工登录门在上面，门后那一页才是模型的第一次输入）。不删就每个会话留一个。 */
+  discardArtifact(tab.artifact);
   if (!tab.ok) return { ok: false, stage: 'tab-new', error: tab.error };
 
   const token = newTabToken(session);
@@ -814,7 +1275,10 @@ async function reuseCdpTab(session, plan) {
   /* 上一次 run 留下的专用标签页若还在（标记还是我们的），先关掉它 ——
    * 否则每跑一轮就多留一个标签页。读标记是只读的，即便当前页是用户的也安全。 */
   const cur = await exec(session, ['eval', TAB_READ_SNIPPET]);
-  if (cur.ok && tabGuardOk(st.tabToken, cur.result)) await exec(session, ['tab-close']);
+  if (cur.ok && tabGuardOk(st.tabToken, cur.result)) {
+    const closed = await exec(session, ['tab-close']);
+    discardArtifact(closed.artifact);   // tab-close 同样可能留一份没人消费的工件
+  }
 
   const t = await startOwnTab(session, plan);
   if (!t.ok) {
@@ -844,6 +1308,7 @@ const CDP_ATTACH_TIMEOUT_MS = Number(process.env.JEVDEMO_CDP_ATTACH_MS) > 0
 async function openCdp(session, plan, extraArgs, fallbackPlan) {
   const attachArgs = plan.commands[0].concat(extraArgs || []);
   let attach = await exec(session, attachArgs, { timeoutMs: CDP_ATTACH_TIMEOUT_MS });
+  discardArtifact(attach.artifact);   // attach 也可能带一份没人消费的工件
   /* 手填的 http 形态在默认 profile 上必然 404（Chrome 147+ 关了 /json 发现）：这条不是
    * 授权问题，回退到端口文件里那条 ws 再试一次。**只在 404 这条死路上回退** —— 403 是
    * 「授权没点」，重试会把那条维持弹窗的连接打掉（见 cdpAttachConfig 的注释）。
@@ -851,6 +1316,7 @@ async function openCdp(session, plan, extraArgs, fallbackPlan) {
   let swappedFrom = null;
   if (!attach.ok && fallbackPlan && isHttpDiscoveryDead(attach.error)) {
     const retry = await exec(session, fallbackPlan.commands[0].concat(extraArgs || []), { timeoutMs: CDP_ATTACH_TIMEOUT_MS });
+    discardArtifact(retry.artifact);
     if (retry.ok) { swappedFrom = plan.target; plan = fallbackPlan; attach = retry; }
   }
   if (!attach.ok) return { ok: false, error: humanCdpAttachError(attach.error) };
@@ -872,10 +1338,55 @@ async function openCdp(session, plan, extraArgs, fallbackPlan) {
   };
 }
 
+/* open 的**后端分发**：先按选择试进程内，起不来就自动退回 CLI 并把原因带回前端。
+ * 退回不是静默降级 —— 返回值里带 backendFallback（人话原因），前端会 toast 一次，
+ * 免得用户以为跑的是快的那条。 */
+
+/* 给 open 的返回值补上「这一轮实际走了哪条后端」。**成功才贴**（失败时这条信息没意义）。
+ * 纯 CLI 那一支以前不贴：前端 `opened.backend || runCfg.backend` 的回退值恰好等于真值
+ * （请求的就是 cli），所以看不出来 —— 但那让「backend 是本次调用的结果说明」这条契约
+ * 只在回退分支上成立，pin 到 CLI 的测试没法据此断言自己真的跑在 CLI 上。 */
+function withBackend(result, name) {
+  if (result && result.ok && result.backend == null) result.backend = name;
+  return result;
+}
+
 async function open(session, url, opts) {
   const o = opts || {};
+  const want = resolveBackend(o);
+  if (want !== 'inproc') return withBackend(await openViaCli(session, url, o), 'cli');
+
+  const inst = inprocBackend();
+  if (!inst) {
+    const r = await openViaCli(session, url, o);
+    if (r && r.ok) {
+      r.backend = 'cli';
+      r.backendFallback = '进程内后端不可用（无法加载 playwright-core）：已改用 playwright-cli' + INPROC_HINT;
+    }
+    return r;
+  }
+  const r = await inst.open(session, url, o);
+  if (r && r.ok) {
+    /* sessionState 只记模式这一件事：**不在这里记后端** —— 归属由 useInproc 现问进程内
+     * 后端的会话表（见它的注释），另存一份迟早与真身不同步（这条曾在误判时把 close 送错后端）。
+     * 返回给前端的那份 backend 是**本次调用的结果说明**，不落进状态里。 */
+    sessionState.set(session, { mode: r.mode });
+    return Object.assign({}, r, { backend: 'inproc' });
+  }
+  /* 进程内起不来：回退 CLI。**别把 inproc 的失败原样抛回去** —— 用户要的是「跑起来」，
+   * 不是一条他无从下手的报错。原始原因一并带回去，好排查。 */
+  const cli = await openViaCli(session, url, o);
+  if (cli && cli.ok) {
+    cli.backend = 'cli';
+    cli.backendFallback = '进程内后端启动失败，已改用 playwright-cli：' + String((r && r.error) || '未知原因');
+  }
+  return cli;
+}
+
+async function openViaCli(session, url, opts) {
+  const o = opts || {};
   const target = String(url || '');
-  if (!/^https?:\/\//i.test(target)) return { ok: false, error: '起始 URL 必须以 http:// 或 https:// 开头：' + JSON.stringify(target.slice(0, 80)) };
+  if (!HTTP_URL_RE.test(target)) return { ok: false, error: '起始 URL 必须以 http:// 或 https:// 开头：' + JSON.stringify(target.slice(0, 80)) };
 
   const requested = o.browser || 'chrome';
   if (!BROWSERS[requested]) {
@@ -968,6 +1479,9 @@ async function open(session, url, opts) {
   }
 
   const out = await exec(session, plan.commands[0].concat(configArgs));
+  /* open 也会写一份工件（{result:{snapshot:{file}}}），同样没人消费 ——
+   * 第 1 步的快照必须真取（人工登录门在 open 之后）。只删不留。 */
+  discardArtifact(out.artifact);
   if (out.ok) {
     sessionState.set(session, { mode: plan.mode });
     return { ok: true, browser: plan.browser, mode: plan.mode, maximized: Boolean(o.maximize), native: Boolean(o.native) };
@@ -991,6 +1505,7 @@ async function open(session, url, opts) {
 }
 
 async function snapshot(session) {
+  if (useInproc(session)) return inprocBackend().snapshot(session);
   const refuse = await ownTabRefusal(session, 'snapshot');
   if (refuse) return refuse;
   const out = await exec(session, ['snapshot']);
@@ -1019,6 +1534,7 @@ function parseTabs(text) {
 }
 
 async function pageInfo(session) {
+  if (useInproc(session)) return inprocBackend().pageInfo(session);
   /* CDP 守卫（读路径这一道；act / snapshot / rect / screenshot 各自还有一道） */
   const refuse = await ownTabRefusal(session, 'page-info');
   if (refuse) return Object.assign({ url: '', title: '', tabs: [] }, refuse);
@@ -1041,6 +1557,7 @@ function parseWindowSize(w, h) {
 }
 
 async function resize(session, w, h) {
+  if (useInproc(session)) return inprocBackend().resize(session, w, h);
   const refuse = cdpRefusal(session);
   if (refuse) return refuse;
   const size = parseWindowSize(w, h);
@@ -1075,6 +1592,7 @@ function buildMaximizedConfig(opts) {
  * 用于 open(maximize) 后校验最大化是否真的生效（企业策略等可能忽略
  * --start-maximized），失败则由 server 触发 resize 兜底。 */
 async function viewport(session) {
+  if (useInproc(session)) return inprocBackend().viewport(session);
   const out = await exec(session, ['eval', "(function(){return window.innerWidth+'x'+window.innerHeight})()"]);
   if (!out.ok) return null;
   const m = String(out.result || '').match(/(\d+)x(\d+)/);
@@ -1099,6 +1617,7 @@ const FULLSCREEN_SNIPPET =
   'return \'fullscreen\'; }';
 
 async function fullscreen(session) {
+  if (useInproc(session)) return inprocBackend().fullscreen(session);
   const refuse = cdpRefusal(session);
   if (refuse) return refuse;
   const out = await exec(session, ['run-code', FULLSCREEN_SNIPPET]);
@@ -1114,21 +1633,31 @@ const RECT_SNIPPET =
   'el => { var r=el.getBoundingClientRect(); return Math.round(r.left)+\',\'+Math.round(r.top)+\',\''
   + '+Math.round(r.width)+\',\'+Math.round(r.height)+\',\'+window.innerWidth+\',\'+window.innerHeight; }';
 
+/* RECT_SNIPPET 的返回值解析（单一定义：老路的 eval 与快路径的 locator.evaluate 共用）。
+ * eval 的返回值被 CLI 又 JSON 序列化了一次，字符串带引号 —— 先剥再解析。 */
+const RECT_CSV_RE = /^(-?\d+),(-?\d+),(\d+),(\d+),(\d+),(\d+)$/;
+
+function parseRectCsv(raw) {
+  let text = raw;
+  if (typeof text === 'string' && /^".*"$/.test(text)) {
+    try { text = JSON.parse(text); } catch (_) { /* 保持原样 */ }
+  }
+  const m = String(text).match(RECT_CSV_RE);
+  if (!m) return null;
+  return { rect: { x: +m[1], y: +m[2], w: +m[3], h: +m[4] }, viewport: { w: +m[5], h: +m[6] } };
+}
+
 async function rect(session, ref) {
+  if (useInproc(session)) return inprocBackend().rect(session, ref);
   const r = String(ref == null ? '' : ref);
   if (!REF_RE.test(r)) return { ok: false, error: '读元素位置需要合法 ref（形如 e12），收到：' + JSON.stringify(r.slice(0, 40)) };
   const refuse = await ownTabRefusal(session, 'rect');
   if (refuse) return refuse;
   const out = await exec(session, ['eval', RECT_SNIPPET, r]);
   if (!out.ok) return out;
-  /* eval 的返回值被 CLI 又 JSON 序列化了一次，字符串带引号 —— 剥掉再解析 */
-  let text = out.result;
-  if (typeof text === 'string' && /^".*"$/.test(text)) {
-    try { text = JSON.parse(text); } catch (_) { /* 保持原样 */ }
-  }
-  const m = String(text).match(/^(-?\d+),(-?\d+),(\d+),(\d+),(\d+),(\d+)$/);
-  if (!m) return { ok: false, error: '元素位置解析失败：' + JSON.stringify(String(text).slice(0, 60)) };
-  return { ok: true, rect: { x: +m[1], y: +m[2], w: +m[3], h: +m[4] }, viewport: { w: +m[5], h: +m[6] } };
+  const pos = parseRectCsv(out.result);
+  if (!pos) return { ok: false, error: '元素位置解析失败：' + JSON.stringify(String(out.result).slice(0, 60)) };
+  return { ok: true, rect: pos.rect, viewport: pos.viewport };
 }
 
 const MAXIMIZED_CONFIG_FILE = 'auto-cli.config.json';
@@ -1146,6 +1675,7 @@ function uploadPathAllowed(baseDir, text) {
 }
 
 async function act(session, command, ref, text) {
+  if (useInproc(session)) return inprocBackend().act(session, command, ref, text);
   let argv;
   try {
     argv = buildArgv(String(command || ''), ref, text);
@@ -1154,6 +1684,19 @@ async function act(session, command, ref, text) {
   }
   if (String(command) === 'upload' && text != null && !uploadPathAllowed(dataDir, text)) {
     return { ok: false, error: 'upload 只允许 data/ 目录内的文件（安全限制），收到：' + String(text).slice(0, 120) };
+  }
+  /* CDP 快路径：守卫与动作合并成一条 run-code（见上方 CDP 快路径一节）。
+   * 归属判定**从 ownTabRefusal 挪进了同一条命令里**，所以这条分支必须在它之前。 */
+  const fastToken = MERGED_ACTIONS[String(command || '')] ? fastPathToken(session) : null;
+  if (fastToken && REF_RE.test(String(ref == null ? '' : ref))) {
+    const fast = await execCode(session, mergedActCode(fastToken, String(command), String(ref), String(text == null ? '' : text)), { timeoutMs: ACT_FAST_TIMEOUT_MS });
+    if (!fast.fallback) {
+      if (!fast.ok) return fast;               // 含 lostTab：前端据此整轮停手
+      const v = codeValue(fast.value) || {};
+      if (v.actError) return { ok: false, error: String(v.actError) };
+      return { ok: true, result: '', snapshot: usableSnapshot(v.snapshot) };
+    }
+    /* fallback：这条不该用快路径（弹窗态 / 老版本 CLI）→ 落到下面的老路 */
   }
   /* 守卫先过：标签页已经丢了就用「已不在」这条更根本的原因停手，别去算归属 */
   const refuse = await ownTabRefusal(session, String(command || ''));
@@ -1174,14 +1717,29 @@ async function act(session, command, ref, text) {
     }
   }
   const out = await exec(session, argv);
-  if (!out.ok) return out;
+  /* 失败分支的 discardArtifact 是**防御性**的，不是实测路径：实测（对抗评审复核过源码）失败的
+   * 动作是在 handler 里 throw，CLI 直接走 formatError，serialize()/_build() 根本没跑，
+   * 因此不会留下工件。但「响应里有 Error 段」与「有 Snapshot 段」并不互斥，版本一变就可能
+   * 同时出现 —— 那时这份文件同样没人读，留着就是永久垃圾。删掉不读：拿「动作失败之后」的页面
+   * 当下一步依据，正是这次改动要避免的那类过期依据。 */
+  if (!out.ok) { discardArtifact(out.artifact); return out; }
+  /* 动作之后的那份快照工件（只有部分动作有，见 snapshotArtifactRel）：
+   * 在这里就读掉，免得下面 markOwnTab 的早退把它落在盘上。
+   * 还要过 SNAPSHOT_TRUSTED_ACTIONS 那一关 —— 只有「动作自身完成条件已包住页面更新」的动作，
+   * 它的快照才配当下一步的页面依据；其余（hover/select/uncheck）当场丢弃，让下一步真取一次。 */
+  let postActionSnapshot = null;
+  if (SNAPSHOT_TRUSTED_ACTIONS[String(command || '')]) {
+    postActionSnapshot = usableSnapshot(readArtifactSnapshot(out.artifact));
+  } else {
+    discardArtifact(out.artifact);
+  }
   /* tab-select / tab-new 之后当前页是一个全新的浏览上下文（window.name 为空），
    * 不重新打标记的话下一步守卫会把它判成「切走了」而误杀整轮运行。 */
   if (String(command) === 'tab-select' || String(command) === 'tab-new') {
     const marked = await markOwnTab(session);
     if (!marked.ok) return marked;
   }
-  return { ok: true, result: out.result };
+  return { ok: true, result: out.result, snapshot: postActionSnapshot };
 }
 
 /* 截图失败里哪些值得重试：**只有超时**。
@@ -1190,12 +1748,38 @@ async function act(session, command, ref, text) {
  * 丢一次整步就没图了。丢标签页 / 弹窗这类失败不重试：重试没意义，只是白等一个超时周期。 */
 const SHOT_TIMEOUT_RE = /TimeoutError|timeout|超时/i;
 
-async function screenshot(session, name) {
+/* ref 可选：带上就在同一条命令里把该元素的位置与视口一并读回来（前端据此把「即将被
+ * 操作的元素」标到图上）。CDP 下这一步尤其值钱 —— 老路要跑四次进程（守卫+rect、
+ * 守卫+截图），合并后一次。 */
+async function screenshot(session, name, ref) {
+  if (useInproc(session)) return inprocBackend().screenshot(session, name, ref);
+  const file = String(name || 'shot').replace(/[^A-Za-z0-9_-]/g, '') + '.png';
+  const fastToken = fastPathToken(session);
+  if (fastToken) {
+    const r = String(ref == null ? '' : ref);
+    const fast = await execCode(session, mergedShotCode(fastToken, file, REF_RE.test(r) ? r : null));
+    if (!fast.fallback) {
+      if (!fast.ok) return fast;               // 含 lostTab：前端据此整轮停手
+      const v = codeValue(fast.value) || {};
+      /* 截图本身失败才算失败：位置读不到只是标不出框（老路同样如此），不影响这张图 */
+      if (v.shotError) return { ok: false, error: String(v.shotError) };
+      const p = path.join(dataDir, file);
+      try {
+        const dataUrl = 'data:image/png;base64,' + fs.readFileSync(p).toString('base64');
+        const out = { ok: true, dataUrl };
+        const pos = parseRectCsv(v.rectCsv);
+        if (pos) { out.rect = pos.rect; out.viewport = pos.viewport; }
+        return out;
+      } catch (_) {
+        return { ok: false, error: '截图文件读取失败（预期路径 ' + p + '）' };
+      }
+    }
+    /* fallback：弹窗态或这个 CLI 版本不认 run-code → 落到下面的老路 */
+  }
   /* 守卫也在这里：截图会把当前页面拍下来存进 data/ 与运行记录 ——
    * 当前页若是用户自己的页面，那就是把人家页面收进了我们的记录里。 */
   const refuse = await ownTabRefusal(session, 'screenshot');
   if (refuse) return refuse;
-  const file = String(name || 'shot').replace(/[^A-Za-z0-9_-]/g, '') + '.png';
   const argv = ['screenshot', '--filename', file];
   let out = await exec(session, argv);
   /* 只重试一次；两次都超时就如实把失败带回去（不装成功，也不无限重试） */
@@ -1215,8 +1799,21 @@ async function screenshot(session, name) {
  * 文件并退出进程；只有我们自己 launch 出来的实例才在 gracefullyCloseSet 里）。 */
 async function close(session) {
   const st = sessionState.get(session);
+  /* 进程内后端自己持有连接：交给它关（它会区分「关掉我们起的实例」与「只断开
+   * 附身连接」，并把 isolated 的临时 profile 清掉，最后删掉它会话表里的条目）。
+   * sessionState 一并清干净 —— 那是 CLI 侧的守卫状态，不该跨轮留着。
+   * **页已经被用户关掉时同样要走到这里**：useInproc 问的是归属（那条会话还在不在进程内
+   * 手上），不是页活着没（见它的注释）—— 只有这条 close 能把上下文与临时 profile 收干净。 */
+  if (useInproc(session)) {
+    const r = await inprocBackend().close(session);
+    sessionState.delete(session);
+    try { fs.unlinkSync(codeFilePath(session)); } catch (_) { /* 没有就算了 */ }
+    return r;
+  }
   const out = await exec(session, ['close']);
   sessionState.delete(session);
+  /* 快路径的代码文件随会话一起清掉（每会话一份，覆盖式使用，留着只会积灰） */
+  try { fs.unlinkSync(codeFilePath(session)); } catch (_) { /* 没有就算了 */ }
   if (!out.ok) return out;
   /* closed=false 表示关闭前压根没有开着的会话 —— 前端据此别说「浏览器已关闭」。
    * ok/mode/attached 三个字段是既有契约，保持原样。 */
@@ -1244,5 +1841,17 @@ module.exports = {
   MODES,
   set dataDir(v) { dataDir = v; },
   get dataDir() { return dataDir; },
-  _test: { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, MODES, CDP_CHANNELS, PROFILE_DIR, CDP_TARGET_MAX, openPlan, validateCdpTarget, newTabToken, tabMarkSnippet, tabGuardOk, ownTabRefusal, markOwnTab, tabSelectRefusal, isHttpDiscoveryDead, MODAL_GUARD_RE, MODAL_SAFE_COMMANDS, TAB_MARK_SNIPPET: tabMarkSnippet, TAB_READ_SNIPPET, parseDevToolsPort, parseDevToolsActivePort, wsEndpointForPortPath, cdpUserDataDirs, channelPortFile, httpEndpointForPort, httpTargetPort, resolveHttpTarget, cdpProbe, cdpProbeHint, humanCdpProbeError, humanCdpAttachError, cdpAttachConfig, probeTcp, CDP_CONFIG_FILE, reuseCdpTab, CDP_ATTACH_TIMEOUT_MS, cdpRefusal, sessionState, parseEnvelope, unwrapResult, treeToSnapshotYaml, uploadPathAllowed, parseWindowSize, buildMaximizedConfig, FULLSCREEN_SNIPPET, RECT_SNIPPET, parseTabs, summarizeError, clipMiddle, MAXIMIZED_CONFIG_FILE },
+  _test: { quoteArg, validateAct, buildArgv, OPS, REF_RE, BROWSERS, MODES, CDP_CHANNELS, PROFILE_DIR, CDP_TARGET_MAX, openPlan, validateCdpTarget, newTabToken, tabMarkSnippet, tabGuardOk, ownTabRefusal, markOwnTab, tabSelectRefusal, isHttpDiscoveryDead, MODAL_GUARD_RE, MODAL_SAFE_COMMANDS, TAB_MARK_SNIPPET: tabMarkSnippet, TAB_READ_SNIPPET, parseDevToolsPort, parseDevToolsActivePort, wsEndpointForPortPath, cdpUserDataDirs, channelPortFile, httpEndpointForPort, httpTargetPort, resolveHttpTarget, cdpProbe, cdpProbeHint, humanCdpProbeError, humanCdpAttachError, cdpAttachConfig, probeTcp, CDP_CONFIG_FILE, reuseCdpTab, CDP_ATTACH_TIMEOUT_MS, cdpRefusal, sessionState, parseEnvelope, unwrapResult, treeToSnapshotYaml, uploadPathAllowed, parseWindowSize, buildMaximizedConfig, FULLSCREEN_SNIPPET, RECT_SNIPPET, parseTabs, summarizeError, clipMiddle, MAXIMIZED_CONFIG_FILE,
+    /* CDP 快路径（守卫 + 动作合并成一条 run-code）*/
+    MERGED_ACTIONS, GUARD_LOST_MARK, GUARD_UNKNOWN_MARK, LOST_TAB_ERROR, GUARD_RACE_MS,
+    ACTION_TIMEOUT_MS, ACT_FAST_TIMEOUT_MS, SETTLE_MS, SETTLE_REQ_CAP_MS, SETTLE_NAV_MS, SNAPSHOT_CAP_MS,
+    cliEnv, guardLines, jsLiteral, mergedActCode, mergedShotCode,
+    codeValue, parseRectCsv, fastPathToken, codeFilePath,
+    /* 动作后快照：路径认领、沙箱读回 / 丢弃、形状转写与「能不能用」的判定 */
+    snapshotArtifactRel, artifactAbsPath, readArtifactSnapshot, discardArtifact,
+    normalizeArtifactText, usableSnapshot,
+    /* 后端分发（进程内 playwright-core / playwright-cli）：选择规则、错误翻译、
+     * 以及进程内后端实例本身（测试要直接驱它，别经过 CLI 那条路） */
+    BACKENDS, DEFAULT_BACKEND, resolveBackend, useInproc, inprocBackend, openViaCli,
+    looksLikeBrowserMissing, humanBrowserError, humanProfileError },
 };

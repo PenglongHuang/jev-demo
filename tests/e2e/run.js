@@ -14,6 +14,8 @@
  *   S6 订单后台 · select 的「文本」补问（候选=下拉框真实选项，事故场景回归）
  *   S7 哨兵标签回归（参数归一后标签不残留「其他 · 展开下一批」）
  *   S8 外层就地编辑 + 错误条（可选中/可复制/可收起）
+ *   S9 UX 不变量（空态文案 / 检查条 / 关闭按钮可点性等，不跑任务）
+ *   S10 开跑后先暂停（人工登录 / 接管）—— 门内零 Jev 请求、继续后照跑、门内可中止
  * 运行：node tests/e2e/run.js   （或 npm run test:e2e）
  */
 'use strict';
@@ -387,11 +389,26 @@ async function configureMock(sysonePort, llmPort) {
   async function setTask(opts) {
     await fillLabel(/"任务目标"/, opts.goal);
     await fillLabel(/"起始 URL"/, opts.url);
-    if (opts.maxSteps == null && !opts.cadence) return;
+    if (opts.maxSteps == null && !opts.cadence && opts.pauseFirst == null) return;
     await clickLabel(/⚙ 运行参数/);
     await sleep(500);
     if (opts.maxSteps != null) await fillLabel(/"步数上限"/, String(opts.maxSteps));
     if (opts.cadence) await clickLabel(new RegExp('"' + opts.cadence + '"'));
+    /* 「开跑后先暂停」勾选框（S10）：先量当前态、需要才点 —— **不**依赖「点一下必翻转」。
+     * 这个框不像步数上限那样被无条件覆写，它会跨场景留存；一旦 S10 中途失败，盲目再点一下
+     * 会把后面每个场景都带进暂停门（全都卡死在等人点继续），失败现场反而更难查。
+     * 用 el.click() 而不是 clickLabel：页内没有别的同名控件，而 a11y 快照里 checkbox 的
+     * 标签形状没有先例可依（全仓这是第一个被测试点的勾选框），不值得为此押一个正则。 */
+    if (opts.pauseFirst != null) {
+      const cur = await uiProbe("(function(){var c=document.getElementById('autoPauseFirst');"
+        + "return {存在:!!c,checked:!!(c&&c.checked)}})()");
+      /* 控件不存在时**什么都不做**，把失败留给后面的 waitGate 去报「没等到门」——
+       * 那才是这个场景缺失功能时该有的信息。在这里解引用 null 抛 TypeError，只会让人
+       * 以为是选择器写错了，而不是功能没做。 */
+      if (cur.存在 && cur.checked !== Boolean(opts.pauseFirst)) {
+        await uiProbe("(function(){var c=document.getElementById('autoPauseFirst');c.click();return c.checked})()");
+      }
+    }
     await clickLabel(/保存并应用/);
     for (let i = 0; i < 10; i++) {
       await sleep(300);
@@ -605,6 +622,9 @@ async function configureMock(sysonePort, llmPort) {
       + (s9h.受限高度 > s9h.自然高度 + 2 ? '（max-height 真的在起作用）' : '（max-height 未生效=非问题）')
       + '；视口=' + s9h.视口高);
 
+    /* 两个耗时（spec 2026-09-28）：真实一轮的断言在 S1 里做（S1.1~3），
+     * 老记录的降级断言在合成会话打开之后做（S9.18~19，见下面 S9.9 之后）。 */
+
     /* 条目 2 + 5 + 7 + 9：打开合成历史会话，验面板几何、树、标签、导出 */
     const s9d = await uiProbe("(function(){"
       + "document.getElementById('autoSessBtn').click();"
@@ -648,6 +668,49 @@ async function configureMock(sysonePort, llmPort) {
       '步骤 ' + s9d.步骤数 + ' 行 / 行动子行 ' + s9d.行动子行数 + ' 行（修复前 12 行）');
     record('S9.9 步骤标签折行后不再截断元素名', s9d.被截断标签.length === 0,
       s9d.被截断标签.length ? '仍被截断：' + s9d.被截断标签.slice(0, 2).join(' | ') : '全部完整');
+
+    /* ---------- 老记录的降级路径（2026-09-28）----------
+     * S9_ID 是合成记录：没有 ms/jevMs，响应里也没有 usage。界面必须显示得诚实 ——
+     * 每步右侧写「该记录无耗时数据」而不是 0ms，全树不得出现 NaN/undefined/Infinity。 */
+    try {
+      const old = await uiProbe("(function(){"
+        + "var kids=document.querySelectorAll('#flowTree .tn.kid');"
+        + "var jevs=[];"
+        + "Array.prototype.forEach.call(kids,function(k){"
+        + "var j=k.querySelector('.dur.jev');jevs.push(j?j.textContent.trim():'(无)');"
+        + "});"
+        + "var tree=document.getElementById('flowTree');"
+        + "var all=tree?tree.textContent:'';"
+        + "return {步数:kids.length,文案:jevs.slice(0,3),"
+        + "有NaN:/NaN|undefined|Infinity/.test(all)}})()");
+      record('S9.18 老记录降级：树上写 —（不写 0ms、不写 NaN）',
+        old.步数 > 0 && !old.有NaN && old.文案.every((t) => t === '—'),
+        '文案=' + JSON.stringify(old.文案));
+    } catch (e) { record('S9.18 老记录降级', false, e.message); }
+
+    /* 老记录的行动子行：右侧耗时写 '—'（而不是 0ms / NaN）。
+     * 合成记录里第 2 步有 2 次调用（S9.7 已断言子行存在），正好当样本。 */
+    try {
+      const sub = await uiProbe("(function(){"
+        + "var ks=document.querySelectorAll('#flowTree .tn.act-kid');"
+        + "var out=[];"
+        + "Array.prototype.forEach.call(ks,function(k){"
+        + "var s=k.querySelector('.dur');out.push(s?s.textContent.trim():'(无)')});"
+        + "return {子行数:ks.length,耗时:out}})()");
+      record('S9.20 老记录的行动子行耗时写 —，不写 0ms',
+        sub.子行数 > 0 && sub.耗时.every((t) => t === '—'),
+        '子行=' + sub.子行数 + ' 耗时=' + JSON.stringify(sub.耗时));
+    } catch (e) { record('S9.20 老记录行动子行耗时', false, e.message); }
+
+    /* 老记录点开行动详情：没有 usage 也没有耗时 → 头部不该冒出 NaN/undefined
+     * （token 那行整段不出现才是对的） */
+    try {
+      await clickTreeNode(/Jev 首轮/);
+      const h = await uiProbe("(function(){var e=document.getElementById('fdHead');"
+        + "return e?e.textContent.trim():null})()");
+      record('S9.19 老记录的行动详情头部没有 NaN/undefined',
+        typeof h === 'string' && !/NaN|undefined/.test(h), '头部=' + JSON.stringify(h));
+    } catch (e) { record('S9.19 老记录行动详情头部', false, e.message); }
     record('S9.5 历史会话可导出（按钮可见且指向被查看的会话）',
       s9d.导出可见 && s9d.导出文案.indexOf(S9_ID) !== -1,
       '导出按钮=' + (s9d.导出可见 ? '可见' : '隐藏') + '「' + s9d.导出文案 + '」');
@@ -747,6 +810,44 @@ async function configureMock(sysonePort, llmPort) {
       + '；卡片图标注=' + (pngHasPixel(card.dataUrl, [225, 29, 72]) ? '有' : '没有（' + (card.reason || '图里无标记色') + '）')
       + '（' + anno.detail + '）'
       + '；被驱动页面=' + (pageClean ? '干净（无标注痕迹）' : (shot ? '不该有标注却出现了' : '本轮没找到驱动页截图')));
+    /* ---------- Jev 耗时（2026-09-28 收窄为只展示 Jev）----------
+     * 树上每一步右侧一个 Jev 数字（该步各段 Jev 调用之和 + 次数在 title）；行动子行显示
+     * 每次调用各自的耗时（并行召回是一个行动，挂的是最慢那批）；行动详情头部显示这次调用的
+     * 耗时与输入/输出 token。步耗时/构成条/对账条已按用户要求撤掉，这里也不再断言它们。 */
+    try {
+      const d = await uiProbe("(function(){"
+        + "var kids=document.querySelectorAll('#flowTree .tn.kid');"
+        + "var withJev=0,sample='';"
+        + "Array.prototype.forEach.call(kids,function(k){"
+        + "  var j=k.querySelector('.dur.jev');"
+        + "  if(j&&j.textContent.trim()){withJev++;if(!sample)sample=j.textContent.trim()}"
+        + "});"
+        + "return {步数:kids.length,有Jev:withJev,样本:sample}})()");
+      /* 这条同时是「每次调用各自的 ms 通了」的证据：合计是从 actionsOf 的每个行动上取的，
+       * 行动上没数就只能渲染成「无耗时记录」，不会是 `Jev 32ms`（并行召回是一个行动，
+       * 它上面挂的是最慢那一批的耗时 —— 墙钟口径）。
+       * 树宽 320px，所以文案**只有数字**（次数在 title 与详情头部）。 */
+      record('S1.1 树上每步都显示 Jev 耗时（形如「Jev x.xs」）',
+        d.步数 > 0 && d.有Jev === d.步数 && /^Jev [\d.]+m?s$/.test(d.样本),
+        '步数=' + d.步数 + ' 有Jev=' + d.有Jev + ' 样本=' + d.样本);
+    } catch (e) { record('S1.1 Jev 耗时', false, e.message); }
+
+    /* 行动详情头部的「耗时 + 输入/输出 token」。
+     * 进入路径是「先点步骤节点 → 再点该步第一张行动卡片」：树上子行只在「本步多次模型调用」
+     * 时才渲染，而 S1 这里每步只有一次 Jev 调用（树上没有子行可点）。 */
+    try {
+      await clickTreeNode(/步骤 1 ·/);
+      const m = await uiProbe("(function(){"
+        + "var c=document.querySelector('#fdBody .acard');if(!c)return {错误:'步骤详情里没有行动卡片'};"
+        + "c.click();"
+        + "return new Promise(function(res){setTimeout(function(){"
+        + "var h=document.getElementById('fdHead');"
+        + "res({头部:h?h.textContent.trim():null})},400)})})()");
+      record('S1.2 行动详情头部显示耗时与输入/输出 token',
+        typeof m.头部 === 'string' && /耗时 [\d.]+m?s/.test(m.头部)
+        && /输入 [\d,]+ tokens/.test(m.头部) && /输出 [\d,]+ tokens/.test(m.头部),
+        '头部=' + JSON.stringify(m.头部 || m));
+    } catch (e) { record('S1.2 行动详情耗时与 token', false, e.message); }
     await saveShot('e2e-s1-archive');
   } catch (e) { record('S1 连续模式 · 归档对账单', false, e.message); }
 
@@ -978,11 +1079,137 @@ async function configureMock(sysonePort, llmPort) {
         : dots.map((d) => d.s + '=' + d.w + 'x' + d.h).join(' '));
   } catch (e) { record('树状态点尺寸不变量', false, e.message); }
 
+  /* ---------- S10 开跑后先暂停（人工登录 / 接管）----------
+   * 勾上之后，浏览器打开即停在门上等人工操作，**不进 agent 循环**。
+   * 核心不变量是「门内零 Jev 请求」，不是「界面上有没有一条按钮」：门存在的唯一理由是让
+   * 第 1 步的快照发生在人工操作**之后**，而快照就发生在第一个 Jev 请求之前 —— 门内只要
+   * 发过一次请求，这个理由就不成立了。UI 断言只作辅助，请求计数才是判据。 */
+  /* S2 起每个场景都默认「任务浏览器已经开着」（isolated 模式跑完不自动关，靠上一个场景
+   * 留下来）—— 这让 E2E_ONLY=s2…s8 单跑必死在第一个 taskSnapshot/resetMailbox 上。
+   * S10 三进三出，自己确保这只浏览器在场，单跑也能复核。 */
+  async function ensureDemoBrowser(url) {
+    const s = await pageApi('/api/browser/snapshot', {});
+    if (s && s.ok) return;
+    const o = await pageApi('/api/browser/open', { url: url, browser: BROWSER });
+    if (!o || !o.ok) throw new Error('准备任务浏览器失败：' + ((o && o.error) || '无响应'));
+    await sleep(900);
+  }
+
+  async function waitGate(timeoutMs) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < (timeoutMs || 25000)) {
+      await sleep(400);
+      const g = await uiProbe("(function(){var b=document.querySelector('#fdConfirm .confirm-bar');"
+        + "var p=document.getElementById('autoRunPill');var e=document.getElementById('autoErrorBar');"
+        + "return {gate:!!b,bar:b?b.textContent.replace(/\\s+/g,' ').trim():'',"
+        + "pill:p?p.textContent.trim():'',state:p?String(p.dataset.state||''):'',"
+        + "err:(e&&!e.hidden)?e.textContent.slice(0,140):''}})()");
+      if (g.gate) return g;
+      /* 没等到门就已经结束 = 门根本没生效，直接把现场（终态 + 错误条）带出去，
+       * 否则只剩一句「超时」，看不出是门没开还是浏览器没起来 */
+      if (g.state && g.state !== 'running') throw new Error('未到门即结束：state=' + g.state + ' / ' + g.err);
+    }
+    throw new Error('等待暂停门超时（' + Math.round((timeoutMs || 25000) / 1000) + 's）');
+  }
+  const gateGone = () => uiProbe("(function(){return !document.querySelector('#fdConfirm .confirm-bar')})()");
+  const elapsedText = () => uiProbe("(function(){var e=document.getElementById('autoElapsed');return e?e.textContent:''})()");
+
+  /* 判据靠 mock 的请求计数，所以只在 mock 模式下有断言面（real 模式无计数可读） */
+  if (want('s10') && mocks) try {
+    /* ---- 第 1 轮：门内零请求 → 继续 → 正常跑完 ---- */
+    await ensureDemoBrowser(DEMO_URL);
+    await resetMailbox();
+    await setTask({ goal: GOAL_ARCHIVE, url: DEMO_URL, cadence: '连续自动', pauseFirst: true });
+    const base = (await mocks.report()).reqCount;
+    await clickLabel(/打开浏览器并开始/);
+    const gate = await waitGate();
+    /* 浏览器必须真的开着 —— 这一条比「零请求」更贴近用户诉求：门开着而浏览器没起来，
+     * 人就没地方登录。读一次快照即证明页面已被驱动到可操作状态。
+     * 注意它是**测试自己**发的探测（走 /api/browser，不经 Jev），所以必须排在下面
+     * 的 reqCount 断言之后，别把探针算进门内动作里。 */
+    const reqAtGate = (await mocks.report()).reqCount;
+    const drivable = await pageApi('/api/browser/snapshot', {});
+    record('S10.1 勾选后停在门上（浏览器已可操作、状态仍是运行中）',
+      gate.pill === '已暂停' && gate.state === 'running' && Boolean(drivable && drivable.ok)
+      && /继续/.test(gate.bar),
+      'pill=「' + gate.pill + '」state=' + gate.state
+      + '；门文案=「' + gate.bar + '」'
+      + '；浏览器=' + (drivable && drivable.ok ? '已打开且可快照' : ('快照失败 ' + ((drivable && drivable.error) || ''))));
+
+    /* 用时冻结：进门前先睡 1.5s 保证已经过至少一个 tick，两次读数才都是「门内的值」。
+     * 本机 tick 是 1s，读太早会读到进门那一帧的数，与后面比较就成了假红。 */
+    await sleep(1500);
+    const e1 = await elapsedText();
+    await sleep(4000);
+    const e2 = await elapsedText();
+
+    record('S10.2 门内零 Jev 请求（核心不变量：第一次快照必在人工操作之后）',
+      reqAtGate === base && e1 === e2,
+      'Jev 请求 ' + base + ' → ' + reqAtGate + '（应不变）；用时 ' + e1 + ' → ' + e2
+      + (e1 === e2 ? '（冻结）' : '（★ 暂停时长被计入了）'));
+
+    await clickLabel(/已完成，继续/);
+    const { flat, state } = await waitEnd('s10-terminal');
+    await sleep(1200);
+    const after = (await mocks.report()).reqCount;
+    const gone = await gateGone();
+    const box = await taskSnapshot();
+    const archived = /已归档 1 封/.test(box) && !/listitem "邮件[^"]*9 月电子对账单/.test(box);
+    record('S10.3 点「继续」后照常进循环并跑完',
+      state === 'done' && after > reqAtGate && gone && archived,
+      '终止 state=' + state + '；请求 ' + reqAtGate + ' → ' + after + '；门已收=' + gone
+      + '；归档结果=' + (archived ? '正确' : '异常') + '；时间线=' + flat.slice(0, 80).replace(/\n/g, ' '));
+
+    /* ---- 第 2 轮：门内的「中止」必须有效 ----
+     * 门开着时 for 循环没在跑，没有任何东西在读 abortFlag —— 顶部那个 ■ 中止 若没人放行
+     * 这道门，用户点下去就是毫无反应（按钮看着能点、点了没动静）。这条专门盯这个。
+     * 用元素 id 而不是 clickLabel：门上也有一个「■ 中止」，两个按钮文案**故意**一样
+     * （干的是同一件事），按文案选会撞车。 */
+    await ensureDemoBrowser(DEMO_URL);
+    await resetMailbox();
+    await setTask({ goal: GOAL_ARCHIVE, url: DEMO_URL, cadence: '连续自动', pauseFirst: true });
+    const base2 = (await mocks.report()).reqCount;
+    await clickLabel(/打开浏览器并开始/);
+    await waitGate();
+    const reqAtGate2 = (await mocks.report()).reqCount;
+    await uiProbe("(function(){document.getElementById('autoStop').click();return true})()");
+    const r2 = await waitEnd('s10-abort');
+    await sleep(1000);
+    const reqAfter2 = (await mocks.report()).reqCount;
+    const gone2 = await gateGone();
+    record('S10.4 门内点顶部「■ 中止」有效（不再毫无反应）',
+      r2.state === 'aborted' && reqAtGate2 === base2 && reqAfter2 === base2 && gone2,
+      '终止 state=' + r2.state + '；门内请求 ' + base2 + ' → ' + reqAtGate2 + ' → ' + reqAfter2
+      + '（应全程不变）；门已收=' + gone2);
+
+    /* ---- 第 3 轮：不勾选时门不得出现（零回归）----
+     * 判据不能只看「没看见门」—— 门要是晚 30 秒才出现，8 秒的观察窗口会放它过去。
+     * 所以同时要求窗口内**确实发生过 Jev 请求**：请求都发了，说明早已进入循环，
+     * 门不可能再开。两条一起才叫「没有门」。 */
+    await ensureDemoBrowser(DEMO_URL);
+    await resetMailbox();
+    await setTask({ goal: GOAL_ARCHIVE, url: DEMO_URL, cadence: '连续自动', pauseFirst: false });
+    const base3 = (await mocks.report()).reqCount;
+    await clickLabel(/打开浏览器并开始/);
+    let gateSeen = false;
+    let early = 0;
+    for (let i = 0; i < 16; i++) {
+      await sleep(500);
+      if (!(await gateGone())) gateSeen = true;
+      early = (await mocks.report()).reqCount - base3;
+      if (early >= 2) break;
+    }
+    const r3 = await waitEnd('s10-nogate');
+    record('S10.5 不勾选时行为与从前一致（门不出现、直接进循环）',
+      !gateSeen && early >= 2 && r3.state === 'done',
+      '门出现=' + gateSeen + '；8s 内 Jev 请求=' + early + '（≥2 即证明已进循环）；终止 state=' + r3.state);
+  } catch (e) { record('S10 开跑后先暂停', false, e.message); }
+
   /* ---------- 构造契约终审 + LLM prompt 可见性 ---------- */
   if (mocks) {
     try {
       const rep = await mocks.report();
-      record('M1 前端构造契约（每请求 3 问 / 23 动作候选 / 参数候选 ⊆ 快照 ref（密集页自动裁剪））',
+      record('M1 前端构造契约（每请求 3 问 / 22 动作候选 / 参数候选 ⊆ 快照 ref（密集页自动裁剪））',
         rep.violations.length === 0,
         rep.violations.length ? rep.violations.slice(0, 4).join(' | ') : '共 ' + rep.reqCount + ' 次请求零违规');
       /* oracle 每轮决策日志（排障证据） */

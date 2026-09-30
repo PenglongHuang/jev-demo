@@ -4,6 +4,9 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>云上书城订单中台</title>
+<!-- 企业外壳：模块 rail / KPI 条 / 通知中心 / 抽屉 / 状态栏 / 公告跑马灯 / 实时模拟开关。
+     本页原有的样式与结构一律保持不动，外壳只做加法（见 enterprise.css / enterprise.js 顶部注释）。 -->
+<link rel="stylesheet" href="enterprise.css" />
 <style>
   :root {
     --bg: #f6f7f9; --panel: #fff; --border: #e7e8ec; --border-strong: #d7d9e0;
@@ -12,6 +15,7 @@
     --red: #dc2626; --red-soft: #fdecec; --amber: #92400e; --amber-soft: #fef3c7;
     --radius: 12px;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --ent-maxw: 1560px;          /* 让 KPI 条 / 公告条与主容器同宽 */
   }
   * { box-sizing: border-box; }
   body {
@@ -21,22 +25,24 @@
   :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   /* ---------- 顶栏 ---------- */
+  /* 刻意不换行：外壳挂载的铃铛 / 用户菜单 / 模拟开关必须始终跟导航同一行，
+   * 顶到边时由导航自己内部折行（.nav 有 flex-wrap）来吸收宽度 */
   .topbar {
-    position: sticky; top: 0; z-index: 10;
-    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    position: sticky; top: 0; z-index: 30;
+    display: flex; align-items: center; gap: 12px; flex-wrap: nowrap;
     background: rgba(255,255,255,.9); backdrop-filter: blur(8px);
-    border-bottom: 1px solid var(--border); padding: 10px 22px;
+    border-bottom: 1px solid var(--border); padding: 8px 22px;
   }
-  .brand { font-weight: 700; font-size: 15.5px; color: var(--accent); white-space: nowrap; }
-  .nav { display: flex; gap: 2px; flex-wrap: wrap; }
+  .brand { font-weight: 700; font-size: 15px; color: var(--accent); white-space: nowrap; }
+  .nav { display: flex; gap: 1px; flex-wrap: wrap; }
   .navlink {
-    padding: 6px 11px; border-radius: 8px; font-size: 13.5px; color: var(--text-2);
+    padding: 6px 9px; border-radius: 8px; font-size: 13px; color: var(--text-2);
     text-decoration: none; font-family: inherit; border: 1px solid transparent; background: none; cursor: pointer;
+    white-space: nowrap;
   }
   .navlink:hover { background: #f2f3f6; color: var(--text); }
   .navlink.active { background: var(--accent-soft); color: var(--accent); font-weight: 650; }
   .spacer { flex: 1; }
-  .who { font-size: 12.5px; color: var(--text-3); white-space: nowrap; }
   .btn {
     padding: 7px 14px; font-size: 13px; font-weight: 600; font-family: inherit; cursor: pointer;
     border-radius: 9px; border: 1px solid var(--border-strong); background: #fff; color: var(--text-2);
@@ -45,48 +51,93 @@
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .btn:disabled { opacity: .55; cursor: not-allowed; border-color: var(--border-strong); color: var(--text-3); background: #f4f5f7; }
   .btn:disabled:hover { border-color: var(--border-strong); color: var(--text-3); }
+  .btn.mini { padding: 4px 10px; font-size: 12px; font-weight: 600; }
 
   /* ---------- 布局 ---------- */
   .layout { max-width: 1560px; margin: 20px auto; padding: 0 22px; }
   .panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+
+  /* ---------- 筛选区（三行：主条件 / 扩展条件 / 已应用条件） ---------- */
   .filters {
-    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    display: flex; flex-direction: column; gap: 10px;
     background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
     padding: 13px 16px; margin-bottom: 16px;
   }
+  .frow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .frow + .frow { border-top: 1px dashed var(--border); padding-top: 10px; }
   .filters input[type="search"] {
     flex: 1; min-width: 240px; max-width: 400px; padding: 8px 12px; font-size: 13.5px; font-family: inherit;
     border: 1px solid var(--border-strong); border-radius: 9px; outline: none; background: #fbfbfc;
   }
-  .sel, .date {
+  .sel, .date, .amt {
     padding: 8px 10px; font-size: 13px; font-family: inherit;
     border: 1px solid var(--border-strong); border-radius: 9px; background: #fff; color: var(--text-2); outline: none;
   }
   .date { width: 152px; }
-  .filters input:focus, .sel:focus, .date:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .filters .lbl { font-size: 12.5px; color: var(--text-3); }
+  .amt { width: 92px; font-family: var(--mono); }
+  .filters input:focus, .sel:focus, .date:focus, .amt:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .filters .lbl { font-size: 12.5px; color: var(--text-3); white-space: nowrap; }
+  .filters .fdivider { width: 1px; height: 20px; background: var(--border); }
+  .applied-none { font-size: 12.5px; color: var(--text-3); }
 
   .list-panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
-  .list-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 13px 18px; border-bottom: 1px solid var(--border); }
+  .list-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 13px 18px; border-bottom: 1px solid var(--border); }
   .list-head h1 { font-size: 16px; margin: 0; }
   .list-head .meta { font-size: 12px; color: var(--text-3); font-family: var(--mono); }
 
+  /* ---------- 二级分组 tab ---------- */
+  .tabs {
+    display: flex; align-items: center; gap: 2px; padding: 0 12px;
+    border-bottom: 1px solid var(--border); background: #fbfbfd; overflow-x: auto;
+  }
+  .tabs button {
+    display: flex; align-items: center; gap: 6px; padding: 11px 12px; font-size: 13.5px; font-family: inherit;
+    background: none; border: 0; border-bottom: 2px solid transparent; color: var(--text-3); cursor: pointer; white-space: nowrap;
+  }
+  .tabs button:hover { color: var(--text); }
+  .tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 650; }
+  .tabs .tcount {
+    font-size: 11px; font-family: var(--mono); background: #eef0f4; color: var(--text-3);
+    border-radius: 100px; padding: 1px 7px;
+  }
+  .tabs button[aria-selected="true"] .tcount { background: var(--accent-soft); color: var(--accent); }
+
   /* ---------- 订单表格 ---------- */
   .table-wrap { overflow-x: auto; }
-  table.orders { width: 100%; min-width: 1200px; border-collapse: collapse; table-layout: fixed; font-size: 12.8px; }
+  table.orders { width: 100%; min-width: 1250px; border-collapse: collapse; table-layout: fixed; font-size: 12.8px; }
   table.orders th {
     text-align: left; font-size: 12px; font-weight: 600; color: var(--text-3); white-space: nowrap;
     padding: 9px 12px; background: #fafbfd; border-bottom: 1px solid var(--border);
   }
+  table.orders th.c-pick { text-align: center; }
   table.orders td {
     padding: 11px 12px; border-bottom: 1px solid var(--border);
     vertical-align: top; color: var(--text-2); line-height: 1.6; word-break: break-word;
   }
+  table.orders td.c-pick { text-align: center; }
+  table.orders td.c-pick input { accent-color: var(--accent); }
   table.orders tr.order:hover td { background: #fafbfd; }
   table.orders tr.shipped td { background: #f5fcf8; }
   table.orders tr.shipped:hover td { background: #f0faf4; }
   table.orders tr.shipped td:first-child { box-shadow: inset 3px 0 0 var(--green); }
+  /* 密度切换：只改内边距，不动任何文本 */
+  table.orders.dense td { padding: 5px 12px; }
+  table.orders.dense .note, table.orders.dense .masked { display: none; }
+
+  /* 可排序表头：箭头是子节点，点击切换「下单时间 / 实付金额」 */
+  .th-sort {
+    display: inline-flex; align-items: center; gap: 4px; font: inherit; color: inherit; cursor: pointer;
+    background: none; border: 0; padding: 0;
+  }
+  .th-sort:hover { color: var(--accent); }
+  .sarrow { font-family: var(--mono); font-size: 11px; color: var(--text-3); }
+
   .no { font-family: var(--mono); font-size: 12.5px; font-weight: 700; color: var(--accent); display: block; }
+  button.no {
+    background: none; border: 0; padding: 0; cursor: pointer; text-align: left; font-family: var(--mono);
+    font-size: 12.5px; font-weight: 700; color: var(--accent);
+  }
+  button.no:hover { text-decoration: underline; }
   .sub { display: block; font-size: 12px; color: var(--text-3); margin-top: 3px; font-family: var(--mono); }
   .sub.plain { font-family: inherit; }
   .buyer { display: block; font-weight: 650; color: var(--text); font-size: 13px; }
@@ -97,6 +148,7 @@
   .note { display: block; font-size: 12px; color: var(--text-3); margin-top: 4px; }
   .amount { display: block; font-family: var(--mono); font-weight: 700; font-size: 13.5px; color: var(--text); }
   table.orders td.c-qty { text-align: center; font-family: var(--mono); color: var(--text); }
+  .st-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
   .badge {
     display: inline-block; padding: 2.5px 9px; border-radius: 100px; font-size: 12px;
     font-weight: 650; white-space: nowrap; border: 1px solid transparent;
@@ -106,8 +158,23 @@
   .badge.b-done { background: var(--green-soft); color: var(--green); border-color: #cceedf; }
   .badge.b-signed { background: #eef1f6; color: var(--text-2); border-color: #e2e6ee; }
   .badge.b-cancel { background: var(--red-soft); color: var(--red); border-color: #fbd9d9; }
+  /* 状态徽标上的「进度点」：纯 CSS 伪元素，不新增 DOM 节点（content 为空，不改可访问名） */
+  .badge::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 100px;
+    margin-right: 5px; vertical-align: 1px; background: currentColor; opacity: .55;
+  }
   .btn.ship { padding: 5px 13px; font-size: 12.5px; }
-
+  /* 操作列钉在右侧：演示窗口只有 ~1036px 宽，表格必然横向滚动，
+   * 钉住「发货」这一列才能让目标按钮始终在视口里（企业后台的常规做法）。 */
+  table.orders th.c-ops, table.orders td.c-ops {
+    position: sticky; right: 0; background: #fff;
+    box-shadow: -8px 0 10px -8px rgba(16, 18, 24, .18);
+  }
+  table.orders th.c-ops { background: #fafbfd; }
+  table.orders tr.order:hover td.c-ops { background: #fafbfd; }
+  table.orders tr.shipped td.c-ops { background: #f5fcf8; }
+  table.orders tr.shipped:hover td.c-ops { background: #f0faf4; }
+  .ops { display: flex; gap: 5px; flex-wrap: wrap; }
   .empty { padding: 56px 20px; text-align: center; color: var(--text-3); font-size: 13px; }
   .panel-foot {
     display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
@@ -120,8 +187,31 @@
   .shiplog b { color: var(--green); font-family: var(--mono); }
   .foot { text-align: center; color: var(--text-3); font-size: 12px; padding: 4px 20px 30px; }
 
+  /* ---------- 抽屉里的块 ---------- */
+  .pay-list { list-style: none; margin: 0; padding: 0; }
+  .pay-list li {
+    display: flex; align-items: center; gap: 10px; padding: 9px 11px; font-size: 12.5px;
+    border: 1px solid var(--border); border-radius: 10px; margin-bottom: 8px;
+  }
+  .pay-list .pay-amt { margin-left: auto; font-family: var(--mono); font-weight: 700; color: var(--text); }
+  .pay-list .pay-amt.good { color: var(--green); }
+  .pay-list .pay-amt.warn { color: var(--amber); }
+  .pay-list .pay-meta { display: block; font-size: 11.5px; color: var(--text-3); margin-top: 2px; }
+  .note-box {
+    border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 10px;
+    padding: 10px 12px; font-size: 12.8px; color: var(--text-2); line-height: 1.7; margin-bottom: 10px;
+  }
+  .note-box.warn { border-left-color: #f59e0b; }
+  .sent-line { font-size: 11.5px; color: var(--text-3); font-family: var(--mono); margin: 0 0 6px; }
+
+  /* 抽屉头要放得下 13 位订单号加子标题：允许折行、关闭按钮不参与收缩。
+   * 外壳（enterprise.css）本身不动，这里只补本页需要的两条。 */
+  .ent-drawer-head { flex-wrap: wrap; }
+  .ent-drawer-head h2 { word-break: break-all; }
+  .ent-drawer-head .ent-btn-mini { flex: none; }
+
   .toast {
-    position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%) translateY(14px);
+    position: fixed; bottom: calc(var(--ent-status-h) + 22px); left: 50%; transform: translateX(-50%) translateY(14px);
     background: #17181c; color: #fff; padding: 10px 18px; border-radius: 10px; font-size: 13px;
     opacity: 0; pointer-events: none; transition: .22s; z-index: 99; max-width: 88vw; text-align: center;
   }
@@ -129,7 +219,6 @@
 
   @media (max-width: 820px) {
     .layout { padding: 0 12px; }
-    .who { display: none; }
     .filters input[type="search"] { max-width: none; }
   }
 </style>
@@ -145,23 +234,49 @@
     <a class="navlink" href="#" data-page="客服工作台">客服工作台</a>
     <a class="navlink" href="#" data-page="数据报表">数据报表</a>
   </nav>
-  <span class="spacer"></span>
-  <span class="who">张运营（仓储主管）· admin@bookstore.example.com</span>
   <button class="btn" id="resetBtn" type="button">重置演示</button>
+  <!-- spacer 放在静态部分的末尾：外壳挂载的铃铛 / 用户菜单 / 实时区 / 模拟开关
+       会被 append 到它之后，于是天然右对齐，重置按钮紧跟在导航后面 -->
+  <span class="spacer"></span>
 </header>
+
+<!-- KPI 条 + 系统公告（由 Enterprise.mountShell 填充） -->
+<div class="ent-kpis" id="entKpis"></div>
+<div id="entTickerHost"></div>
 
 <div class="layout">
 
   <section class="filters" aria-label="订单筛选">
-    <input id="kw" type="search" aria-label="搜索订单号 / 买家昵称 / 收件人手机号"
-           placeholder="搜索订单号 / 买家昵称 / 收件人手机号" />
-    <select id="statusSel" class="sel" aria-label="订单状态"></select>
-    <select id="paySel" class="sel" aria-label="支付方式"></select>
-    <input id="fromDate" class="date" type="text" aria-label="开始日期" placeholder="开始日期 2026-09-20" />
-    <input id="toDate" class="date" type="text" aria-label="结束日期" placeholder="结束日期 2026-09-22" />
-    <button class="btn primary" id="queryBtn" type="button">查询</button>
-    <button class="btn" id="filterResetBtn" type="button">重置</button>
-    <span class="lbl" id="filterHint"></span>
+    <div class="frow">
+      <input id="kw" type="search" aria-label="搜索订单号 / 买家昵称 / 收件人手机号"
+             placeholder="搜索订单号 / 买家昵称 / 收件人手机号" />
+      <select id="statusSel" class="sel" aria-label="订单状态"></select>
+      <select id="paySel" class="sel" aria-label="支付方式"></select>
+      <input id="fromDate" class="date" type="text" aria-label="开始日期" placeholder="开始日期 2026-09-20" />
+      <input id="toDate" class="date" type="text" aria-label="结束日期" placeholder="结束日期 2026-09-22" />
+      <button class="btn primary" id="queryBtn" type="button">查询</button>
+      <button class="btn" id="filterResetBtn" type="button">重置</button>
+      <span class="lbl" id="filterHint"></span>
+    </div>
+    <div class="frow">
+      <span class="lbl">实付金额区间</span>
+      <!-- 名字刻意不叫「实付金额下限」：`spinbutton "实付金额下限"` 里含子串
+           `button "实付金额`，会把按 refOf 找「实付金额排序」按钮的正则抢走 -->
+      <input id="amtMin" class="amt" type="number" min="0" step="1" aria-label="金额下限" placeholder="下限" />
+      <span class="lbl">至</span>
+      <input id="amtMax" class="amt" type="number" min="0" step="1" aria-label="金额上限" placeholder="上限" />
+      <span class="fdivider" aria-hidden="true"></span>
+      <label class="lbl" for="warehouseSel">发货仓库</label>
+      <select id="warehouseSel" class="sel" aria-label="发货仓库"></select>
+      <label class="lbl" for="carrierSel">承运商</label>
+      <select id="carrierSel" class="sel" aria-label="承运商"></select>
+      <span class="spacer"></span>
+      <div class="ent-chips" id="riskChips" aria-label="异常标记筛选"></div>
+    </div>
+    <div class="frow">
+      <span class="ent-chips-lbl">已应用条件</span>
+      <div class="ent-chips" id="appliedHost"></div>
+    </div>
   </section>
 
   <main class="list-panel">
@@ -169,37 +284,52 @@
       <h1>订单管理</h1>
       <span class="meta" id="listMeta"></span>
       <span class="spacer"></span>
+      <button class="btn mini" id="densityBtn" type="button">密度 舒适</button>
+      <button class="btn mini" id="exportBtn" type="button">导出当前结果</button>
+      <button class="btn mini" id="refreshBtn" type="button">刷新</button>
       <span class="meta">下单时间倒序 · 每笔订单出库前均需人工复核</span>
     </div>
 
-    <div class="table-wrap">
-      <table class="orders" aria-label="订单列表（下单时间倒序，默认展示最近 15 笔）">
-        <colgroup>
-          <col style="width:152px" />
-          <col style="width:116px" />
-          <col style="width:276px" />
-          <col style="width:50px" />
-          <col style="width:130px" />
-          <col style="width:280px" />
-          <col style="width:120px" />
-          <col style="width:86px" />
-        </colgroup>
-        <thead>
-          <tr>
-            <th scope="col">订单信息</th>
-            <th scope="col">买家</th>
-            <th scope="col">商品明细</th>
-            <th scope="col">数量</th>
-            <th scope="col">实付金额</th>
-            <th scope="col">收货地址</th>
-            <th scope="col">状态</th>
-            <th scope="col">操作</th>
-          </tr>
-        </thead>
-        <tbody id="orderBody"></tbody>
-      </table>
+    <div class="tabs" role="tablist" aria-label="订单分组" id="tabBar"></div>
+
+    <div id="bulkHost"></div>
+
+    <div id="tableHost">
+      <div class="table-wrap" id="tableWrap">
+        <table class="orders" aria-label="订单列表（下单时间倒序，默认展示最近 15 笔）">
+          <colgroup>
+            <col style="width:40px" />
+            <col style="width:156px" />
+            <col style="width:104px" />
+            <col style="width:256px" />
+            <col style="width:50px" />
+            <col style="width:120px" />
+            <col style="width:256px" />
+            <col style="width:112px" />
+            <col style="width:156px" />
+          </colgroup>
+          <thead>
+            <tr>
+              <th scope="col" class="c-pick"><input type="checkbox" id="pickAll" aria-label="全选本页订单" /></th>
+              <th scope="col">
+                <button class="th-sort" type="button" id="sortTs">订单信息<span class="sarrow" id="arrowTs">↓</span></button>
+              </th>
+              <th scope="col">买家</th>
+              <th scope="col">商品明细</th>
+              <th scope="col">数量</th>
+              <th scope="col">
+                <button class="th-sort" type="button" id="sortAmt">实付金额<span class="sarrow" id="arrowAmt">⇅</span></button>
+              </th>
+              <th scope="col">收货地址</th>
+              <th scope="col">状态</th>
+              <th scope="col" class="c-ops">操作</th>
+            </tr>
+          </thead>
+          <tbody id="orderBody"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="emptyState" hidden>没有匹配当前筛选条件的订单</div>
     </div>
-    <div class="empty" id="emptyState" hidden>没有匹配当前筛选条件的订单</div>
 
     <div class="panel-foot">
       <nav class="pager" aria-label="分页">
@@ -219,6 +349,7 @@
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+<script src="enterprise.js"></script>
 <script>
 /* ============ 内置演示订单后台：与 presets.js「浏览器·订单后台 15K」同一场景 ============
  * 15 笔订单按下单时间倒序。全表有且只有一笔同时满足
@@ -226,6 +357,17 @@
  * 干扰项：状态对但商品错（AirPods 4 / Kindle / iPad Air）、商品对但状态错
  * （已发货 / 已签收 ×2 / 已取消）、名字像但其实是配件（专用耳塞 / 保护套）、
  * 同一买家多笔订单（李婷婷、张伟、王小明）。每行「发货」按钮文案完全一致。
+ *
+ * ⚠️ 加组件时最容易踩的四条（都有测试钉着，见 tests/scenario-walk.spec.js）：
+ *   1. **每行只能有一个可访问名含「发货」且会被 /button "发货"/ 命中的按钮。**
+ *      想加别的按钮就用「打印面单 / 快速发货 / 订单详情」这类名字 —— 「批量发货」
+ *      不含子串 `button "发货"`，安全。
+ *   2. 行内「新节点」必须插在订单号之后、发货按钮之前的位置会被 refOf 按「就近
+ *      其后第一个发货按钮」定位，所以订单号的可见文本与发货按钮的相对顺序不能变，
+ *      发货按钮也不能挪到其它按钮后面。
+ *   3. **默认排序必须仍是下单时间倒序**（原数组顺序），sortKey 为默认值时
+ *      直接返回原数组，不做任何 sort，保证行序逐字节不变。
+ *   4. 默认态不许有任何 JS 驱动的文本自变：定时器一律挂在「实时模拟」开关上。
  */
 'use strict';
 
@@ -319,7 +461,78 @@ const BADGE = {
   '已取消': 'b-cancel'
 };
 
-const state = { orders: [], query: '', status: '全部状态', pay: '全部支付方式', from: '', to: '', log: [] };
+/* 二级分组 tab：标签一律不以「订单状态」开头（下拉框的可访问名要独占那个名字）。
+ * 计数从数据算出来，不写死。 */
+const TABS = [
+  { id: 'all',   label: '全部订单' },
+  { id: 'pay',   label: '待付款' },
+  { id: 'ship',  label: '待发货' },
+  { id: 'after', label: '售后' },
+  { id: 'risk',  label: '异常单' }
+];
+
+const WAREHOUSES = ['全部仓库', '上海仓', '广州仓', '成都仓', '西安仓'];
+const CARRIERS = ['全部承运商', '顺丰速运', '京东物流', '中通快递', '圆通速递'];
+
+/* 异常标记 chips（默认全关，点击才生效；不影响既有筛选行为） */
+const RISK_FLAGS = [
+  { id: 'late',  label: '超时未发货' },
+  { id: 'big',   label: '大额订单' },
+  { id: 'multi', label: '多件订单' }
+];
+
+/* 「实时模拟」打开后逐笔进入的新订单（固定脚本，不是随机 —— 演示要可复述）。
+ * 单号避开既有 15 笔，状态一律「待付款」，商品不含 AirPods（不污染既有干扰项）。 */
+const INCOMING = [
+  { no: 'ORD-20260923-4926', ts: '2026-09-23 09:12', buyer: '陆一鸣', phone: '135****7781', qty: 1, amount: 1299.00, status: '待付款', pay: '微信支付',
+    goods: '罗技 MX Master 3S 无线蓝牙鼠标（石墨黑 静音版 官方标配）',
+    spec: '石墨黑 / 国行 / 一年整机保修 / 赠鼠标垫',
+    address: '北京市朝阳区建国路 88 号现代城 A 座 1806 室（工作日 10 点后有人在，请先电话联系）' },
+  { no: 'ORD-20260923-4933', ts: '2026-09-23 09:18', buyer: '沈佳', phone: '186****2205', qty: 1, amount: 89.00, status: '待付款', pay: '支付宝',
+    goods: 'Anker 65W 氮化镓多口充电器（双 C 口 支持 PD 快充 便携装）',
+    spec: '白色 / 国行 / 两年质保 / 无赠品',
+    address: '杭州市余杭区文一西路 969 号西溪园区 3 号楼（园区需提前报备访客信息）' },
+  { no: 'ORD-20260923-4940', ts: '2026-09-23 09:25', buyer: '唐睿', phone: '133****9917', qty: 2, amount: 258.00, status: '待付款', pay: '云闪付',
+    goods: '小米移动电源 20000mAh 双向快充版（白色 支持 22.5W 输出）',
+    spec: '白色 / 国行 / 一年质保 / 赠数据线',
+    address: '成都市高新区天府五街 200 号菁蓉汇 5 号楼 A 区（大厦 20 点关门，请白天派送）' }
+];
+
+/* 物流轨迹的固定步骤与起始进度（按下单时的状态定格，不含任何实时数据） */
+const TRACE_STEPS = {
+  '待付款': ['买家提交订单', '等待买家付款', '超时未付款自动关闭'],
+  '已付款待发货': ['买家提交订单', '支付成功', '仓库接单待拣货', '打包出库', '承运商揽收', '运输中', '已签收'],
+  '已发货': ['买家提交订单', '支付成功', '仓库接单待拣货', '打包出库', '承运商揽收', '运输中', '已签收'],
+  '已签收': ['买家提交订单', '支付成功', '仓库接单待拣货', '打包出库', '承运商揽收', '运输中', '已签收'],
+  '已取消': ['买家提交订单', '支付成功', '买家申请取消', '订单已关闭']
+};
+const TRACE_NOW = { '待付款': 1, '已付款待发货': 2, '已发货': 5, '已签收': 6, '已取消': 3 };
+
+/* 超时未发货的判定线：已付款待发货且下单早于这个时刻（固定字符串比较，不用 Date） */
+const LATE_LINE = '2026-09-21 18:00';
+const BIG_AMOUNT = 2000;
+
+/* KPI 条的四张卡（数值写死，实时模拟只动「今日订单」；重置演示要能整条还原） */
+const KPI_ITEMS = [
+  { icon: '🧾', label: '今日订单', value: '1,286', delta: '▲ 12.4% 较昨日', tone: 'up',
+    spark: [980, 1042, 1018, 1120, 1096, 1184, 1230, 1286] },
+  { icon: '📦', label: '待发货', value: 5, unit: '笔', note: '其中 3 笔已超 24 小时未出库',
+    bar: { pct: 33, tone: 'warn' } },
+  { icon: '💰', label: '今日 GMV', value: '¥286,540', delta: '▲ 8.2% 较昨日', tone: 'up',
+    spark: [198, 214, 206, 232, 228, 264, 271, 286] },
+  { icon: '⚠', label: '超时未发货', value: 3, unit: '笔', note: '最早一笔已滞留 41 小时',
+    bar: { pct: 12, tone: '' } },
+];
+
+const state = {
+  orders: [], query: '', status: '全部状态', pay: '全部支付方式', from: '', to: '',
+  amountMin: '', amountMax: '', warehouse: '全部仓库', carrier: '全部承运商',
+  risks: [], tab: 'all', sortKey: 'ts', sortDir: 'desc', density: 'cozy',
+  picked: [], log: [], arrivals: 0
+};
+
+/* 每笔订单的物流轨迹进度（只被「模拟物流更新」这一个用户动作推进） */
+const TRACE = {};
 
 const $ = (id) => document.getElementById(id);
 let toastTimer;
@@ -346,27 +559,81 @@ function tradeOf(i) {
   return '42009' + String(18307461205 + i * 13337);
 }
 
+/* 纯字符串时间推进（避免 Date 解析差异）：把 "2026-09-21 12:26" 往后推 n 小时 */
+function shiftTs(ts, hours) {
+  const day = ts.slice(0, 10), hm = ts.slice(11);
+  let h = parseInt(hm.slice(0, 2), 10) + hours;
+  let d = parseInt(day.slice(8, 10), 10);
+  while (h >= 24) { h -= 24; d += 1; }
+  return day.slice(0, 8) + String(d).padStart(2, '0') + ' ' + String(h).padStart(2, '0') + hm.slice(2);
+}
+
 /* ---------- 初始化 / 重置 ---------- */
-function reset() {
-  state.orders = ORDERS.map((o, i) => Object.assign({
+function decorate(o, i) {
+  return Object.assign({
     id: i + 1,
     idx: i,
     shipped: false,
     trade: tradeOf(i),
-    discount: (i % 5) * 20
-  }, o));
+    discount: (i % 5) * 20,
+    warehouse: WAREHOUSES[1 + (i % 4)],
+    carrier: CARRIERS[1 + (i % 4)],
+    late: o.status === '已付款待发货' && o.ts < LATE_LINE,
+    fresh: false
+  }, o);
+}
+
+function reset() {
+  state.orders = ORDERS.map((o, i) => decorate(o, i));
   state.query = '';
   state.status = '全部状态';
   state.pay = '全部支付方式';
   state.from = '';
   state.to = '';
+  state.amountMin = '';
+  state.amountMax = '';
+  state.warehouse = '全部仓库';
+  state.carrier = '全部承运商';
+  state.risks = [];
+  state.tab = 'all';
+  state.sortKey = 'ts';
+  state.sortDir = 'desc';
+  state.density = 'cozy';
+  state.picked = [];
   state.log = [];
+  state.arrivals = 0;
+  Object.keys(TRACE).forEach((k) => { delete TRACE[k]; });
   $('kw').value = '';
   $('fromDate').value = '';
   $('toDate').value = '';
+  $('amtMin').value = '';
+  $('amtMax').value = '';
   $('statusSel').value = '全部状态';
   $('paySel').value = '全部支付方式';
+  $('warehouseSel').value = '全部仓库';
+  $('carrierSel').value = '全部承运商';
+  $('tableWrap').hidden = false;
+  /* KPI 的数字会被「实时模拟」与发货递增，重置要整条还原成写死的初始值 */
+  Enterprise.kpis($('entKpis'), KPI_ITEMS);
+  $('sortTs').querySelector('.sarrow').textContent = '↓';
+  $('sortAmt').querySelector('.sarrow').textContent = '⇅';
+  document.querySelector('table.orders').classList.remove('dense');
+  $('densityBtn').textContent = '密度 舒适';
+  $('pickAll').checked = false;
+  $('pickAll').indeterminate = false;
   render();
+}
+
+/* 抽屉开着时，重置要把它收掉，免得正文停在一笔已经不存在的订单上；
+ * 同时必须把「实时模拟」关掉 —— 否则刚到的新订单会立刻破坏「初始 15 笔」。 */
+function hardReset() {
+  Enterprise.drawer.close();
+  const cb = document.querySelector('.ent-sim input');
+  if (cb && cb.checked) {
+    cb.checked = false;
+    cb.dispatchEvent(new Event('change'));
+  }
+  reset();
 }
 
 function fillSelects() {
@@ -378,14 +645,65 @@ function fillSelects() {
   ps.innerHTML = '';
   PAYS.forEach((p) => ps.appendChild(el('option', '', p)));
   ps.value = '全部支付方式';
+  const ws = $('warehouseSel');
+  ws.innerHTML = '';
+  WAREHOUSES.forEach((w) => ws.appendChild(el('option', '', w)));
+  ws.value = '全部仓库';
+  const cs = $('carrierSel');
+  cs.innerHTML = '';
+  CARRIERS.forEach((c) => cs.appendChild(el('option', '', c)));
+  cs.value = '全部承运商';
+
+  const rc = $('riskChips');
+  rc.innerHTML = '';
+  RISK_FLAGS.forEach((f) => {
+    const b = el('button', 'ent-chip', f.label);
+    b.type = 'button';
+    b.setAttribute('data-risk', f.id);
+    b.onclick = () => {
+      state.risks = state.risks.indexOf(f.id) === -1
+        ? state.risks.concat([f.id])
+        : state.risks.filter((x) => x !== f.id);
+      render();
+    };
+    rc.appendChild(b);
+  });
 }
 
 function filtersActive() {
   return state.query.trim() !== '' || state.status !== '全部状态' || state.pay !== '全部支付方式' ||
-    state.from !== '' || state.to !== '';
+    state.from !== '' || state.to !== '' || state.amountMin !== '' || state.amountMax !== '' ||
+    state.warehouse !== '全部仓库' || state.carrier !== '全部承运商' ||
+    state.risks.length > 0 || state.tab !== 'all';
 }
 
-/* 发货后的那一行不再受状态筛选影响，保证状态变化始终可见 */
+/* 已生效的筛选条件（每个都能单独移除） */
+function conditions() {
+  const out = [];
+  const q = state.query.trim();
+  if (q) out.push({ id: 'q', label: '关键词 ' + q, clear: () => { state.query = ''; $('kw').value = ''; } });
+  if (state.status !== '全部状态') out.push({ id: 'status', label: '状态 ' + state.status, clear: () => { state.status = '全部状态'; $('statusSel').value = '全部状态'; } });
+  if (state.pay !== '全部支付方式') out.push({ id: 'pay', label: '支付 ' + state.pay, clear: () => { state.pay = '全部支付方式'; $('paySel').value = '全部支付方式'; } });
+  if (state.from || state.to) out.push({ id: 'date', label: '下单日期 ' + (state.from || '不限') + ' 至 ' + (state.to || '不限'), clear: () => { state.from = ''; state.to = ''; $('fromDate').value = ''; $('toDate').value = ''; } });
+  if (state.amountMin !== '' || state.amountMax !== '') {
+    out.push({ id: 'amount', label: '实付金额 ' + (state.amountMin !== '' ? '不低于 ' + state.amountMin : '不限') + ' 至 ' + (state.amountMax !== '' ? '不高于 ' + state.amountMax : '不限'),
+      clear: () => { state.amountMin = ''; state.amountMax = ''; $('amtMin').value = ''; $('amtMax').value = ''; } });
+  }
+  if (state.warehouse !== '全部仓库') out.push({ id: 'warehouse', label: '仓库 ' + state.warehouse, clear: () => { state.warehouse = '全部仓库'; $('warehouseSel').value = '全部仓库'; } });
+  if (state.carrier !== '全部承运商') out.push({ id: 'carrier', label: '承运商 ' + state.carrier, clear: () => { state.carrier = '全部承运商'; $('carrierSel').value = '全部承运商'; } });
+  state.risks.forEach((id) => {
+    const f = RISK_FLAGS.find((x) => x.id === id);
+    if (f) out.push({ id: 'risk-' + id, label: '标记 ' + f.label, clear: () => { state.risks = state.risks.filter((x) => x !== id); } });
+  });
+  if (state.tab !== 'all') {
+    const t = TABS.find((x) => x.id === state.tab);
+    out.push({ id: 'tab', label: '分组 ' + t.label, clear: () => { state.tab = 'all'; } });
+  }
+  return out;
+}
+
+/* 发货后的那一行不再受状态筛选影响，保证状态变化始终可见。
+ * 新增的筛选一律「空值 = 不生效」，默认态与改造前逐条等价。 */
 function visible() {
   const q = state.query.trim().toLowerCase();
   return state.orders.filter((o) => {
@@ -393,26 +711,393 @@ function visible() {
     if (state.pay !== '全部支付方式' && o.pay !== state.pay) return false;
     if (state.from && o.ts.slice(0, 10) < state.from) return false;
     if (state.to && o.ts.slice(0, 10) > state.to) return false;
+    if (state.amountMin !== '' && o.amount < Number(state.amountMin)) return false;
+    if (state.amountMax !== '' && o.amount > Number(state.amountMax)) return false;
+    if (state.warehouse !== '全部仓库' && o.warehouse !== state.warehouse) return false;
+    if (state.carrier !== '全部承运商' && o.carrier !== state.carrier) return false;
+    if (state.risks.indexOf('late') !== -1 && !(o.late && !o.shipped)) return false;
+    if (state.risks.indexOf('big') !== -1 && o.amount < BIG_AMOUNT) return false;
+    if (state.risks.indexOf('multi') !== -1 && o.qty < 2) return false;
+    if (state.tab === 'pay' && o.status !== '待付款') return false;
+    if (state.tab === 'ship' && o.status !== '已付款待发货') return false;
+    if (state.tab === 'after' && o.status !== '已取消') return false;
+    if (state.tab === 'risk' && !(o.late && !o.shipped)) return false;
     if (q && (o.no + ' ' + o.buyer + ' ' + o.phone + ' ' + o.goods).toLowerCase().indexOf(q) === -1) return false;
     return true;
   });
 }
 
+/* 默认排序（下单时间倒序）**原样返回原数组**，绝不走 sort —— 保证默认行序逐字节不变 */
+function sortedList(list) {
+  if (state.sortKey === 'ts' && state.sortDir === 'desc') return list;
+  const copy = list.slice();
+  copy.sort((a, b) => {
+    const r = state.sortKey === 'amount'
+      ? a.amount - b.amount
+      : (a.ts < b.ts ? -1 : (a.ts > b.ts ? 1 : 0));
+    return state.sortDir === 'asc' ? r : -r;
+  });
+  return copy;
+}
+
+/* ---------- 勾选 / 批量操作条 ---------- */
+function isPicked(no) { return state.picked.indexOf(no) !== -1; }
+
+/* 批量操作条：只在有勾选时**才创建**，绝不常驻 —— 常驻会让行内首个
+ * 「发货」判定被批量按钮抢走（批量按钮名里也不含子串 `button "发货"`）。 */
+function renderBulk() {
+  const host = $('bulkHost');
+  host.innerHTML = '';
+  const n = state.picked.length;
+  if (!n) return;
+  const bar = el('div', 'ent-bulkbar');
+  const lab = el('span');
+  lab.appendChild(document.createTextNode('已选中 '));
+  lab.appendChild(el('b', 'ent-bulk-n', String(n)));
+  lab.appendChild(document.createTextNode(' 笔订单'));
+  bar.appendChild(lab);
+  if (n) {
+    const amt = state.orders.filter((o) => isPicked(o.no)).reduce((s, o) => s + o.amount, 0);
+    bar.appendChild(el('span', 'meta', '合计 ' + money(amt)));
+  }
+  bar.appendChild(el('span', 'spacer'));
+  const mk = (label, fn) => {
+    const b = el('button', 'btn mini', label);
+    b.type = 'button';
+    b.onclick = fn;
+    return b;
+  };
+  bar.appendChild(mk('批量发货', () => {
+    const nos = state.picked.slice();
+    const cur = state.orders.filter((o) => nos.indexOf(o.no) !== -1 && !o.shipped && o.status !== '待付款');
+    if (!cur.length) { toast('演示：选中的订单当前都不可发货'); return; }
+    cur.forEach((o) => shipOrder(o.no, true));
+    state.picked = [];
+    render();
+    toast('已批量发货 ' + cur.length + ' 笔订单');
+  }));
+  bar.appendChild(mk('批量打印面单', () => toast('演示：不会真的打印 ' + n + ' 张面单')));
+  bar.appendChild(mk('导出选中', () => toast('演示：不会真的导出文件')));
+  bar.appendChild(mk('取消选择', () => { state.picked = []; render(); }));
+  host.appendChild(bar);
+}
+
+/* ---------- 订单详情抽屉 ---------- */
+function traceSteps(o) { return TRACE_STEPS[o.status] || TRACE_STEPS['已付款待发货']; }
+function traceNow(o) {
+  const t = TRACE[o.no] || (TRACE[o.no] = { advance: 0 });
+  const last = traceSteps(o).length - 1;
+  const base = TRACE_NOW[o.status] === undefined ? 0 : TRACE_NOW[o.status];
+  return Math.min(base + t.advance, last);
+}
+function traceBody(o, step, i) {
+  switch (step) {
+    case '买家提交订单': return '订单由「' + o.buyer + '」提交，支付方式 ' + o.pay + '，件数 ×' + o.qty + '。';
+    case '等待买家付款': return '等待买家完成支付，超过 24 小时未付款将自动关闭订单。';
+    case '超时未付款自动关闭': return '已超时未付款，系统将在下一个批处理周期关闭订单并释放库存。';
+    case '支付成功': return '实付 ' + money(o.amount) + '，交易号 ' + o.trade + '。';
+    case '仓库接单待拣货': return o.warehouse + ' 已接单，等待当日波次拣货，预计 ' + shiftTs(o.ts, 6 + i) + ' 出库。';
+    case '打包出库': return '商品质检与打包已完成，出库复核通过，等待交接 ' + o.carrier + '。';
+    case '承运商揽收': return o.carrier + ' 已揽收，运单号 ' + (o.trade.slice(-10)) + '，包裹进入干线运输。';
+    case '运输中': return '包裹在途，预计 ' + shiftTs(o.ts, 24) + ' 前送达收件城市。';
+    case '已签收': return '包裹已签收，签收人 ' + o.buyer + '（演示数据）。';
+    case '买家申请取消': return '买家发起取消申请，订单转入售后流程，仓库已停止拣货。';
+    case '订单已关闭': return '订单已关闭，款项原路退回，预计 1 至 3 个工作日到账。';
+    default: return '';
+  }
+}
+function traceTimeline(o) {
+  const steps = traceSteps(o);
+  const now = traceNow(o);
+  const ul = el('ul', 'ent-timeline');
+  steps.forEach((s, i) => {
+    let cls = i < now ? 'done' : (i === now ? 'now' : '');
+    if (o.status === '已取消' && s === '买家申请取消') cls = i <= now ? 'warn' : '';
+    if (now === steps.length - 1 && i === now) cls = 'done';
+    const li = el('li', cls);
+    li.appendChild(el('span', 'ent-tl-title', s));
+    li.appendChild(el('span', 'ent-tl-meta', shiftTs(o.ts, i * 7) + ' · 处理节点 ' + (i + 1) + ' / ' + steps.length));
+    /* 还没走到的节点只留标题与时间，不写正文 —— 免得把「未来」当既成事实陈述 */
+    li.appendChild(el('span', 'ent-tl-body', i > now ? '该节点尚未到达' : traceBody(o, s, i)));
+    ul.appendChild(li);
+  });
+  return ul;
+}
+
+function detailOverview(o) {
+  const sec = el('section', 'ent-sec');
+  sec.appendChild(el('h3', null, '订单基本信息'));
+  const dl = el('dl', 'ent-kv');
+  const kv = (k, v, mono) => {
+    dl.appendChild(el('dt', null, k));
+    const dd = el('dd', mono ? 'mono' : null, v);
+    dl.appendChild(dd);
+  };
+  kv('订单号', o.no, true);
+  kv('下单时间', o.ts, true);
+  kv('买家', o.buyer);
+  kv('收件手机', o.phone, true);
+  kv('支付方式', o.pay);
+  kv('实付金额', money(o.amount), true);
+  kv('优惠抵扣', '-' + money(o.discount), true);
+  kv('交易号', o.trade, true);
+  kv('发货仓库', o.warehouse);
+  kv('承运商', o.carrier);
+  kv('当前状态', o.status);
+  kv('发货时效', (o.late && !o.shipped) ? '已超时（超过 ' + LATE_LINE.slice(11) + ' 的出库时限）' : '正常');
+  sec.appendChild(dl);
+
+  const sec2 = el('section', 'ent-sec');
+  sec2.appendChild(el('h3', null, '订单流转进度'));
+  const stageOf = { '待付款': 1, '已付款待发货': 2, '已发货': 3, '已签收': 4, '已取消': 1 };
+  const stage = stageOf[o.status] === undefined ? 0 : stageOf[o.status];
+  const step = el('ol', 'ent-stepper');
+  ['下单', '支付', '出库', '运输', '签收'].forEach((label, i) => {
+    step.appendChild(el('li', i < stage ? 'done' : (i === stage ? 'now' : ''), label));
+  });
+  sec2.appendChild(step);
+
+  const sec3 = el('section', 'ent-sec');
+  sec3.appendChild(el('h3', null, '商品明细'));
+  const dl2 = el('dl', 'ent-kv');
+  dl2.appendChild(el('dt', null, '商品'));
+  dl2.appendChild(el('dd', null, o.goods));
+  dl2.appendChild(el('dt', null, '规格'));
+  dl2.appendChild(el('dd', null, o.spec));
+  dl2.appendChild(el('dt', null, '件数'));
+  dl2.appendChild(el('dd', 'mono', '×' + o.qty));
+  sec3.appendChild(dl2);
+
+  const sec4 = el('section', 'ent-sec');
+  sec4.appendChild(el('h3', null, '收货信息'));
+  const addr = el('div', 'note-box');
+  addr.appendChild(el('div', null, o.address));
+  addr.appendChild(el('div', 'sent-line', '买家留言 · ' + NOTES[o.idx % NOTES.length]));
+  sec4.appendChild(addr);
+
+  const wrap = el('div');
+  [sec, sec2, sec3, sec4].forEach((s) => wrap.appendChild(s));
+  return wrap;
+}
+
+function detailPay(o) {
+  const sec = el('section', 'ent-sec');
+  sec.appendChild(el('h3', null, '支付流水'));
+  const ul = el('ul', 'pay-list');
+  const row = (name, amt, cls, meta) => {
+    const li = el('li');
+    const box = el('div');
+    box.appendChild(el('div', null, name));
+    box.appendChild(el('span', 'pay-meta', meta));
+    li.appendChild(box);
+    li.appendChild(el('span', 'pay-amt ' + (cls || ''), amt));
+    ul.appendChild(li);
+  };
+  row('订单支付', money(o.amount), 'good', o.pay + ' · ' + o.trade.slice(0, 12) + ' · ' + o.ts);
+  if (o.discount) row('优惠抵扣', '-' + money(o.discount), '', '店铺满减活动，已从应付金额中扣除');
+  row('运费', '¥0.00', '', '包邮订单，运费由商家承担');
+  if (o.status === '已取消') row('退款入账', '-' + money(o.amount), 'warn', '原路退回，预计 1 至 3 个工作日到账');
+  sec.appendChild(ul);
+
+  const sec2 = el('section', 'ent-sec');
+  sec2.appendChild(el('h3', null, '资金汇总'));
+  const dl = el('dl', 'ent-kv');
+  dl.appendChild(el('dt', null, '应付'));
+  dl.appendChild(el('dd', 'mono', money(o.amount)));
+  dl.appendChild(el('dt', null, '实付'));
+  dl.appendChild(el('dd', 'mono', money(o.amount - o.discount)));
+  dl.appendChild(el('dt', null, '已退'));
+  dl.appendChild(el('dd', 'mono', o.status === '已取消' ? money(o.amount) : '¥0.00'));
+  dl.appendChild(el('dt', null, '对账批次'));
+  dl.appendChild(el('dd', 'mono', 'BILL-202609-' + String((o.idx % 20) + 1).padStart(2, '0')));
+  sec2.appendChild(dl);
+
+  const wrap = el('div');
+  [sec, sec2].forEach((s) => wrap.appendChild(s));
+  return wrap;
+}
+
+function detailOps(o) {
+  const sec = el('section', 'ent-sec');
+  sec.appendChild(el('h3', null, '操作日志（系统留痕）'));
+  const ul = el('ul', 'ent-timeline');
+  const entry = (title, meta, body, cls) => {
+    const li = el('li', cls || 'done');
+    li.appendChild(el('span', 'ent-tl-title', title));
+    li.appendChild(el('span', 'ent-tl-meta', meta));
+    li.appendChild(el('span', 'ent-tl-body', body));
+    ul.appendChild(li);
+  };
+  entry('订单创建', o.ts, '自助下单渠道创建订单，来源 H5 商城。');
+  entry('风控核验通过', shiftTs(o.ts, 1), '收货人实名信息核验通过，未命中黑名单与风险地址库。');
+  if (o.status !== '待付款') {
+    entry('支付确认', shiftTs(o.ts, 1), '支付网关回调确认成功，交易号 ' + o.trade.slice(0, 12) + '。');
+  }
+  if (o.status === '已取消') {
+    entry('买家申请取消', shiftTs(o.ts, 3), '买家提交取消申请，客服已确认无异议。', 'warn');
+    entry('订单关闭', shiftTs(o.ts, 4), '订单与库存占用已释放，退款单据自动生成。');
+  } else if (o.shipped) {
+    entry('仓库出库', shiftTs(o.ts, 8), o.warehouse + ' 完成拣货打包，交接 ' + o.carrier + '。');
+    entry('发货确认', shiftTs(o.ts, 9), '操作人 张运营（仓储主管），面单已打印并回传。');
+  } else if (o.status === '已付款待发货') {
+    entry('仓库接单', shiftTs(o.ts, 5), o.warehouse + ' 已接单，等待波次拣货。');
+  }
+  const adv = (TRACE[o.no] && TRACE[o.no].advance) || 0;
+  if (adv) entry('人工推进轨迹', o.ts, '运营在订单详情里手动推进了 ' + adv + ' 步物流轨迹（演示动作）。', 'now');
+  sec.appendChild(ul);
+  return sec;
+}
+
+function detailNotes(o) {
+  const sec = el('section', 'ent-sec');
+  sec.appendChild(el('h3', null, '内部备注'));
+  const b1 = el('div', 'note-box');
+  b1.appendChild(el('div', null, '商家备注 · ' + MERCH[o.idx % MERCH.length]));
+  sec.appendChild(b1);
+  const b2 = el('div', 'note-box warn');
+  b2.appendChild(el('div', null, '仓储备注 · 该订单由 ' + o.warehouse + ' 负责，交接承运商 ' + o.carrier + '；出库前请核对买家留言中的派送要求。'));
+  sec.appendChild(b2);
+
+  const sec2 = el('section', 'ent-sec');
+  sec2.appendChild(el('h3', null, '客服跟进记录'));
+  const ul = el('ul', 'ent-timeline');
+  const c1 = el('li', 'done');
+  c1.appendChild(el('span', 'ent-tl-title', '客服工单已登记'));
+  c1.appendChild(el('span', 'ent-tl-meta', shiftTs(o.ts, 2)));
+  c1.appendChild(el('span', 'ent-tl-body', '坐席 王倩 登记工单 CS-2026-' + String(9000 + o.idx) + '，买家咨询发货时间与发票开具方式。'));
+  ul.appendChild(c1);
+  const c2 = el('li', o.shipped ? 'done' : 'now');
+  c2.appendChild(el('span', 'ent-tl-title', o.shipped ? '已回复买家' : '待回复买家'));
+  c2.appendChild(el('span', 'ent-tl-meta', shiftTs(o.ts, 3)));
+  c2.appendChild(el('span', 'ent-tl-body', o.shipped
+    ? '已告知买家包裹已交接 ' + o.carrier + '，电子发票随包裹发出后同步开票。'
+    : '待仓库确认出库时间后回复买家，承诺 24 小时内给出明确答复。'));
+  ul.appendChild(c2);
+  sec2.appendChild(ul);
+
+  const wrap = el('div');
+  [sec, sec2].forEach((s) => wrap.appendChild(s));
+  return wrap;
+}
+
+function openDetail(no) {
+  const o = state.orders.find((x) => x.no === no);
+  if (!o) return;
+  const renders = [
+    () => detailOverview(o),
+    () => detailPay(o),
+    () => detailTrace(o),
+    () => detailOps(o),
+    () => detailNotes(o),
+  ];
+  function detailTrace(o2) {
+    const wrap = el('div');
+    const sec = el('section', 'ent-sec');
+    sec.appendChild(el('h3', null, '物流轨迹'));
+    sec.appendChild(traceTimeline(o2));
+    wrap.appendChild(sec);
+    const sec2 = el('section', 'ent-sec');
+    sec2.appendChild(el('h3', null, '承运信息'));
+    const dl = el('dl', 'ent-kv');
+    dl.appendChild(el('dt', null, '承运商'));
+    dl.appendChild(el('dd', null, o2.carrier));
+    dl.appendChild(el('dt', null, '运单号'));
+    dl.appendChild(el('dd', 'mono', o2.trade.slice(-10)));
+    dl.appendChild(el('dt', null, '异常标记'));
+    dl.appendChild(el('dd', null, (o2.late && !o2.shipped) ? '已超时未发货，已进入异常池' : '无'));
+    sec2.appendChild(dl);
+    wrap.appendChild(sec2);
+    return wrap;
+  }
+
+  const foot = document.createDocumentFragment();
+  const upd = el('button', 'btn', '模拟物流更新');
+  upd.type = 'button';
+  const syncUpd = () => {
+    const end = traceNow(o) >= traceSteps(o).length - 1;
+    upd.textContent = end ? '物流已完结' : '模拟物流更新';
+    upd.disabled = end;
+  };
+  syncUpd();
+  upd.onclick = () => {
+    if (!TRACE[o.no]) TRACE[o.no] = { advance: 0 };
+    TRACE[o.no].advance += 1;
+    refresh();
+    toast('演示：已推进一步物流轨迹（' + o.no + '）');
+  };
+  foot.appendChild(upd);
+  const prt = el('button', 'btn', '打印面单');
+  prt.type = 'button';
+  prt.onclick = () => toast('演示：不会真的打印面单（' + o.no + '）');
+  foot.appendChild(prt);
+  const cp = el('button', 'btn', '复制订单号');
+  cp.type = 'button';
+  cp.onclick = () => toast('演示：订单号 ' + o.no + ' 已展示在标题栏');
+  foot.appendChild(cp);
+
+  /* 轨迹推进后只重画「当前选中的那个 tab」，不整抽屉重开 —— 免得把用户
+   * 正在看的那一页弹回第一页。 */
+  function refresh() {
+    const tabsEl = document.querySelector('.ent-drawer-tabs');
+    const body = document.querySelector('.ent-drawer-body');
+    if (!tabsEl || !body) return;
+    let idx = 0;
+    Array.prototype.forEach.call(tabsEl.children, (b, i) => {
+      if (b.getAttribute('aria-selected') === 'true') idx = i;
+    });
+    Enterprise.clear(body);
+    body.appendChild(renders[idx]());
+    syncUpd();
+  }
+
+  Enterprise.drawer.open({
+    title: o.no,
+    sub: o.buyer + ' · ' + o.status,
+    tabs: [
+      { label: '订单概览', render: renders[0] },
+      { label: '支付与对账', render: renders[1] },
+      { label: '物流轨迹', render: renders[2] },
+      { label: '操作日志', render: renders[3] },
+      { label: '备注与客服', render: renders[4] },
+    ],
+    footer: foot,
+  });
+}
+
 /* ---------- 渲染 ---------- */
 function buildRow(o) {
-  const tr = el('tr', 'order' + (o.shipped ? ' shipped' : ''));
+  const tr = el('tr', 'order' + (o.shipped ? ' shipped' : '') + (o.fresh ? ' ent-flash' : ''));
   tr.id = 'order-' + o.no;
   tr.setAttribute('data-order-no', o.no);
 
+  const td0 = el('td', 'c-pick');
+  const pick = document.createElement('input');
+  pick.type = 'checkbox';
+  pick.checked = isPicked(o.no);
+  pick.setAttribute('aria-label', '选择本行订单');
+  pick.onchange = () => {
+    state.picked = isPicked(o.no) ? state.picked.filter((x) => x !== o.no) : state.picked.concat([o.no]);
+    render();
+  };
+  td0.appendChild(pick);
+  tr.appendChild(td0);
+
   const td1 = el('td');
-  td1.appendChild(el('span', 'no', o.no));
+  const noBtn = el('button', 'no', o.no);
+  noBtn.type = 'button';
+  noBtn.setAttribute('aria-label', o.no);
+  noBtn.title = '查看订单详情';
+  noBtn.onclick = () => openDetail(o.no);
+  td1.appendChild(noBtn);
   td1.appendChild(el('span', 'sub plain', '下单时间 ' + o.ts));
   td1.appendChild(el('span', 'sub plain', o.pay));
+  td1.appendChild(el('span', 'sub plain', '仓库 ' + o.warehouse));
   tr.appendChild(td1);
 
   const td2 = el('td');
   td2.appendChild(el('span', 'buyer', o.buyer));
   td2.appendChild(el('span', 'masked', '手机 ' + o.phone));
+  td2.appendChild(el('span', 'sub plain', '共 ' + state.orders.filter((x) => x.buyer === o.buyer).length + ' 笔订单'));
   tr.appendChild(td2);
 
   const td3 = el('td');
@@ -432,29 +1117,98 @@ function buildRow(o) {
   const td6 = el('td');
   td6.appendChild(el('span', 'addr', o.address));
   td6.appendChild(el('span', 'note', '商家备注：' + MERCH[o.idx % MERCH.length]));
+  td6.appendChild(el('span', 'sub plain', '承运商 ' + o.carrier + ' · 运单 ' + o.trade.slice(-10)));
   tr.appendChild(td6);
 
   const td7 = el('td');
+  const stc = el('div', 'st-cell');
   const badge = el('span', 'badge ' + (BADGE[o.status] || ''), o.status);
   badge.setAttribute('data-status', o.status);
-  td7.appendChild(badge);
+  stc.appendChild(badge);
+  if (o.late && !o.shipped) stc.appendChild(el('span', 'ent-tag warn', '超时未发货'));
+  if (o.shipped) stc.appendChild(el('span', 'ent-tag good', '本轮已发货'));
+  td7.appendChild(stc);
   tr.appendChild(td7);
 
-  const td8 = el('td');
+  const td8 = el('td', 'c-ops');
+  const ops = el('div', 'ops');
+  /* 全表每行只有这一个按钮的可访问名是「发货」—— refOf(/button "发货"/) 靠它抓行 */
   const btn = el('button', 'btn ship', '发货');
   btn.type = 'button';
   btn.setAttribute('aria-label', '发货');
   btn.setAttribute('data-order-no', o.no);
   btn.disabled = !!o.shipped;
   btn.onclick = () => shipOrder(o.no);
-  td8.appendChild(btn);
+  ops.appendChild(btn);
+  const prt = el('button', 'btn mini', '打印面单');
+  prt.type = 'button';
+  prt.setAttribute('aria-label', '打印面单 ' + o.no);
+  prt.onclick = () => toast('演示：不会真的打印面单（' + o.no + '）');
+  ops.appendChild(prt);
+  const dtl = el('button', 'btn mini', '订单详情');
+  dtl.type = 'button';
+  dtl.setAttribute('aria-label', '查看订单详情 ' + o.no);
+  dtl.onclick = () => openDetail(o.no);
+  ops.appendChild(dtl);
+  td8.appendChild(ops);
   tr.appendChild(td8);
 
   return tr;
 }
 
+function tabCount(id) {
+  const s = state.orders;
+  if (id === 'pay') return s.filter((o) => o.status === '待付款').length;
+  if (id === 'ship') return s.filter((o) => o.status === '已付款待发货').length;
+  if (id === 'after') return s.filter((o) => o.status === '已取消').length;
+  if (id === 'risk') return s.filter((o) => o.late && !o.shipped).length;
+  return s.length;
+}
+
+function renderTabs() {
+  const host = $('tabBar');
+  host.innerHTML = '';
+  TABS.forEach((t) => {
+    const b = el('button');
+    b.type = 'button';
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', state.tab === t.id ? 'true' : 'false');
+    b.appendChild(el('span', null, t.label));
+    b.appendChild(el('span', 'tcount', String(tabCount(t.id))));
+    b.onclick = () => {
+      state.tab = t.id;
+      state.picked = [];
+      render();
+      toast('已切换到「' + t.label + '」分组');
+    };
+    host.appendChild(b);
+  });
+}
+
+function renderApplied() {
+  const host = $('appliedHost');
+  host.innerHTML = '';
+  const conds = conditions();
+  if (!conds.length) {
+    host.appendChild(el('span', 'applied-none', '无筛选条件'));
+    return;
+  }
+  conds.forEach((c) => {
+    const b = el('button', 'ent-chip on', c.label);
+    b.type = 'button';
+    b.setAttribute('aria-label', '移除条件 ' + c.label);
+    b.appendChild(el('span', 'ent-chip-x', '×'));
+    b.onclick = () => {
+      c.clear();
+      render();
+      toast('已移除筛选条件 ' + c.label);
+    };
+    host.appendChild(b);
+  });
+}
+
 function render() {
-  const list = visible();
+  const list = sortedList(visible());
   const body = $('orderBody');
   body.innerHTML = '';
   list.forEach((o) => body.appendChild(buildRow(o)));
@@ -465,22 +1219,35 @@ function render() {
   $('listMeta').textContent = '共 ' + list.length + ' 笔'
     + (kept ? '（含本轮已发货 ' + kept + ' 笔，便于核对）' : '')
     + ' · 待发货 ' + state.orders.filter((o) => o.status === '已付款待发货').length + ' 笔'
-    + ' · 已发货 ' + state.orders.filter((o) => o.status === '已发货').length + ' 笔';
+    + ' · 已发货 ' + state.orders.filter((o) => o.status === '已发货').length + ' 笔'
+    + ' · 超时未发货 ' + state.orders.filter((o) => o.late && !o.shipped).length + ' 笔';
 
   $('filterHint').textContent = filtersActive() ? '已启用筛选条件' : '未使用任何筛选';
 
   $('shipCount').textContent = String(shipped);
   $('shipLog').textContent = state.log.length ? '发货记录：' + state.log.join('、') : '暂无发货记录';
+
+  renderTabs();
+  renderBulk();
+  renderApplied();
+  Array.prototype.forEach.call($('riskChips').children, (b) => {
+    b.classList.toggle('on', state.risks.indexOf(b.getAttribute('data-risk')) !== -1);
+  });
+  const sel = list.filter((o) => isPicked(o.no)).length;
+  $('pickAll').checked = list.length > 0 && sel === list.length;
+  $('pickAll').indeterminate = sel > 0 && sel < list.length;
+  $('pickAll').disabled = list.length === 0;
 }
 
 /* ---------- 发货 ---------- */
-function shipOrder(no) {
+function shipOrder(no, silent) {
   const cur = state.orders.find((o) => o.no === no);
   if (!cur || cur.shipped) return;
   state.orders = state.orders.map((o) => (o.no === no ? Object.assign({}, o, { shipped: true, status: '已发货' }) : o));
   state.log = state.log.concat(no);
   render();
-  toast('已发货：订单 ' + no + '（' + cur.buyer + ' · ' + cur.goods.slice(0, 16) + '…）');
+  Enterprise.bumpKpi($('entKpis'), '待发货', -1);
+  if (!silent) toast('已发货：订单 ' + no + '（' + cur.buyer + ' · ' + cur.goods.slice(0, 16) + '…）');
 }
 
 /* ---------- 顶部与筛选交互 ---------- */
@@ -497,37 +1264,165 @@ $('statusSel').addEventListener('change', (e) => { state.status = e.target.value
 $('paySel').addEventListener('change', (e) => { state.pay = e.target.value; render(); });
 $('fromDate').addEventListener('change', (e) => { state.from = e.target.value.trim(); render(); });
 $('toDate').addEventListener('change', (e) => { state.to = e.target.value.trim(); render(); });
+$('amtMin').addEventListener('change', (e) => { state.amountMin = e.target.value.trim(); render(); });
+$('amtMax').addEventListener('change', (e) => { state.amountMax = e.target.value.trim(); render(); });
+$('warehouseSel').addEventListener('change', (e) => { state.warehouse = e.target.value; render(); });
+$('carrierSel').addEventListener('change', (e) => { state.carrier = e.target.value; render(); });
 
 $('queryBtn').onclick = () => {
   state.query = $('kw').value;
   state.from = $('fromDate').value.trim();
   state.to = $('toDate').value.trim();
+  state.amountMin = $('amtMin').value.trim();
+  state.amountMax = $('amtMax').value.trim();
   render();
   toast('查询完成：当前条件下共 ' + visible().length + ' 笔订单');
 };
 
 $('filterResetBtn').onclick = () => {
-  state.query = ''; state.status = '全部状态'; state.pay = '全部支付方式'; state.from = ''; state.to = '';
+  state.query = ''; state.status = '全部状态'; state.pay = '全部支付方式';
+  state.from = ''; state.to = ''; state.amountMin = ''; state.amountMax = '';
+  state.warehouse = '全部仓库'; state.carrier = '全部承运商'; state.risks = []; state.tab = 'all';
   $('kw').value = ''; $('fromDate').value = ''; $('toDate').value = '';
+  $('amtMin').value = ''; $('amtMax').value = '';
   $('statusSel').value = '全部状态'; $('paySel').value = '全部支付方式';
+  $('warehouseSel').value = '全部仓库'; $('carrierSel').value = '全部承运商';
   render();
   toast('已重置筛选条件，恢复全部 15 笔订单');
 };
 
 $('resetBtn').onclick = () => {
-  reset();
+  hardReset();
   toast('演示已重置为初始 15 笔订单');
 };
+
+/* 列排序：默认「下单时间倒序」是原数组顺序，点一下只是切换方向或换列 */
+$('sortTs').onclick = () => {
+  if (state.sortKey === 'ts') state.sortDir = state.sortDir === 'desc' ? 'asc' : 'desc';
+  else { state.sortKey = 'ts'; state.sortDir = 'desc'; }
+  $('sortTs').querySelector('.sarrow').textContent = state.sortDir === 'desc' ? '↓' : '↑';
+  $('sortAmt').querySelector('.sarrow').textContent = '⇅';
+  render();
+  toast('已按' + (state.sortDir === 'desc' ? '下单时间倒序' : '下单时间正序') + '排列');
+};
+$('sortAmt').onclick = () => {
+  if (state.sortKey === 'amount') state.sortDir = state.sortDir === 'desc' ? 'asc' : 'desc';
+  else { state.sortKey = 'amount'; state.sortDir = 'desc'; }
+  $('sortAmt').querySelector('.sarrow').textContent = state.sortDir === 'desc' ? '↓' : '↑';
+  $('sortTs').querySelector('.sarrow').textContent = '⇅';
+  render();
+  toast('已按实付金额' + (state.sortDir === 'desc' ? '从高到低' : '从低到高') + '排列');
+};
+
+/* 密度切换：只切 class，不改任何文本以外的结构 */
+$('densityBtn').onclick = () => {
+  const dense = document.querySelector('table.orders').classList.toggle('dense');
+  state.density = dense ? 'compact' : 'cozy';
+  $('densityBtn').textContent = '密度 ' + (dense ? '紧凑' : '舒适');
+  toast(dense ? '已切换为紧凑密度' : '已切换为舒适密度');
+};
+
+$('exportBtn').onclick = () => toast('演示：不会真的导出文件（当前 ' + visible().length + ' 笔）');
+
+/* 刷新走骨架屏：这是**用户触发**的动作，不会自己发生，因此不影响快照确定性 */
+$('refreshBtn').onclick = () => {
+  const wrap = $('tableWrap');
+  wrap.hidden = true;
+  Enterprise.skeleton($('tableHost'), 420, () => {
+    wrap.hidden = false;
+    render();
+    toast('已同步订单数据（最近同步 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false }) + '）');
+  });
+};
+
+$('pickAll').addEventListener('change', (e) => {
+  const list = sortedList(visible());
+  state.picked = e.target.checked ? list.map((o) => o.no) : [];
+  render();
+});
 
 $('prevPage').disabled = true;
 $('nextPage').onclick = () => { toast('演示页仅提供第 1 页（共 15 笔订单），翻页不可用'); };
 
-/* 便于脚本化核对：window.__ordersDemo.shipped / .log */
+/* 便于脚本化核对：window.__ordersDemo.shipped / .log / .orders */
 window.__ordersDemo = {
   get shipped() { return state.orders.filter((o) => o.shipped).map((o) => o.no); },
   get log() { return state.log.slice(); },
   get orders() { return state.orders.map((o) => ({ no: o.no, goods: o.goods, status: o.status, buyer: o.buyer })); }
 };
+
+/* ---------- 企业外壳 ---------- */
+const shell = Enterprise.mountShell({
+  rail: {
+    logo: '云', modules: [
+      { id: 'orders', icon: '🧾', label: '订单', active: true, badge: 5 },
+      { id: 'goods', icon: '📦', label: '商品' },
+      { id: 'stock', icon: '🏬', label: '库存' },
+      { id: 'finance', icon: '💰', label: '财务' },
+      { id: 'service', icon: '🎧', label: '客服', badge: 3 },
+      { sep: true },
+      { id: 'report', icon: '📊', label: '报表' },
+    ],
+    onPick: (m) => {
+      if (m.active) return;
+      toast('演示页：仅「订单」模块可用，「' + m.label + '」未实现');
+    },
+  },
+  kpis: KPI_ITEMS,
+  tickerHost: 'entTickerHost',
+  ticker: '2026 年双 11 大促首波预售已开启。自 10 月 31 日起各仓停止接单时间调整为 22 点，超时未发货订单将自动进入异常池并触发客服回访；中通快递华东路由将于 10 月 28 日凌晨 02:00–04:00 维护，期间面单打印可能失败，请提前切换承运商。',
+  notices: [
+    { icon: '⚠', title: '3 笔订单已超时未发货', body: '最早一笔 ORD-20260921-4870 已滞留 41 小时，请优先安排出库。', time: '09-23 08:40', unread: true },
+    { icon: '🧾', title: '大额订单待二次复核', body: 'ORD-20260922-4828 实付超过 2000 元，已触发人工复核流程。', time: '09-23 07:55', unread: true },
+    { icon: '🚚', title: '承运商面单额度不足', body: '中通快递电子面单剩余 1,240 张，低于 3 日用量，请及时充值。', time: '09-22 19:10', unread: true },
+    { icon: '✅', title: '昨日批次已全部出库', body: '9 月 22 日应出库 27 笔订单已全部交接承运商，无滞留。', time: '09-23 06:30', unread: false },
+    { icon: '🛡', title: '风控命中一笔异常订单', body: 'ORD-20260921-4877 的收货地址与历史订单差异较大，已转入人工审核。', time: '09-22 15:26', unread: false },
+  ],
+  user: {
+    initial: '张', name: '张运营', role: '仓储主管',
+    email: 'admin@bookstore.example.com',
+    items: [
+      { icon: '👤', label: '个人资料', onPick: () => toast('演示：个人资料页未实现') },
+      { icon: '📈', label: '我的绩效看板', onPick: () => toast('演示：绩效看板页未实现') },
+      { icon: '🏬', label: '切换发货仓库', onPick: () => toast('演示：仓库切换未实现') },
+      { sep: true },
+      { icon: '↩', label: '退出登录', onPick: () => toast('演示：不会真实退出') },
+    ],
+  },
+  sim: {
+    label: '实时模拟', onLabel: '模拟中', everyMs: 5000,
+    hint: '打开后每 5 秒进入 1 笔新订单（最多 3 笔），KPI 与订单列表会自行变化',
+  },
+  statusbar: {
+    left: [{ dot: true, text: '订单服务正常' }, { text: '在线坐席 8 位' }, { text: '待处理工单 12 单' }],
+    right: [{ text: '云上书城 订单中台 v3.6.0' }, { text: '接口延迟 18ms' }],
+  },
+  searchSelector: '#kw',
+  onReady: ({ sim }) => {
+    /* 实时模拟：逐笔进入新订单。这是**唯一**会自己改页面的机制，且必须由用户显式打开。
+     * 单号、买家、金额全在固定脚本里，不随机 —— 演示要可复述、可核对。 */
+    sim.subscribe((step) => {
+      if (step > INCOMING.length) {
+        Enterprise.toast({ icon: '✔', title: '模拟已跑完固定脚本', meta: '共进入 ' + INCOMING.length + ' 笔新订单' });
+        return;
+      }
+      /* 新的一笔到达时把上一笔的高亮摘掉 —— 用状态做，不另起定时器 */
+      state.orders = state.orders.map((o) => (o.fresh ? Object.assign({}, o, { fresh: false }) : o));
+      const src = INCOMING[step - 1];
+      const o = Object.assign({
+        id: 100 + step, idx: step, shipped: false, fresh: true,
+        trade: '42009' + String(18307461205 + (step + 20) * 13337),
+        discount: 0, warehouse: WAREHOUSES[1 + (step % 4)], carrier: CARRIERS[1 + (step % 4)],
+        late: false
+      }, src);
+      state.orders = [o].concat(state.orders);
+      state.arrivals = step;
+      render();
+      Enterprise.bumpKpi($('entKpis'), '今日订单', 1);
+      Enterprise.toast({ icon: '🧾', title: '新订单 · ' + o.buyer, meta: o.no + ' · ' + money(o.amount) + ' · ' + o.status });
+    });
+  },
+});
 
 fillSelects();
 reset();

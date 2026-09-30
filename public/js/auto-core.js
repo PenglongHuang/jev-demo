@@ -8,23 +8,37 @@
   'use strict';
 
   var U = (typeof window !== 'undefined')
-    ? { parseSnapshotRefs: window.parseSnapshotRefs, buildRefCriteria: window.buildRefCriteria }
+    ? { parseSnapshotRefs: window.parseSnapshotRefs, buildRefCriteria: window.buildRefCriteria, clipMiddle: window.clipMiddle }
     : require('./util.js');
+  var clipMiddle = U.clipMiddle;
   var Funnel = (typeof window !== 'undefined')
     ? window.RefFunnel
     : require('./ref-funnel.js');
+  /* 并行召回（另一条「参数」题候选路线，见 ref-recall.js）：本文件只做接线，
+   * 切批与合并的确定性逻辑全部在那边，可被 node:test 直接锁住 */
+  var Recall = (typeof window !== 'undefined')
+    ? window.RefRecall
+    : require('./ref-recall.js');
 
-  /* ---------------- 动作集（设计 §7：19 个浏览器操作 + 2 个工程动作） ----------------
-   * 描述带分组前缀，帮助 Jev 在 23 个候选里区分用途。
+  /* ---------------- 动作集（设计 §7：19 个浏览器操作 + 1 个工程动作） ----------------
+   * 描述带分组前缀，帮助 Jev 在 21 个候选里区分用途。
    * 裁掉的 8 个（dblclick/drop/keydown/keyup/mousemove/mousedown/mouseup/mousewheel）：
    * a11y 快照驱动下坐标鼠标类不可达（没有 x,y 概念），修饰键与拖拽在本项目场景里无入口，
-   * 纯属干扰项（实测事故里模型在 31 候选里摇摆）。 */
+   * 纯属干扰项（实测事故里模型在 31 候选里摇摆）。
+   * 下线的「无操作」：它是「等待页面自身变化」的合法空转出口，而页面不会自己变化 ——
+   * 实测会话 r-0928-1530-r1uy 里模型对聊天框 fill 完连选 3 步「无操作」等回复，
+   * 一直等到步数上限。去掉后每一步都必须推进任务；真需要等（异步加载）由下一个
+   * 真实动作或 press/reload 承担。 */
   var AUTO_TOOLS = {
     /* 交互（9） */
     /* click 的描述里必须写明「选中 / 点开」也归它 —— 中文语境下「选中这一行 / 选中这一笔」
      * 是最高频的说法，而动作表里恰好有个叫 select 的选项，不划清归属它就会被抢走。 */
     'click': '【交互】点击按钮 / 链接 / 表格行 / 任意元素（要「选中」「点开」某个元素都用它；需配合「参数」选定 ref）',
-    'fill': '【交互】清空并向输入框/文本域填入文本（文本经动作确定后的「文本」补问选定）',
+    /* fill 的两条硬事实必须写进描述，缺一条就会出事故（实测 r-0928-1530-r1uy）：
+     *   ①清空 —— 是整体替换，不是追加（要追加用 type）；
+     *   ②不提交 —— 只写值，页面不会有任何变化。模型正是把 fill 当成了「发送消息」，
+     *     填完就停下等回复。所以描述里要直接把后续动作指出来。 */
+    'fill': '【交互】先清空输入框 / 文本域里的原有内容，再一次性写入新文本（整体替换，不是追加；文本经动作确定后的「文本」补问选定）。它只负责写入：填完后页面不会有任何变化，搜索框 / 聊天框 / 表单填完通常还要再 click 提交按钮或 press 回车',
     'type': '【交互】在元素上逐字输入文本（文本经动作确定后的「文本」补问选定）',
     /* select 只能作用于原生 <select>：快照里它是 combobox，它下面的 option 没有 ref，
      * 而 driver 打到 playwright 上时非 <select> 会硬抛 "Element is not a <select> element"。
@@ -48,15 +62,18 @@
     /* 弹窗（2） */
     'dialog-accept': '【弹窗】接受 alert / confirm 弹窗（文本 = 可选 prompt 输入）',
     'dialog-dismiss': '【弹窗】取消 / 关闭弹窗',
-    /* 工程（2） */
-    '生成输入': '【工程】调用生成模型（LLM）为「参数」指定的输入框生成合适文本并填入（搜索词、邮件主题、正文等）',
-    '无操作': '【工程】不执行任何操作，等待页面自身变化（也计一步）'
+    /* 工程（1） */
+    '生成输入': '【工程】调用生成模型（LLM）为「参数」指定的输入框生成合适文本并填入（搜索词、邮件主题、正文等）'
   };
 
-  /* 终止态（与动作同题呈现，命中即结束循环） */
+  /* 终止态（与动作同题呈现，命中即结束循环）。
+   * 「放弃」已下线：它给模型一张随时可用的免死金牌，而「当前页面做不到」多半只是
+   * 「这一步还没选对」—— mock 侧就撞过同一件事（对快照未就绪回「放弃」，一次可自愈的
+   * 等待直接变成整轮 giveup，见 tests/e2e/mock-server.js 的 RE_OBSERVE）。
+   * 现在模型只有「任务已完成」一个出口；真做不完交给工程守卫收尾（步数上限 / 连续失败），
+   * 结论的归因反而更诚实。 */
   var TERMINAL_TOOLS = {
-    '任务已完成': '目标已达成，停止循环',
-    '放弃': '当前页面无法完成任务，停止并报告'
+    '任务已完成': '目标已达成，停止循环'
   };
 
   /* 「无需元素」兜底项已下线：它与「不作用于元素的动作」语义打架，密集页分批候选里
@@ -103,7 +120,7 @@
   function buildState(ctx) {
     var tabs = Array.isArray(ctx.tabs) && ctx.tabs.length ? ctx.tabs
       : [{ index: 0, current: true, title: String(ctx.title || ''), url: String(ctx.url || '') }];
-    return {
+    var out = {
       '任务目标': String(ctx.goal || ''),
       '当前页面': { 'url': String(ctx.url || ''), '标题': String(ctx.title || '') },
       '标签页': formatTabs(tabs),
@@ -111,6 +128,69 @@
       '上一步结果': ctx.lastResult || '（这是第一步，之前尚无任何操作）',
       '页面快照': String(ctx.snapshot || '')
     };
+    /* 「停滞提示」只在检出重复 / 停滞时出现。常驻字段不行：页面正常时不带信息量，
+     * 每轮白烧 token，而且常驻的警告会被模型当背景噪音自动忽略 —— 稀缺才有信号。
+     * 排在末尾是刻意的：紧跟在几千 token 的快照之后，是模型的最近注意力位置。 */
+    if (ctx.stallNotice) out['停滞提示'] = String(ctx.stallNotice);
+    return out;
+  }
+
+  /* ---------------- 停滞检测（重复同一动作 / 页面快照连续未变） ----------------
+   * 触发场景（实测会话 r-0928-1530-r1uy）：对聊天框 fill「jev 是什么」之后，模型连选
+   * 3 步空转等页面变化 —— fill 不提交，页面永远不会变，而「上一步结果」始终是「成功」，
+   * 没有任何信号告诉它「你这两步等于没动」。
+   * 这里只产出**反馈**（写进 state 的「停滞提示」），不参与终止判定：同一动作连做 N 次
+   * 本身可能完全合理（连续翻页、连点同一「下一页」），据此终止会误杀正常任务。
+   * 硬闸门仍是 shouldTerminate 的 maxSteps 与 consecutiveFails。 */
+  var STALL_MIN = 2;   /* 连续 2 步同动作 / 未变化即开始提示，此时模型正要迈出第 3 步 */
+
+  /* 决策指纹：动作 + 参数 + 最终文本。文本走 resolveText（变量名 → 真实值），
+   * 否则「关键词」「招商银行」两个名字会被当成两次不同的操作。 */
+  function decisionSig(decision, variables) {
+    var d = decision || {};
+    var text = resolveText(d.text, variables);
+    return [d.action, d.param == null ? '' : String(d.param), text == null ? '' : String(text)].join('\u0001');
+  }
+
+  /* prevSteps：已跑完的步骤（每项带 decision / snapshot）；snapshot：本轮快照。
+   * 返回 { repeatCount, noChangeStreak, notice }，notice 为 null 表示不注入。 */
+  function detectStall(prevSteps, snapshot, variables) {
+    var prev = (prevSteps || []).filter(function (s) { return s && s.decision; });
+    if (!prev.length) return { repeatCount: 0, noChangeStreak: 0, notice: null };
+
+    var last = prev[prev.length - 1];
+    var sig = decisionSig(last.decision, variables);
+    var repeatCount = 1;
+    for (var i = prev.length - 2; i >= 0; i--) {
+      if (decisionSig(prev[i].decision, variables) !== sig) break;
+      repeatCount++;
+    }
+    /* 快照与「本轮」比：相等说明上一步跑完页面没变，连续相等就是连续空转。
+     * 跳转 / ref 重排 / 内容渲染都会让快照不等，天然打断连续计数。 */
+    var cur = String(snapshot == null ? '' : snapshot);
+    var noChangeStreak = 0;
+    for (var j = prev.length - 1; j >= 0; j--) {
+      var s = prev[j].snapshot;
+      if (s == null || String(s) !== cur) break;
+      noChangeStreak++;
+    }
+
+    var parts = [];
+    if (repeatCount >= STALL_MIN) {
+      parts.push('动作「' + last.decision.action + '」（参数与文本完全相同）已连续执行 ' + repeatCount + ' 步');
+    }
+    if (noChangeStreak >= STALL_MIN) {
+      parts.push('页面快照已连续 ' + noChangeStreak + ' 步没有变化');
+    }
+    if (!parts.length) return { repeatCount: repeatCount, noChangeStreak: noChangeStreak, notice: null };
+
+    var hard = repeatCount > STALL_MIN || noChangeStreak > STALL_MIN;
+    var notice = parts.join('；') + '。' + (hard
+      ? '重复同一动作不会有任何进展，必须换一个：换动作（例如输入框只写入、不会自己提交，那就改用 click 点「搜索 / 发送」按钮或 press 回车）、'
+        + '换「参数」里的元素、换文本取值；还不行就换入口 —— 用页面上的搜索框 / 菜单 / 分页绕到目标那儿，别停在原地。'
+      : '先判断上一步是否真的生效（输入框 fill 只写入、不会自己提交是常见原因）：'
+        + '若无进展，请更换动作或更换「参数」里的元素，不要继续重复同一步。');
+    return { repeatCount: repeatCount, noChangeStreak: noChangeStreak, notice: notice };
   }
 
   /* ---------------- 问题组装（固定 3 道，动态值全部工程注入） ---------------- */
@@ -120,13 +200,25 @@
 
   var REF_MORE = Funnel.REF_MORE;
 
-  /* 裁剪配置缺省 = 默认开着（与界面默认一致；关掉必须显式传 on:false） */
+  /* ---------------- 「参数」题候选算法（高级参数可选，两条路线并存） ----------------
+   *   parallel —— 并行召回（**默认**）：快照按 size 切 K 批并行问 Jev，各批取概率前 topN，
+   *               合并成一个候选集，再请 Jev 做一次最终决策。工程侧不排序、不丢元素。
+   *   ranked   —— 相关性裁剪：确定性加权排序取前 limit，附「其他」兜底项补问下一批。
+   * 两者只在「候选怎么来」上不同；落定之后的执行、校验、展示完全共用。 */
+  var ALGORITHMS = ['parallel', 'ranked'];
+
+  /* 配置缺省 = 默认开着 + 默认并行召回（与界面默认一致；关掉必须显式传 on:false） */
   function normalizeTrim(paramTrim) {
     var t = paramTrim || {};
+    var size = Math.min(250, Math.max(10, parseInt(t.size, 10) || Recall.DEFAULT_SIZE));
     return {
       on: t.on !== false,
+      algorithm: ALGORITHMS.indexOf(t.algorithm) === -1 ? 'parallel' : t.algorithm,
       limit: parseInt(t.limit, 10) || Funnel.DEFAULT_LIMIT,
-      maxTranches: (t.maxTranches == null) ? 3 : Math.max(0, parseInt(t.maxTranches, 10) || 0)
+      maxTranches: (t.maxTranches == null) ? 3 : Math.max(0, parseInt(t.maxTranches, 10) || 0),
+      size: size,
+      /* 每批召回条数不能超过一批的容量，否则「每批取前 topN」是句空话 */
+      topN: Math.min(size, Math.max(1, parseInt(t.topN, 10) || Recall.DEFAULT_TOPN))
     };
   }
 
@@ -155,12 +247,195 @@
     return out;
   }
 
+  /* ---------------- 并行召回（algorithm = parallel） ----------------
+   * 触发条件：裁剪开着 + 元素数超过一批（K > 1）。K === 1 或裁剪关闭时返回 null ——
+   * 调用方据此走原有的单次调用路径（小页面零额外请求、零回归）。 */
+  function recallPlan(ctx) {
+    var o = ctx || {};
+    var trim = normalizeTrim(o.paramTrim);
+    if (!trim.on) return null;
+    /* 选中的是相关性裁剪时**必须**返回 null：否则两条路线会同时生效，
+     * 「其他」兜底与并行召回搅在一起，谁也说不清候选是怎么来的 */
+    if (trim.algorithm !== 'parallel') return null;
+    var plan = Recall.planBatches(o.snapshot, { size: trim.size, topN: trim.topN });
+    return plan.meta.parallel ? plan : null;
+  }
+
+  /* 召回批次题：**只问「参数」一题**。
+   * 不问动作 / 未完成 —— 召回只关心元素的概率分布，动作与整体决策仍由最后那次全套 3 题的
+   * 调用决定。这样 K 批之间不需要投票、决策只有一处，可解释也可复现。
+   * instructions 明说「不需要判断目标是否在本批中」：本批里可能根本没有目标，
+   * 让模型去判「有没有」只会得到一堆犹豫的低概率，反而毁掉召回排序。 */
+  function buildRecallQuestions(plan, batchIndex) {
+    var b = plan.batches[batchIndex - 1];
+    var instructions = '本题只问元素，不涉及动作。以下是当前页面第 ' + b.index + '/' + plan.meta.batches
+      + ' 批元素（本批 ' + b.refs.length + ' 个，全页共 ' + plan.meta.totalRefs + ' 个）。'
+      + '请选出其中与任务目标最相关的元素，并按把握程度给出概率分布：'
+      + '本批每个候选都要有概率（哪怕很小），不需要判断目标是否在本批中，只在本批内排序即可。';
+    return { '参数': { type: 'choice', instructions: instructions, criteria: b.criteria } };
+  }
+
+  /* ---------------- 历史会话：落盘形状 → 运行时形状 ----------------
+   * 落盘用 request / llm.response，运行时（渲染层）认 payload / llm.raw。这层映射
+   * 原先写在 auto.js 的 IIFE 里，node 侧看不见，于是**「落盘 → 重新载入 → 面板」这条
+   * 边界一直没测试面**：并行召回的候选键（合并候选清单）、「参数决策」行动的候选数
+   * 都是在这条边界上丢的（用户看到的就是「面板与实际数据不匹配」）。
+   * 搬进纯逻辑层，可被 node:test 直接往返对账。 */
+  function hydrateRecord(rec) {
+    var r0 = rec || {};
+    return {
+      meta: r0.meta,
+      steps: (r0.steps || []).map(function (s) {
+        return Object.assign({}, s, {
+          payload: s.payload || s.request || null,
+          followUps: (s.followUps || []).map(function (r) {
+            return Object.assign({}, r, {
+              payload: r.payload || r.request || null,
+              /* 老记录没存候选数：从并行召回的候选键数补回来，别让标题写成「候选 ? 个」。
+               * 连候选键都没有（更老的记录）→ 保持 null 写「?」：报 0 个是假话 */
+              candidates: (r.candidates != null) ? r.candidates
+                : (((r.kind || 'param') === 'pick' && s.recall && (s.recall.candidates || []).length)
+                  ? s.recall.candidates.length : null),
+            });
+          }),
+          /* 并行召回的批次同样要 request → payload 归一，否则历史会话里召回批次的
+           * 请求体渲染不出来（渲染层只认 payload）。
+           * sharedState：落盘时省掉了与本步首轮重复的那份 state（见 buildRunRecord），
+           * 这里挂回去 —— UI 的「① 发送的请求体」才与当时真发出去的一致 */
+          recall: s.recall ? Object.assign({}, s.recall, {
+            /* 落盘只存候选键（candidates），这里按 refLabels 复原成 key→描述 的映射：
+             * 召回卡片的「合并后的候选」清单靠它渲染，缺了就整段消失（老记录如实为空） */
+            criteria: (s.recall.criteria && Object.keys(s.recall.criteria).length) ? s.recall.criteria
+              : (s.recall.candidates || []).reduce(function (m, k) {
+                m[k] = (s.refLabels || {})[k] || ''; return m;
+              }, Object.create(null)),
+            batches: (s.recall.batches || []).map(function (r) {
+              var p = r.payload || r.request || null;
+              var main = s.payload || s.request || null;
+              var full = (p && r.sharedState && main && main.state) ? Object.assign({}, p, { state: main.state }) : p;
+              var out = Object.assign({}, r, { payload: full });
+              delete out.sharedState;
+              return out;
+            }),
+          }) : null,
+          llm: s.llm ? { messages: s.llm.messages, raw: s.llm.response, text: s.llm.text, error: s.llm.error, ms: numOrNull(s.llm.ms) } : null,
+        });
+      }),
+    };
+  }
+
+  /* 各批召回 → 合并成一个最终候选集（纯逻辑在 ref-recall.js，这里只是接线）。
+   * 传进来的是 callJev 的 data（信封）还是内层作答都可以 —— 剥壳在 ref-recall.answerOf。 */
+  function mergeRecall(plan, answers, opts) {
+    return Recall.mergeBatches(plan, answers || [], opts || {});
+  }
+
+  /* 首轮「参数」作答 → 最终决策要带上的种子候选（用户定的规则：
+   * 最终候选 = **首轮那一段里选出的前 topN 个** + K 批并行召回的合并结果）。
+   * 为什么不是只带作答的那一个：首轮那次概率分布本身就是一次有效的相关性排序，
+   * 只留一个等于把它的信息全丢掉，最终决策面对的是一个没有对手的候选集
+   * （实测会话 r-0928-1954-4dgf：469 个 ref / 2 批召回，候选只剩 1 个，那一步是空转）。
+   * 作答的那个 ref 由 pickFromAnswer 保证恒在（哪怕概率为 0 / 落在分布之外）。 */
+  function recallSeeds(ctx) {
+    var o = ctx || {};
+    var plan = o.plan;
+    if (!plan || !plan.first) return [];
+    var topN = (plan.meta && plan.meta.topN) || Recall.DEFAULT_TOPN;
+    return Recall.pickFromAnswer(plan.first.criteria, o.answer, topN).map(function (x) { return x.ref; });
+  }
+
+  /* 值得再花一轮并行召回去定位的动作：**要在大量元素里挑一个**的那几个。
+   *   - 终止态 / 导航类（goto / press / 标签页…）不作用于元素，本来就轮不到召回
+   *   - 「生成输入」按产品决定**不触发**（它的目标是输入框，首轮那次「参数」作答就是它的定位）
+   * 其余需要元素的动作（click / fill / type / select / check / uncheck / hover）才触发。 */
+  var RECALL_ACTIONS = { click: 1, fill: 1, type: 1, select: 1, check: 1, uncheck: 1, hover: 1 };
+
+  /* 并行召回的触发判定：**页面元素超过一批** 且 **首轮动作是需要定位的动作**。
+   * 抽成纯函数是为了让这条规则可断言（单测直接打这两个条件），也免得调用方
+   * 把「要不要召回」的判据写散 —— 动作不需要元素时一个召回请求都不该发：
+   * 那是「先判动作、再决定要不要召回」的全部意义。 */
+  function shouldRecall(plan, decision) {
+    return Boolean(plan && decision && RECALL_ACTIONS[decision.action]);
+  }
+
+  /* 去掉「其他」兜底项：并行召回这条路线没有它 —— 候选就是召回结果，没有「还有下一批」。
+   * 只剔这一个键，别动顺序（最终候选的先后有意义：首轮种子在最前）。
+   * 抽出来是因为**候选集合必须与计数、落盘、面板说的是同一份**：
+   * 曾经只在发给 Jev 的那一份上剔（buildRecallPickQuestions 里），于是退回裁剪候选时
+   * 面板/记录写「候选 81 个」、实际发出 80 个，还多渲染一行空的「其他」（面板与实际不符）。 */
+  function dropRefMore(criteria) {
+    var out = Object.create(null);
+    Object.keys(criteria || {}).forEach(function (k) {
+      if (k !== REF_MORE) out[k] = criteria[k];
+    });
+    return out;
+  }
+
+  /* 并行召回一条都没命中时的兜底候选：退回相关性裁剪那一份。
+   * 两条必须同时成立，否则又是「面板与实际不符」：
+   *   ① 剔掉「其他」—— 这条路线没有兜底项（语义是「展开下一批」，在这里会变成一个合法的元素名）
+   *   ② meta.merged 按**剔过之后**的份数报，落盘/面板/真正发出的题目才对得上（曾经报 81、实发 80）
+   * 抽成纯函数就是为了让这条路径有测试面：老实现写在 auto.js 的 IIFE 里，node 侧看不见。 */
+  function recallFallback(ctx) {
+    var o = ctx || {};
+    var fb = paramCriteria({
+      snapshot: o.snapshot, goal: o.goal, avoidRefs: o.avoidRefs, paramTrim: o.paramTrim,
+    });
+    var criteria = dropRefMore(fb.criteria);
+    return {
+      criteria: criteria,
+      meta: Object.assign({}, o.mergedMeta || {}, { fallback: true, merged: Object.keys(criteria).length }),
+    };
+  }
+
+  /* 召回之后那一次「参数」决策题（并行召回的收口）。
+   * 候选 = 首轮前 topN 个（种子，作答的那个必在其中）+ K 批召回的合并结果 ——
+   * 首轮那一段不在召回范围内，只能由它自己的预测代表（用户定的规则）。
+   * 与 ref-funnel 的批次补问同形（单题 choice），
+   * 区别是候选已全部列出、没有「下一批」可展开 —— 措辞必须写死这一点。 */
+  function buildRecallPickQuestions(ctx) {
+    var o = ctx || {};
+    var meta = o.meta || {};
+    var seeded = (meta.seeded || []).length;
+    /* 候选里**绝不能有「其他」**：那是「相关性裁剪」路线的兜底项（语义是「展开下一批」），
+     * 到了这条路线就成了一个合法的「元素名」——实测事故：召回无结果时退回裁剪候选，
+     * 那一份带着「其他」，Jev 选了它，于是 decision.param = 「其他」，
+     * 命令打到浏览器直接报「fill 需要合法 ref（形如 e12），收到：其他」，连烧三步。
+     * 这里再防御性剔一次：上游（resolveRecall 的兜底）已经剔过，双保险不嫌多 */
+    var criteria = dropRefMore(o.criteria);
+    var from = meta.fallback
+      /* 召回整段没结果、退回裁剪候选这一次：别把它说成「并行召回的合并结果」（那是另一条路线） */
+      ? '并行召回无结果时退回的相关性裁剪候选'
+      : seeded
+        ? '首轮在该段元素里选出的 ' + seeded + ' 个 + ' + meta.batches + ' 批并行召回的合并结果'
+        : meta.batches + ' 批并行召回的合并结果';
+    var instructions = '已确定的动作是「' + o.action + '」。候选 = ' + from + '，共 '
+      + Object.keys(criteria).length + ' 个（全页共 ' + meta.totalRefs + ' 个），已全部列出，'
+      + '请在其中选定该动作要操作的唯一元素。';
+    return { '参数': { type: 'choice', instructions: instructions, criteria: criteria } };
+  }
+
   function paramInstructions(param) {
     var meta = (param && param.meta) || {};
     var criteria = (param && param.criteria) || {};
     var head = '该动作应作用于快照中的哪个元素？';
-    var tail = '若你决定的动作不作用于任何元素（press / goto / 前进后退 / 刷新 / 标签页 / 弹窗 / 无操作 / 终止），'
+    var tail = '若你决定的动作不作用于任何元素（press / goto / 前进后退 / 刷新 / 标签页 / 弹窗 / 终止），'
       + '「参数」不会被使用，任选一项即可。';
+    /* 并行召回：候选既不是「全量」也不是「折叠剩余」——是 K 批召回合并出来的。
+     * 措辞要说清来源、说清已全部列出（不给「还有下一批」的暗示：这条路线没有兜底项） */
+    if (meta.algorithm === 'parallel' && meta.first) {
+      /* 首轮那一次：候选只有本页前 size 个元素（其余留给第二轮的并行召回）。
+       * 必须说清楚「本段没有就在本段里挑最接近的」——否则模型会以为候选缺失而乱选 */
+      var rest = Math.max(0, meta.totalRefs - meta.firstSize);
+      return head + '候选是当前页面前 ' + meta.firstSize + ' 个元素（全页共 ' + meta.totalRefs + ' 个）。'
+        + '若目标元素在本段里，直接选中它；若本段里没有，就选出本段中最接近的那一个 ——'
+        + '下一步会按需并行召回其余 ' + rest + ' 个元素再核对一次。' + tail;
+    }
+    if (meta.algorithm === 'parallel') {
+      return head + '候选由并行召回合并而来：共 ' + meta.merged + ' 个（' + meta.batches
+        + ' 批 × 每批按概率取前 ' + meta.topN + '，全页共 ' + meta.totalRefs + ' 个），'
+        + '已全部列出，请直接在其中选定本步要操作的元素。' + tail;
+    }
     if (!meta.trimmed) {
       return head + '选项由当前快照自动解析，【可交互】为可操作元素。' + tail;
     }
@@ -482,6 +757,37 @@
     return /modal state/i.test(String(errText || ''));
   }
 
+  /* 快照携带器：「上一步动作顺带带回的快照，顶替下一步的 snapshot」这件事的全部判据。
+   *
+   * 为什么抽成这个对象：这段逻辑本来散在 auto.js 的循环里（一个模块级变量 + 三处清零点），
+   * 而 auto.js 没有任何单测能到达 —— 接错线不会报错，只会让模型看着上一页做决策。
+   * 抽出来之后，规则只有三条，且每条都有断言盯着：
+   *   ① 只有**成功**的动作、且带回的是**非空字符串**，才收下（失败/空/没有 → 一律清空，
+   *      不许让上上次的快照留下来冒充这次的）；
+   *   ② 取走即清（take）—— 快照只能被紧接着的那一步用掉，隔步复用等于拿两步之前的页面；
+   *   ③ reset() 用于开跑（上一轮的快照绝不能跨轮生效：这一轮的浏览器是刚 open 的）。
+   * 这三条合起来保证的不变量是：**用来当页面依据的那份快照，永远来自紧邻的上一次动作。 */
+  function makeSnapshotCarrier() {
+    var pending = null;
+    return {
+      accept: function (act) {
+        pending = (act && act.ok && typeof act.snapshot === 'string' && act.snapshot) ? act.snapshot : null;
+        return pending;
+      },
+      take: function () {
+        var v = pending;
+        pending = null;
+        return v;
+      },
+      reset: function () {
+        pending = null;
+      },
+      peek: function () {   /* 只给测试与排查看，不参与流程 */
+        return pending;
+      },
+    };
+  }
+
   function buildDialogQuestions() {
     return {
       '动作': {
@@ -509,8 +815,11 @@
           + '先按目标元素的角色挑动词（选项描述里已标出角色，如 button "发货"、combobox "订单状态"）：'
           + '按钮 / 链接 / 表格行 / 任意可点元素 → click；输入框 / 文本域 → fill；'
           + '复选框 / 单选框 → check / uncheck；原生下拉框（combobox）→ select；文件 → upload；'
-          + '滚动页面 → press（键名在动作确定后的「文本」补问里选，常用 PageDown / PageUp）；仅等待页面变化 → 无操作。'
-          + '若目标已达成选「任务已完成」；当前页面无法完成任务选「放弃」。',
+          + '滚动页面 → press（键名在动作确定后的「文本」补问里选，常用 PageDown / PageUp）。'
+          /* 「无操作」下线后必须把「不能空转」说死，否则模型会去找别的等价出口 */
+          + '本动作集里没有「等待 / 空转」选项，页面不会自己变化 —— 每一步都必须推进任务：'
+          + 'fill 只写入、不提交，填完搜索框 / 聊天框后下一步要再选 click 点「搜索 / 发送」按钮或 press 回车。'
+          + '若目标已达成选「任务已完成」—— 这是唯一的终止态，页面做不到就换动作 / 换元素继续推。',
         criteria: Object.assign({}, AUTO_TOOLS, TERMINAL_TOOLS)
       }
     };
@@ -574,7 +883,6 @@
     var action = decision.action;
 
     if (TERMINAL_TOOLS[action]) return { kind: 'terminal', action: action };
-    if (action === '无操作') return { kind: 'noop' };
 
     if (action === '生成输入') {
       if (!decision.param) throw new Error('生成输入需要指定目标输入框的 ref，但 Jev 未在「参数」题选定元素');
@@ -696,7 +1004,7 @@
 
   function describeDecision(decision, refLabels, variables) {
     var action = decision.action;
-    if (TERMINAL_TOOLS[action] || action === '无操作') return action;
+    if (TERMINAL_TOOLS[action]) return action;
     if (isRefMore(decision.param)) return action + '【' + REF_MORE + ' · 展开下一批】';
     if (action === '生成输入') return '生成输入【' + decision.param + ' · ' + shortRefLabel(refLabels[decision.param]) + '】';
     var out = action;
@@ -713,15 +1021,6 @@
    * 推不出「要先清掉遮挡物再点」，于是重复点同一元素直到终止
    * （实测会话 r-0926-0046-qrys：步骤 5-7 三次相同 click，每次 5s 超时）。 */
   var ERR_ROOT_RE = /intercepts pointer events|subtree intercepts|not visible|not stable|outside of the viewport|element is not (enabled|attached|visible)|命令超时/;
-
-  /* 长行折叠中段：根因短语固定在行尾，按长度从头截会把根因切掉（与 browser-driver.js
-   * 里的同名 helper 同源；两端是不同运行时，各留一份 4 行实现比让驱动依赖 public/js 便宜） */
-  function clipMiddle(line, max) {
-    var s = String(line);
-    if (s.length <= max) return s;
-    var tail = Math.floor(max / 2);
-    return s.slice(0, max - tail - 1) + '…' + s.slice(-tail);
-  }
 
   function briefError(err) {
     var s = String(err == null ? '' : err).replace(/\u001b\[[0-9;]*m/g, '').trim();
@@ -760,16 +1059,57 @@
   function actionsOf(step) {
     const s = step || {};
     const out = [];
+    const recall = s.recall || null;
+    const rbs = (recall && recall.batches) || [];
     const mainPayload = s.payload || s.request || null;
+    /* 并行召回在行动列表里是**一个**动作（K 批是它的内部明细，不是 K 个动作）：
+     * 时间线上「首轮 → 并行召回 → 参数决策 → …」一眼读完。
+     * calls = K 用于耗时统计（durationView 只读 actionsOf，漏掉就把 K 次说成 1 次） */
+    /* 召回在首轮之前还是之后：新记录带 afterMain 标记（第二轮召回，当前流程）；
+     * 老记录没有这个字段，用「首轮有没有「参数」题」反推（那时的首轮不带参数）。
+     * 位置也要对，否则时间线读起来像倒放。 */
+    const recallAfterMain = recall
+      ? (recall.afterMain != null ? Boolean(recall.afterMain)
+        : Boolean(mainPayload && mainPayload.questions && !mainPayload.questions['参数']))
+      : false;
+    if (rbs.length && !recallAfterMain) out.push(recallAction());
+    /* 函数声明（不是 const 箭头）：上面那行要在它定义之前调用它 —— 声明会提升，const 不会 */
+    function recallAction() {
+      /* K 批是**并发**发的（resolveRecall 用 Promise.all）：这一步的墙钟是**最慢的那一批**，
+       * 不是各批之和。累加等于把并行的 K 次说成串行 —— 实测 2 批各 ~1.1s 时，
+       * 步耗时里凭空多出 1.1s，还会把 otherMs（步耗时 − Jev − 动作 − 输入）挤成 0，
+       * 界面上「并行召回」看着比整步还慢。缺 ms 的批次只影响 measured，不参与取最大。 */
+      const msArr = rbs.map((r) => numOrNull(r.ms)).filter((m) => m != null);
+      const measured = msArr.length;
+      const maxMs = measured ? Math.max.apply(null, msArr) : null;
+      return {
+        kind: 'recall',
+        title: '并行召回 · ' + rbs.length + ' 批 × ' + ((recall.meta && recall.meta.size) || '?') + ' 个',
+        payload: null, response: null, error: null,
+        calls: rbs.length, batches: rbs, meta: recall.meta || null, merged: recall.merged || null,
+        mergedKeys: Object.keys(recall.criteria || {}),
+        ms: maxMs,
+        measured: measured,   /* 有计时的批次个数：durationView 按它报「几次未计时」 */
+      };
+    }
     if (mainPayload) {
       const n = Object.keys(mainPayload.questions || {}).length;
       const dialog = n === 1 && mainPayload.questions['动作'] && !mainPayload.questions['参数'];
+      /* 超限页的首轮不带「参数」（元素交给并行召回）：那不是残缺请求，是设计 */
+      const noParam = n === 2 && mainPayload.questions['动作'] && mainPayload.questions['未完成'] && !mainPayload.questions['参数'];
       out.push({
-        kind: 'main', title: dialog ? 'Jev 弹窗步 · 1 题' : 'Jev 首轮 · ' + n + ' 题',
+        kind: 'main',
+        title: dialog ? 'Jev 弹窗步 · 1 题'
+          : noParam ? 'Jev 首轮 · 2 题（动作 + 未完成）'
+            : 'Jev 首轮 · ' + n + ' 题',
         payload: mainPayload, response: s.response || null, error: s.jevError || null,
         ms: numOrNull(s.jevMs),
       });
     }
+    /* 首轮不带「参数」= 第二轮召回发生在它之后（当前流程）；带「参数」= 老流程（召回在前）。
+     * 两种记录都要排对，否则时间线读起来像倒放。 */
+    /* 第二轮召回（当前流程）：排在「首轮」之后、「参数决策」之前 */
+    if (rbs.length && recallAfterMain) out.push(recallAction());
     (s.followUps || []).forEach((r) => {
       const k = r.kind || 'param';
       const p = r.payload || r.request || null;
@@ -779,6 +1119,7 @@
       const n = qp ? Object.keys(qp).length : 1;
       const titles = {
         param: '参数补问 · ' + n + ' 题 · 第 ' + r.batch + ' 批',
+        pick: '参数决策 · ' + n + ' 题 · 候选 ' + (r.candidates != null ? r.candidates : '?') + ' 个（并行召回合并）',
         action: '动作补问 · ' + n + ' 题 · 「' + (r.from || '') + '」与角色 ' + (r.role || '') + ' 冲突',
         text: '文本补问 · ' + n + ' 题 · ' + (r.forAction || ''),
       };
@@ -787,7 +1128,9 @@
         payload: p, response: r.response || null, error: r.error || null,
         batch: r.batch != null ? r.batch : null, param: r.param || null, action: r.action || null,
         text: r.text || null, forAction: r.forAction || null, from: r.from || null,
-        role: r.role || null, ref: r.ref || null, why: r.why || null, ms: numOrNull(r.ms),
+        role: r.role || null, ref: r.ref || null, why: r.why || null,
+        candidates: r.candidates != null ? r.candidates : null,
+        ms: numOrNull(r.ms),
       });
     });
     const L = s.llm;
@@ -806,6 +1149,13 @@
     if (a.error) return 'error';
     if (a.kind === 'main') return a.response ? 'ok' : 'pending';
     if (a.kind === 'llm') return a.text ? 'ok' : 'pending';
+    /* 并行召回：判「有没有拿到响应」——整批都没召回元素不算失败（目标本就不在这批里）；
+     * 但**整批都调用失败**是失败：以前这种状态在树上一直转圈（永远 pending） */
+    if (a.kind === 'recall') {
+      const bs = a.batches || [];
+      if (bs.length && bs.every((b) => b.error)) return 'error';
+      return bs.some((b) => b.response && !b.error) ? 'ok' : 'pending';
+    }
     return (a.param || a.action || a.text) ? 'ok' : 'pending';
   }
 
@@ -825,13 +1175,20 @@
 
   function durationView(step) {
     const s = step || {};
-    let jevMs = null, jevCalls = 0, jevMeasured = 0;
+    let jevMs = null, jevCalls = 0, jevMeasured = 0, recallBatches = 0, recallMeasured = 0;
     actionsOf(s).forEach((a) => {
       if (a.kind === 'llm') return;
-      jevCalls += 1;
+      /* 一个行动可能含多次调用（并行召回 = K 批），按 calls 记；缺省 1 */
+      const calls = (a.calls != null && a.calls > 0) ? a.calls : 1;
+      jevCalls += calls;
+      if (a.kind === 'recall') recallBatches += calls;
       const m = numOrNull(a.ms);
       if (m == null) return;
-      jevMeasured += 1;
+      /* 测到几次算几次：召回那 K 批各自算一次（行动上的 measured 由 actionsOf 数好）。
+       * 不这么记，2 批召回会被算成「1 次测到、1 次未计时」，悬停文案就撒谎了。 */
+      const meas = (a.measured != null ? a.measured : 1);
+      jevMeasured += meas;
+      if (a.kind === 'recall') recallMeasured += meas;
       jevMs = (jevMs == null ? 0 : jevMs) + Math.max(0, m);
     });
     const rawStepMs = numOrNull(s.ms);
@@ -846,7 +1203,8 @@
     }
     return {
       stepMs: stepMs, jevMs: jevMs, actMs: actMs, llmMs: llmMs, otherMs: otherMs,
-      jevCalls: jevCalls, jevMeasured: jevMeasured,
+      jevCalls: jevCalls, jevMeasured: jevMeasured, recallBatches: recallBatches,
+      recallMeasured: recallMeasured,
       jevPct: (stepMs != null && stepMs > 0 && jevMs != null) ? Math.round(jevMs / stepMs * 100) : null,
       skew: skew,
     };
@@ -859,41 +1217,65 @@
     return m < 1000 ? Math.round(m) + 'ms' : (m / 1000).toFixed(1) + 's';
   }
 
-  /* 树上步骤行的第二行文案。空串 = 这行不该出现（一个 Jev 调用都没有）。
-   * opt.live：这一步正在跑 —— Jev 还没返回时说「该记录无耗时数据」是错的（记录正在写）。 */
+  /* 树上步骤行右侧的 Jev 文案。**压到纯数字宽度**：树宽 320px，右列每多占 10px 都是从左边
+   * 两行钳制的标签里抢的 —— E2E S9.9 实测两轮：「该记录无耗时数据」(84px) 与「无耗时记录」
+   * (55px) 都把标签挤到第三行被吃掉（客户端 117px 宽、内容 55px 高 vs 37px 可见）。
+   * 所以缺数据就写 '—'（与总览表同一约定），跑动中写「计时中」，解释一律进 title。 */
   function stepDurationLine(step, opt) {
     const d = durationView(step);
     if (!d.jevCalls) return '';
-    if (d.jevMs == null) return (opt && opt.live) ? 'Jev 计时中…' : '该记录无耗时数据';
-    const miss = d.jevCalls > d.jevMeasured ? '（' + (d.jevCalls - d.jevMeasured) + ' 次未计时）' : '';
-    const pct = d.jevPct != null ? ' · 占 ' + d.jevPct + '%' : '';
-    return 'Jev ' + formatMs(d.jevMs) + ' · ' + d.jevCalls + ' 次调用' + miss + pct;
+    if (d.jevMs == null) return (opt && opt.live) ? '计时中' : '—';
+    return 'Jev ' + formatMs(d.jevMs);
   }
 
-  /* 构成条的四段（颜色沿用界面既有 token：Jev 紫 / LLM 绿 / 动作 靛 / 其它 灰）。
-   * 比例四舍五入后把差额补进最大的一段，保证和恰好 100 —— 否则条尾会留一条缝。 */
-  const SEG_COLORS = { jev: '#7c3aed', llm: '#0d9268', act: '#4f46e5', other: '#cbd0da' };
-
-  function breakdownSegs(d) {
-    if (!d || d.stepMs == null || d.stepMs <= 0) return null;
-    const parts = [
-      { key: 'jev', ms: d.jevMs || 0 }, { key: 'llm', ms: d.llmMs || 0 },
-      { key: 'act', ms: d.actMs || 0 }, { key: 'other', ms: d.otherMs || 0 },
-    ];
-    const total = parts.reduce((a, p) => a + p.ms, 0);
-    if (total <= 0) return null;
-    const segs = [];
-    parts.forEach((p) => {
-      if (p.ms <= 0) return;
-      segs.push({ key: p.key, n: Math.round(p.ms / total * 100), color: SEG_COLORS[p.key], ms: p.ms });
-    });
-    if (!segs.length) return null;
-    const diff = 100 - segs.reduce((a, s) => a + s.n, 0);
-    if (diff) segs[segs.reduce((best, s, i, arr) => (s.n > arr[best].n ? i : best), 0)].n += diff;
-    return segs;
+  /* 树上的悬停说明：不占宽度，但信息不丢 */
+  function stepDurationTitle(step) {
+    const d = durationView(step);
+    if (!d.jevCalls) return '';
+    if (d.jevMs == null) return '本步有 ' + d.jevCalls + ' 次 Jev 调用，但这条记录没有耗时数据';
+    const miss = d.jevCalls > d.jevMeasured ? '，其中 ' + (d.jevCalls - d.jevMeasured) + ' 次未计时' : '';
+    /* 召回那 K 批是并发的：右列的数字里它们只算了最慢的一批。但**只有真测到才这么写**：
+     * 中断 / 自动保存时批次对象已经建好、Promise.all 还没回来（ms 全是 null），
+     * 那时说「按最慢一批计入」是凭空许诺，还与同一行的「K 次未计时」自相矛盾
+     * （实测 data/runs 里就有这种 running 态记录） */
+    const par = (d.recallBatches > 1 && d.recallMeasured > 0)
+      ? '，召回 ' + d.recallBatches + ' 批并行、按最慢一批计入' : '';
+    return '本步 ' + d.jevCalls + ' 次 Jev 调用（首轮/召回/补问）合计' + par + miss;
   }
 
-  /* 步骤合计：老记录混排时只累加测到的，并如实报「几步里有几步有数据」 */
+  /* 单次调用的 token 用量：Jev 用 input_tokens/output_tokens，OpenAI 兼容接口
+   * （「生成输入」那次）用 prompt_tokens/completion_tokens —— 两种都认。
+   * 缺 → null。0 是合法值（缓存全命中时 input 可能为 0），不能当缺失。 */
+  function usageOf(resp) {
+    const u = (resp && resp.usage) || null;
+    const pick = (a, b) => {
+      const v = u ? (u[a] != null ? u[a] : u[b]) : null;
+      return typeof v === 'number' && isFinite(v) ? v : null;
+    };
+    return { input: pick('input_tokens', 'prompt_tokens'), output: pick('output_tokens', 'completion_tokens') };
+  }
+
+  /* 15235 → '15,235'。不做 '15.2k' 那种缩写：这个数是拿来核成本的，要精确。 */
+  function formatTokens(n) {
+    if (typeof n !== 'number' || !isFinite(n)) return '—';
+    return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  /* 行动详情头部的一行：这次调用的耗时 + 输入/输出 token。
+   * 缺什么省什么；全缺（调用失败、既没耗时也没响应）→ 空串，整行不出现。 */
+  function actionMetricsLine(a) {
+    const x = a || {};
+    const u = usageOf(x.response);
+    const parts = [];
+    if (numOrNull(x.ms) != null) parts.push('耗时 ' + formatMs(x.ms));
+    if (u.input != null) parts.push('输入 ' + formatTokens(u.input) + ' tokens');
+    if (u.output != null) parts.push('输出 ' + formatTokens(u.output) + ' tokens');
+    return parts.join(' · ');
+  }
+
+  /* 步骤合计：老记录混排时只累加测到的，并如实报「几步里有几步有数据」。
+   * 界面不再显示（2026-09-28 收窄为只展示 Jev），但落盘的 meta.sumStepMs / tailMs 用它，
+   * 导出后仍能核对整轮的时间构成。 */
   function sumStepMs(steps) {
     let sumMs = 0, measured = 0;
     (steps || []).forEach((s) => {
@@ -903,22 +1285,6 @@
       measured += 1;
     });
     return { sumMs: sumMs, measured: measured, total: (steps || []).length };
-  }
-
-  /* 对账：准备 + Σ步 + 收尾 与墙钟之差。容差 1s（取整与落盘时刻差都在这之内）。
-   * 任一分量缺失 → null（老记录算不出来就不画，不显示 0 假装平账）。 */
-  function reconcile(o) {
-    const wallMs = numOrNull(o && o.wallMs);
-    const prepMs = numOrNull(o && o.prepMs);
-    const sumMs = numOrNull(o && o.sumStepMs);
-    const tailMs = numOrNull(o && o.tailMs);
-    if (wallMs == null || prepMs == null || sumMs == null || tailMs == null) return null;
-    const calcMs = prepMs + sumMs + tailMs;
-    const deltaMs = wallMs - calcMs;
-    return {
-      prepMs: prepMs, sumStepMs: sumMs, tailMs: tailMs, wallMs: wallMs,
-      calcMs: calcMs, deltaMs: deltaMs, ok: Math.abs(deltaMs) <= 1000,
-    };
   }
 
   /* 会话 id：r-MMDD-HHmm-xxxx（与 server 端 RUN_ID_RE 严格一致，防路径穿越校验同一份规则） */
@@ -944,16 +1310,52 @@
       } : null,
       screenshot: s.screenshot || null, historyLine: s.historyLine || null,
       trim: s.trim || null, trimNote: s.trimNote || null,
+      /* 本步快照裁剪的账（null = 没裁）。落盘的 snapshot 是**裁后**文本，
+       * 这里记下裁了多少、保住几个 ref，导出后能看出「这步看到的是不是完整页面」 */
+      snapshotTrim: s.snapshotTrim || null,
+      /* 这一页依据的来源：'action' = 上一步动作顺带带回（省了一次快照调用）/ 'fresh' = 真取。
+       * 落盘是为了导出后能核对「到底省没省、哪几步没省」——只写面板不落盘，
+       * 重新载入会话就没了。 */
+      snapshotFrom: s.snapshotFrom || null,
+      /* 并行召回：K 批请求/响应逐条落盘（导出后能独立核对「这一步到底发了几次」） */
+      recall: s.recall ? {
+        meta: s.recall.meta || null,
+        failed: s.recall.failed || 0,
+        note: s.recall.note || null,
+        merged: s.recall.merged || null,
+        /* 召回排在首轮之后还是之前。**必须落盘**：老记录的判据是「首轮带不带参数题」，
+         * 而新流程首轮就带「参数」（前 size 个）—— 不存这个标记，会话一重新载入
+         * 就会按老判据把并行召回排到首轮前面（时间线倒放，实测过） */
+        afterMain: (s.recall.afterMain != null) ? Boolean(s.recall.afterMain) : null,
+        /* 最终决策实际拿到的候选键（≤250 个）：落盘后能独立核对「这一步给它看了哪些元素」 */
+        candidates: Object.keys(s.recall.criteria || {}),
+        batches: (s.recall.batches || []).map((r) => ({
+          batch: r.batch, size: r.size,
+          /* K 批发的是与本步首轮**同一份** state（runRecall 里就是同一个对象）：
+           * 落盘不再复制 K 份，只留 questions + sharedState 标记，读回时把
+           * step.request.state 挂回去。不这么做，一步 6 次调用各存一份全量快照，
+           * 记录会从 ~300KB 涨到 1.6MB（实测），每次节流保存都在搬这份重复数据 */
+          request: r.payload ? { model: r.payload.model, questions: r.payload.questions } : null,
+          sharedState: Boolean(r.payload && r.payload.state),
+          response: r.response, error: r.error || null, recalled: r.recalled || [], ms: numOrNull(r.ms),
+        })),
+      } : null,
       followUps: (s.followUps || []).map((r) => ({
         kind: r.kind || 'param', request: r.payload, response: r.response,
         batch: r.batch != null ? r.batch : null, param: r.param || null, action: r.action || null,
+        /* 「参数决策」行动标题要报候选数（「候选 101 个」）。这一项以前没落盘，
+         * 于是**会话一重新载入就变成「候选 ? 个」**——落盘与面板对不上的老毛病 */
+        candidates: r.candidates != null ? r.candidates : null,
         text: r.text || null, forAction: r.forAction || null, from: r.from || null,
         role: r.role || null, ref: r.ref || null, why: r.why || null, error: r.error || null,
         ms: numOrNull(r.ms),
       })),
     }));
     const c = o.runCfg || {};
-    const jevCalls = steps.reduce((a, s) => a + (s.request ? 1 : 0) + (s.followUps || []).length, 0);
+    /* Jev 调用次数要和新开的并行召回一起对账：漏掉召回批次，
+     * 「5 次调用」会被记成 1 次，running 会话的「请求数」也就对不上 mock 侧计数 */
+    const jevCalls = steps.reduce((a, s) =>
+      a + (s.request ? 1 : 0) + (s.followUps || []).length + ((s.recall && s.recall.batches) || []).length, 0);
     const llmCalls = steps.filter((s) => s.llm).length;
     /* 对账四件套：wallMs 由调用方给（运行中=当下，结束时=最终值）；tailMs 倒推，
      * 所以「准备 + Σ步 + 收尾 = 墙钟」在记录里恒成立，导出后能独立核对。
@@ -967,9 +1369,14 @@
       meta: {
         id: o.id, goal: c.goal, startUrl: c.url,
         browser: c.browserUsed || c.browser, mode: c.mode || 'isolated', cdp: c.cdp || null,
+        /* 这轮实际用的驱动后端（inproc / cli）。**必须落盘**：两条后端的每步机械开销
+         * 差一个量级（实测 ~1.0s vs ~8.4s），不记下来，「这轮为什么慢」就只能靠猜；
+         * 进程内起不来退回 CLI 时这一项记的是**实际生效**的那条（c.backendUsed）。 */
+        backend: c.backendUsed || c.backend || null,
         window: c.window || null,
         variables: c.variables || [], maxSteps: c.maxSteps,
         screenshotOn: !!c.screenshotOn, paramTrim: c.paramTrim || null,
+      snapshotTrim: c.snapshotTrim || null,
         jevModel: o.jevModel, llmModel: o.llmModel,
         startedAt: o.startedAt, endedAt: o.endedAt || null,
         endState: o.endState || 'running', endReason: o.endReason || null,
@@ -991,6 +1398,17 @@
     needRef: needRef,
     refCriteria: refCriteria,
     paramCriteria: paramCriteria,
+    ALGORITHMS: ALGORITHMS,
+    recallPlan: recallPlan,
+    shouldRecall: shouldRecall,
+    buildRecallQuestions: buildRecallQuestions,
+    buildRecallPickQuestions: buildRecallPickQuestions,
+    recallFallback: recallFallback,
+    dropRefMore: dropRefMore,
+    mergeRecall: mergeRecall,
+    recallSeeds: recallSeeds,
+    answerOf: Recall.answerOf,
+    hydrateRecord: hydrateRecord,
     buildParamFollowUp: buildParamFollowUp,
     isRefMore: isRefMore,
     parseParamAnswer: parseParamAnswer,
@@ -1009,8 +1427,12 @@
     parseTextAnswer: parseTextAnswer,
     DIALOG_SNAPSHOT_NOTE: DIALOG_SNAPSHOT_NOTE,
     isModalSnapshotError: isModalSnapshotError,
+    makeSnapshotCarrier: makeSnapshotCarrier,
     buildDialogQuestions: buildDialogQuestions,
     buildState: buildState,
+    detectStall: detectStall,
+    decisionSig: decisionSig,
+    STALL_MIN: STALL_MIN,
     compressHistory: compressHistory,
     buildQuestions: buildQuestions,
     parseDecision: parseDecision,
@@ -1029,9 +1451,11 @@
     durationView: durationView,
     formatMs: formatMs,
     stepDurationLine: stepDurationLine,
-    breakdownSegs: breakdownSegs,
+    stepDurationTitle: stepDurationTitle,
+    usageOf: usageOf,
+    formatTokens: formatTokens,
+    actionMetricsLine: actionMetricsLine,
     sumStepMs: sumStepMs,
-    reconcile: reconcile,
     newRunId: newRunId,
     buildRunRecord: buildRunRecord
   };

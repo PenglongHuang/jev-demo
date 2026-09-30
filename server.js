@@ -423,12 +423,17 @@ async function handleBrowser(req, res, action) {  const d = getDriver();
         const attach = browserMode === 'cdp';
         const maximize = !attach && windowMode !== 'size';
         const native = maximize && payload.native === true;
+        /* 驱动后端（与浏览器内核/模式正交）：inproc = 进程内 playwright-core（默认，
+         * 每条命令不再新起进程）；cli = playwright-cli 薄壳（兜底）。缺省由 driver 决定
+         * （环境变量 JEVDEMO_BACKEND 或默认 inproc）；driver 侧起不来会自己退回 cli
+         * 并带 backendFallback 说明，这里只管透传。 */
         out = await d.open(session, String(payload.url || ''), {
           browser: browser,
           mode: browserMode,
           cdp: payload.cdp == null ? undefined : String(payload.cdp),
           maximize: maximize,
           native: native,
+          backend: payload.backend == null ? undefined : String(payload.backend),
         });
         if (attach) {
           /* 附身模式：不碰用户的窗口几何，什么都不用校正 —— 直接把它标记出来，
@@ -483,16 +488,20 @@ async function handleBrowser(req, res, action) {  const d = getDriver();
         /* 带 ref 时把该元素的矩形与当时视口一并返回（工程自动执行，不占 Jev 名额）：
          * 前端拿它把「即将被操作的元素」标到这张图上去。位置与截图取自同一时刻、且
          * 都在动作之前 —— 元素此刻必定还在，位置唯一确定，不存在 ref 失效或行位移的问题。
-         * 标注画在图上（public/js/anno.js），被驱动页面里不留痕迹。 */
+         * 标注画在图上（public/js/anno.js），被驱动页面里不留痕迹。
+         * CDP 快路径已经把位置一并带回（同一条命令里读的，比老路更贴近「同一时刻」），
+         * 只有老路才需要在下面补读一次。 */
         const ref = payload.ref ? String(payload.ref) : null;
-        const pos = ref ? await d.rect(session, ref) : null;
         /* 文件名用前端给的每步名（step-1 / step-2…）：原先这里把 session 又当 name 传了一次，
          * 于是全部截图都落到同一个 <session>.png 上、后一步覆盖前一步，driver 里
          * 「文件保留在 data/ 便于排查留证」的意图落空。session 作兜底（并发会话不撞名）。 */
-        out = await d.screenshot(session, payload.name ? String(payload.name) : session);
-        if (out && out.ok && pos && pos.ok) {
-          out.rect = pos.rect;
-          out.viewport = pos.viewport;
+        out = await d.screenshot(session, payload.name ? String(payload.name) : session, ref);
+        if (out && out.ok && ref && !out.rect) {
+          const pos = await d.rect(session, ref);
+          if (pos && pos.ok) {
+            out.rect = pos.rect;
+            out.viewport = pos.viewport;
+          }
         }
       }
       else if (action === 'close') {
