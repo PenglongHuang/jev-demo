@@ -1,0 +1,519 @@
+/* ============================================================================
+ * 企业外壳（Enterprise Shell）—— 四个内置演示页共用
+ * mailbox.html / resume.html / orders.html / orders-complex.html 都 link 本文件，
+ * 用来把「一张干净的演示页」垫成「一套真实的企业内部系统」：模块 rail、KPI 条、
+ * 通知中心、右侧抽屉、筛选项 chips、批量操作条、骨架屏、底部状态栏、时间线。
+ *
+ * ## 硬约束：快照必须逐字节稳定（结论来自 0.1.17 实测，见 .tmp-review/probe-out.txt）
+ * tests/driver-smoke.spec.js 断言「读元素位置前后两次 aria 快照逐字节一致」，
+ * tests/scenario-walk.spec.js 则按 label 正则在快照里定位 ref。实测结论有两条：
+ *
+ *   1. **aria-hidden="true" 挡不住快照** —— 藏在 aria-hidden 里的走字时钟照样出现
+ *      在快照里。所以「把自变文本藏起来」这条路是死的，别再用。
+ *   2. **页面自己改一个字的 DOM 文本，两次快照就不相等。** 因此：
+ *
+ *   ▶ 常开的动效一律走 CSS —— 揭幕、描边、脉冲、跑马灯、骨架微光都是 CSS
+ *     animation|transition，不改 DOM 文本，快照天然稳定。
+ *   ▶ JS 驱动的活性（走字时钟、同步状态、周期到达、通知栈）一律由「实时模拟」
+ *     开关解锁，默认关闭。页面默认是确定的，打开开关它才开始活。
+ *
+ *   3. **懒渲染面板** —— 通知中心、抽屉在关闭时把内容清空并 hidden，绝不把
+ *      隐藏内容留在无障碍树里，免得给 ref 表和 label 正则添乱。
+ *   4. **class 前缀统一 ent-**，不覆盖各页原有 class，纯加法。
+ *   5. **新加的可访问名里别出现「冒号+空格」** —— 那会让 YAML 把整行加引号，
+ *      行首锚定的正则（如 /^- listitem/）就匹配不上了。
+ *
+ * 颜色沿用各页 :root 里已定义的令牌（--accent / --border / ...），此处只补
+ * 企业外壳自己的几个，并对每个 var() 给 fallback，保证本文件可独立预览。
+ * ========================================================================== */
+
+:root {
+  --ent-rail: #191b21;
+  --ent-rail-2: #23262e;
+  --ent-rail-text: #a8adba;
+  --ent-rail-on: #ffffff;
+  --ent-shadow: 0 12px 32px rgba(16, 18, 24, .14);
+  --ent-shadow-lg: 0 24px 60px rgba(16, 18, 24, .22);
+  --ent-amber-soft: #fef3c7;
+  --ent-amber: #92400e;
+  --ent-rail-w: 60px;
+  --ent-status-h: 28px;
+  /* 各页在 <body> 上覆写 --ent-maxw，让 KPI 条与页面主容器同宽 */
+  --ent-maxw: 1180px;
+}
+
+/* ---------- 会自己变的文本（只在「实时模拟」打开后存在） ----------
+ * 注意：这里**不能**靠 aria-hidden 藏起来 —— 0.1.17 实测它挡不住快照。
+ * 真正的保障是「默认态下这块根本不存在」，见 enterprise.js 的 createLiveBox。 */
+.ent-live { font-variant-numeric: tabular-nums; }
+
+/* ============================================================================
+ * 1. 左侧模块 rail —— 跨模块切换器
+ * ==========================================================================*/
+
+.ent-rail {
+  position: fixed; left: 0; top: 0; bottom: 0; width: var(--ent-rail-w); z-index: 40;
+  display: flex; flex-direction: column; align-items: center; gap: 4px;
+  padding: 10px 0; background: var(--ent-rail); color: var(--ent-rail-text);
+  border-right: 1px solid #0f1014;
+}
+.ent-rail-logo {
+  width: 34px; height: 34px; border-radius: 9px; flex: none;
+  display: grid; place-items: center; margin-bottom: 8px;
+  background: linear-gradient(135deg, var(--accent, #4f46e5), #7c3aed);
+  color: #fff; font-weight: 800; font-size: 15px; letter-spacing: -.5px;
+}
+.ent-rail-sep { width: 26px; height: 1px; background: #313540; margin: 7px 0; flex: none; }
+.ent-rail-item {
+  position: relative; width: 44px; height: 40px; flex: none; cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  background: none; border: 0; border-radius: 9px; color: inherit; font-family: inherit;
+  transition: background .15s, color .15s;
+}
+.ent-rail-item:hover { background: var(--ent-rail-2); color: #fff; }
+.ent-rail-item .ent-rail-ico { font-size: 16px; line-height: 1; }
+.ent-rail-item .ent-rail-txt { font-size: 9.5px; line-height: 1; opacity: .8; }
+.ent-rail-item[aria-current="page"] { background: var(--ent-rail-2); color: var(--ent-rail-on); }
+.ent-rail-item[aria-current="page"]::before {
+  content: ""; position: absolute; left: -10px; top: 9px; bottom: 9px; width: 3px;
+  border-radius: 0 3px 3px 0; background: var(--accent, #4f46e5);
+}
+.ent-rail-item[aria-current="page"] .ent-rail-txt { opacity: 1; }
+.ent-rail-badge {
+  position: absolute; top: 4px; right: 5px; min-width: 15px; height: 15px; padding: 0 3px;
+  border-radius: 100px; background: var(--red, #dc2626); color: #fff;
+  font-size: 9.5px; font-weight: 700; line-height: 15px; text-align: center;
+}
+.ent-rail-foot { margin-top: auto; }
+
+body.ent-has-rail { padding-left: var(--ent-rail-w); }
+
+/* ============================================================================
+ * 2. KPI 条 —— 数字一次写成终值，滚动感由 CSS 揭幕动效给
+ * ==========================================================================*/
+
+.ent-kpis {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(176px, 1fr)); gap: 12px;
+  max-width: var(--ent-maxw); margin: 18px auto 0; padding: 0 22px;
+}
+.ent-kpi {
+  position: relative; overflow: hidden;
+  background: var(--panel, #fff); border: 1px solid var(--border, #e7e8ec);
+  border-radius: var(--radius, 12px); padding: 12px 14px 11px;
+  animation: ent-rise .34s cubic-bezier(.22, 1, .36, 1) both;
+}
+.ent-kpi:nth-child(2) { animation-delay: .05s; }
+.ent-kpi:nth-child(3) { animation-delay: .1s; }
+.ent-kpi:nth-child(4) { animation-delay: .15s; }
+.ent-kpi:nth-child(5) { animation-delay: .2s; }
+@keyframes ent-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+.ent-kpi-top { display: flex; align-items: center; gap: 6px; }
+.ent-kpi-label { font-size: 12px; color: var(--text-3, #6e7480); }
+.ent-kpi-ico { font-size: 12px; opacity: .7; }
+.ent-kpi-val {
+  display: flex; align-items: baseline; gap: 4px; margin-top: 5px;
+  font-family: var(--mono, ui-monospace, Menlo, Consolas, monospace);
+  font-size: 21px; font-weight: 700; letter-spacing: -.4px; color: var(--text, #1a1c20);
+  font-variant-numeric: tabular-nums;
+  animation: ent-roll .46s cubic-bezier(.22, 1, .36, 1) both;
+}
+@keyframes ent-roll {
+  from { opacity: 0; transform: translateY(9px); filter: blur(3px); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+.ent-kpi-unit { font-size: 12px; font-weight: 600; color: var(--text-3, #6e7480); }
+.ent-kpi-delta { font-size: 11.5px; font-weight: 650; }
+.ent-kpi-delta.up { color: var(--green, #0d9268); }
+.ent-kpi-delta.down { color: var(--red, #dc2626); }
+.ent-kpi-delta.flat { color: var(--text-3, #6e7480); }
+.ent-spark { display: block; width: 100%; height: 26px; margin-top: 6px; overflow: visible; }
+.ent-spark path.line {
+  fill: none; stroke: var(--accent, #4f46e5); stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+  stroke-dasharray: var(--ent-len, 200); stroke-dashoffset: var(--ent-len, 200);
+  animation: ent-draw .9s ease-out .12s forwards;
+}
+@keyframes ent-draw { to { stroke-dashoffset: 0; } }
+.ent-spark path.area { fill: var(--accent, #4f46e5); opacity: .09; }
+.ent-kpi-bar { height: 4px; border-radius: 100px; background: #eef0f4; margin-top: 8px; overflow: hidden; }
+.ent-kpi-bar > i {
+  display: block; height: 100%; border-radius: 100px; background: var(--accent, #4f46e5);
+  transform-origin: left; animation: ent-grow .8s cubic-bezier(.22, 1, .36, 1) both;
+}
+.ent-kpi-bar > i.warn { background: #f59e0b; }
+.ent-kpi-bar > i.good { background: var(--green, #0d9268); }
+@keyframes ent-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .ent-kpi, .ent-kpi-val, .ent-spark path.line, .ent-kpi-bar > i { animation: none !important; }
+  .ent-spark path.line { stroke-dashoffset: 0; }
+}
+
+/* ============================================================================
+ * 3. 顶栏扩展件：铃铛 + 通知中心 / 用户菜单 / 实时时钟 / 实时模拟开关
+ * ==========================================================================*/
+
+.ent-slot { position: relative; display: flex; align-items: center; gap: 8px; }
+
+.ent-iconbtn {
+  position: relative; width: 34px; height: 34px; flex: none; cursor: pointer;
+  display: grid; place-items: center; font-size: 15px;
+  background: #fff; border: 1px solid var(--border-strong, #d7d9e0);
+  border-radius: 9px; color: var(--text-2, #565c66); font-family: inherit;
+}
+.ent-iconbtn:hover { border-color: var(--accent, #4f46e5); color: var(--accent, #4f46e5); }
+.ent-iconbtn-dot {
+  position: absolute; top: -5px; right: -5px; min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 100px; background: var(--red, #dc2626); color: #fff; border: 2px solid #fff;
+  font-size: 9.5px; font-weight: 700; line-height: 12px; text-align: center;
+}
+.ent-userbtn {
+  display: flex; align-items: center; gap: 7px; cursor: pointer; font-family: inherit;
+  background: #fff; border: 1px solid var(--border-strong, #d7d9e0);
+  border-radius: 100px; padding: 3px 11px 3px 3px; color: var(--text-2, #565c66);
+}
+.ent-userbtn:hover { border-color: var(--accent, #4f46e5); }
+.ent-avatar {
+  width: 26px; height: 26px; border-radius: 100px; flex: none;
+  display: grid; place-items: center; font-size: 11px; font-weight: 700;
+  background: linear-gradient(135deg, var(--accent, #4f46e5), #7c3aed); color: #fff;
+}
+.ent-userbtn .who { font-size: 12.5px; white-space: nowrap; }
+
+/* 实时模拟开关：稳定控件（不会自变），可以正常进快照 */
+.ent-sim {
+  display: flex; align-items: center; gap: 7px; cursor: pointer; user-select: none;
+  background: #fff; border: 1px solid var(--border-strong, #d7d9e0);
+  border-radius: 100px; padding: 5px 11px 5px 9px; font-size: 12.5px; color: var(--text-2, #565c66);
+  white-space: nowrap;
+}
+.ent-sim:hover { border-color: var(--accent, #4f46e5); }
+.ent-sim input { position: absolute; opacity: 0; width: 0; height: 0; }
+.ent-switch {
+  width: 30px; height: 17px; border-radius: 100px; background: #d3d7df; flex: none;
+  position: relative; transition: background .18s;
+}
+.ent-switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 13px; height: 13px;
+  border-radius: 100px; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25);
+  transition: transform .18s;
+}
+.ent-sim input:checked + .ent-switch { background: var(--green, #0d9268); }
+.ent-sim input:checked + .ent-switch::after { transform: translateX(13px); }
+.ent-sim input:focus-visible + .ent-switch { outline: 2px solid var(--accent, #4f46e5); outline-offset: 2px; }
+.ent-sim.on { border-color: var(--green, #0d9268); color: var(--green, #0d9268); }
+
+/* ---------- 下拉面板（通知中心 / 用户菜单） ---------- */
+.ent-pop {
+  position: absolute; top: calc(100% + 9px); right: 0; z-index: 70;
+  width: min(360px, 88vw); background: #fff; border: 1px solid var(--border, #e7e8ec);
+  border-radius: 13px; box-shadow: var(--ent-shadow-lg); overflow: hidden;
+  animation: ent-pop-in .16s ease-out both;
+}
+@keyframes ent-pop-in { from { opacity: 0; transform: translateY(-5px); } to { opacity: 1; transform: none; } }
+.ent-pop[hidden] { display: none; }
+.ent-pop-head {
+  display: flex; align-items: center; gap: 8px; padding: 11px 14px;
+  border-bottom: 1px solid var(--border, #e7e8ec); font-size: 13px; font-weight: 700;
+}
+.ent-pop-head .ent-pop-sub { font-weight: 500; font-size: 11.5px; color: var(--text-3, #6e7480); }
+.ent-pop-head .spacer { flex: 1; }
+.ent-pop-list { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow: auto; }
+.ent-pop-item { display: flex; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--border, #e7e8ec); }
+.ent-pop-item:last-child { border-bottom: 0; }
+.ent-pop-item:hover { background: #fafbfd; }
+.ent-pop-item.unread { background: #f7f8ff; }
+.ent-pop-ico { font-size: 15px; line-height: 1.4; flex: none; }
+.ent-pop-main { min-width: 0; }
+.ent-pop-title { display: block; font-size: 12.8px; font-weight: 650; color: var(--text, #1a1c20); }
+.ent-pop-body { display: block; font-size: 12px; color: var(--text-3, #6e7480); margin-top: 2px; line-height: 1.55; }
+.ent-pop-time { display: block; font-size: 11px; color: var(--text-3, #6e7480); font-family: var(--mono, monospace); margin-top: 3px; }
+.ent-pop-foot {
+  display: flex; gap: 8px; justify-content: space-between; align-items: center;
+  padding: 9px 14px; border-top: 1px solid var(--border, #e7e8ec); background: #fbfbfd;
+}
+.ent-menulist { list-style: none; margin: 0; padding: 6px; }
+.ent-menulist button {
+  display: flex; align-items: center; gap: 9px; width: 100%; padding: 8px 10px; font-size: 13px;
+  background: none; border: 0; border-radius: 8px; cursor: pointer; font-family: inherit;
+  color: var(--text-2, #565c66); text-align: left;
+}
+.ent-menulist button:hover { background: #f2f3f6; color: var(--text, #1a1c20); }
+.ent-menulist .ent-menu-sep { height: 1px; background: var(--border, #e7e8ec); margin: 5px 6px; }
+
+/* 顶部会自己变的文本（时钟 / 同步状态）：aria-hidden，不进快照 */
+.ent-topmeta { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.35; }
+.ent-clock { font-size: 12.5px; font-weight: 650; color: var(--text, #1a1c20); }
+.ent-synced { font-size: 11px; color: var(--text-3, #6e7480); white-space: nowrap; }
+.ent-synced .dot {
+  display: inline-block; width: 6px; height: 6px; border-radius: 100px; margin-right: 4px;
+  background: var(--green, #0d9268); vertical-align: 1px;
+}
+
+/* ============================================================================
+ * 4. 右侧抽屉 —— 关闭时内容清空 + hidden，绝不留在无障碍树里
+ * ==========================================================================*/
+
+.ent-drawer-backdrop {
+  position: fixed; inset: 0; z-index: 80; background: rgba(20, 22, 28, .34);
+  opacity: 0; transition: opacity .2s;
+}
+.ent-drawer-backdrop.show { opacity: 1; }
+.ent-drawer {
+  position: fixed; top: 0; right: 0; bottom: 0; z-index: 81;
+  width: min(540px, 94vw); display: flex; flex-direction: column;
+  background: #fff; box-shadow: var(--ent-shadow-lg);
+  transform: translateX(100%); transition: transform .24s cubic-bezier(.22, 1, .36, 1);
+}
+.ent-drawer.show { transform: none; }
+.ent-drawer[hidden] { display: none; }
+.ent-drawer-head {
+  display: flex; align-items: center; gap: 10px; flex: none;
+  padding: 13px 16px; border-bottom: 1px solid var(--border, #e7e8ec);
+}
+.ent-drawer-head h2 { font-size: 15px; margin: 0; }
+.ent-drawer-head .ent-drawer-sub { font-size: 12px; color: var(--text-3, #6e7480); font-family: var(--mono, monospace); }
+.ent-drawer-head .spacer { flex: 1; }
+.ent-drawer-tabs { display: flex; gap: 2px; flex: none; padding: 0 12px; border-bottom: 1px solid var(--border, #e7e8ec); }
+.ent-drawer-tabs button {
+  padding: 9px 11px; font-size: 13px; font-family: inherit; cursor: pointer;
+  background: none; border: 0; border-bottom: 2px solid transparent; color: var(--text-3, #6e7480);
+}
+.ent-drawer-tabs button:hover { color: var(--text, #1a1c20); }
+.ent-drawer-tabs button[aria-selected="true"] { color: var(--accent, #4f46e5); border-bottom-color: var(--accent, #4f46e5); font-weight: 650; }
+.ent-drawer-body { flex: 1; overflow: auto; padding: 16px; }
+.ent-drawer-foot {
+  display: flex; gap: 9px; justify-content: flex-end; flex: none;
+  padding: 12px 16px; border-top: 1px solid var(--border, #e7e8ec); background: #fbfbfd;
+}
+
+/* 抽屉里的通用块 */
+.ent-sec { margin: 0 0 18px; }
+.ent-sec:last-child { margin-bottom: 0; }
+.ent-sec > h3 {
+  font-size: 12px; font-weight: 700; color: var(--text-3, #6e7480); text-transform: uppercase;
+  letter-spacing: .4px; margin: 0 0 9px;
+}
+.ent-kv { display: grid; grid-template-columns: 92px 1fr; gap: 7px 12px; margin: 0; font-size: 13px; }
+.ent-kv dt { color: var(--text-3, #6e7480); font-size: 12.5px; }
+.ent-kv dd { margin: 0; color: var(--text, #1a1c20); word-break: break-word; }
+.ent-kv dd.mono { font-family: var(--mono, monospace); font-size: 12.5px; }
+
+/* 垂直时间线（物流轨迹 / 流程日志 / 会话线程） */
+.ent-timeline { list-style: none; margin: 0; padding: 0; }
+.ent-timeline li { position: relative; padding: 0 0 15px 22px; }
+.ent-timeline li::before {
+  content: ""; position: absolute; left: 4px; top: 5px; width: 9px; height: 9px;
+  border-radius: 100px; background: #fff; border: 2px solid var(--border-strong, #d7d9e0);
+}
+.ent-timeline li:not(:last-child)::after {
+  content: ""; position: absolute; left: 8px; top: 15px; bottom: -2px; width: 1px; background: var(--border, #e7e8ec);
+}
+.ent-timeline li.done::before { border-color: var(--green, #0d9268); background: var(--green, #0d9268); }
+.ent-timeline li.now::before { border-color: var(--accent, #4f46e5); background: var(--accent, #4f46e5); box-shadow: 0 0 0 3px var(--accent-soft, #eef2ff); }
+.ent-timeline li.warn::before { border-color: #f59e0b; background: #f59e0b; }
+.ent-timeline .ent-tl-title { display: block; font-size: 13px; font-weight: 650; color: var(--text, #1a1c20); }
+.ent-timeline .ent-tl-meta { display: block; font-size: 11.5px; color: var(--text-3, #6e7480); font-family: var(--mono, monospace); margin-top: 1px; }
+.ent-timeline .ent-tl-body { display: block; font-size: 12.5px; color: var(--text-2, #565c66); margin-top: 4px; line-height: 1.6; }
+
+/* 阶段进度条（候选人流程 / 订单流转） */
+.ent-stepper { display: flex; align-items: flex-start; gap: 0; margin: 0; padding: 0; list-style: none; }
+.ent-stepper li { flex: 1; text-align: center; position: relative; font-size: 11.5px; color: var(--text-3, #6e7480); }
+.ent-stepper li::before {
+  content: ""; display: block; height: 3px; border-radius: 100px; background: #e9ebf0; margin: 0 0 6px;
+}
+.ent-stepper li.done::before { background: var(--green, #0d9268); }
+.ent-stepper li.now::before { background: var(--accent, #4f46e5); }
+.ent-stepper li.done, .ent-stepper li.now { color: var(--text, #1a1c20); font-weight: 650; }
+
+/* 匹配度圆环 */
+.ent-ring {
+  --p: 0; width: 46px; height: 46px; border-radius: 100px; flex: none; display: grid; place-items: center;
+  background: conic-gradient(var(--accent, #4f46e5) calc(var(--p) * 1%), #eef0f4 0);
+  animation: ent-ring-in .7s cubic-bezier(.22, 1, .36, 1) both;
+}
+@keyframes ent-ring-in { from { transform: rotate(-28deg) scale(.86); opacity: .4; } to { transform: none; opacity: 1; } }
+.ent-ring > span {
+  width: 36px; height: 36px; border-radius: 100px; background: #fff; display: grid; place-items: center;
+  font-size: 12px; font-weight: 700; font-family: var(--mono, monospace); color: var(--text, #1a1c20);
+}
+
+/* ============================================================================
+ * 5. 筛选 chips / 已应用条件 / 批量操作条
+ * ==========================================================================*/
+
+.ent-chips { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.ent-chips .ent-chips-lbl { font-size: 12.5px; color: var(--text-3, #6e7480); }
+.ent-chip {
+  display: inline-flex; align-items: center; gap: 5px; cursor: pointer; font-family: inherit;
+  font-size: 12.5px; padding: 4.5px 11px; border-radius: 100px;
+  border: 1px solid var(--border-strong, #d7d9e0); background: #fff; color: var(--text-2, #565c66);
+}
+.ent-chip:hover { border-color: var(--accent, #4f46e5); color: var(--accent, #4f46e5); }
+.ent-chip.on { background: var(--accent-soft, #eef2ff); border-color: #c7cbf7; color: var(--accent, #4f46e5); font-weight: 650; }
+.ent-chip .ent-chip-n { font-family: var(--mono, monospace); font-size: 11px; opacity: .75; }
+.ent-chip .ent-chip-x { font-size: 13px; opacity: .6; margin-left: 1px; }
+.ent-chip .ent-chip-x:hover { opacity: 1; }
+
+.ent-bulkbar {
+  display: flex; align-items: center; gap: 11px; flex-wrap: wrap;
+  padding: 9px 18px; background: var(--accent-soft, #eef2ff);
+  border-bottom: 1px solid #dbe0fb; font-size: 13px;
+  animation: ent-rise .2s ease-out both;
+}
+.ent-bulkbar[hidden] { display: none; }
+.ent-bulkbar .ent-bulk-n { font-weight: 700; color: var(--accent, #4f46e5); font-family: var(--mono, monospace); }
+.ent-bulkbar .spacer { flex: 1; }
+
+/* ============================================================================
+ * 6. 骨架屏 —— 只在用户触发刷新时出现（首次渲染不留骨架，免得挡住 agent 首帧）
+ * ==========================================================================*/
+
+.ent-skel { padding: 14px 18px; }
+.ent-skel-row { display: flex; align-items: center; gap: 12px; padding: 9px 0; }
+.ent-skel-bar {
+  height: 11px; border-radius: 100px; flex: none;
+  background: linear-gradient(90deg, #eef0f4 25%, #f7f8fa 37%, #eef0f4 63%);
+  background-size: 400% 100%; animation: ent-shimmer 1.15s ease-in-out infinite;
+}
+@keyframes ent-shimmer { from { background-position: 100% 50%; } to { background-position: 0 50%; } }
+.ent-skel-bar.w1 { width: 34%; } .ent-skel-bar.w2 { width: 58%; } .ent-skel-bar.w3 { width: 22%; }
+.ent-skel-bar.avatar { width: 26px; height: 26px; border-radius: 100px; }
+.ent-skel[hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) { .ent-skel-bar { animation: none; } }
+
+/* ============================================================================
+ * 7. 右下角系统通知栈 —— 自动到达的提示，整栈 aria-hidden
+ * ==========================================================================*/
+
+.ent-toasts {
+  position: fixed; right: 18px; bottom: calc(var(--ent-status-h) + 16px); z-index: 90;
+  display: flex; flex-direction: column; gap: 9px; width: min(330px, 88vw);
+  pointer-events: none;
+}
+.ent-toast {
+  display: flex; gap: 10px; padding: 11px 13px; border-radius: 12px;
+  background: rgba(23, 24, 28, .96); color: #fff; box-shadow: var(--ent-shadow);
+  font-size: 12.8px; line-height: 1.55; animation: ent-slide-in .26s cubic-bezier(.22, 1, .36, 1) both;
+}
+.ent-toast.leaving { animation: ent-slide-out .2s ease-in both; }
+@keyframes ent-slide-in { from { opacity: 0; transform: translateX(22px); } to { opacity: 1; transform: none; } }
+@keyframes ent-slide-out { to { opacity: 0; transform: translateX(22px); } }
+.ent-toast .ent-toast-ico { font-size: 15px; line-height: 1.35; flex: none; }
+.ent-toast b { display: block; font-weight: 650; }
+.ent-toast .ent-toast-meta { display: block; opacity: .68; font-size: 11.5px; margin-top: 2px; font-family: var(--mono, monospace); }
+
+/* ============================================================================
+ * 8. 底部状态栏
+ * ==========================================================================*/
+
+.ent-statusbar {
+  position: fixed; left: var(--ent-rail-w); right: 0; bottom: 0; height: var(--ent-status-h); z-index: 45;
+  display: flex; align-items: center; gap: 16px; padding: 0 18px;
+  background: rgba(255, 255, 255, .93); backdrop-filter: blur(8px);
+  border-top: 1px solid var(--border, #e7e8ec);
+  font-size: 11.5px; color: var(--text-3, #6e7480); font-family: var(--mono, monospace);
+}
+.ent-statusbar .spacer { flex: 1; }
+.ent-statusbar .ent-status-dot {
+  display: inline-block; width: 6px; height: 6px; border-radius: 100px;
+  background: var(--green, #0d9268); margin-right: 5px; vertical-align: 1px;
+  /* 常开活性：纯 CSS 脉冲，不动 DOM，因此不影响快照 */
+  animation: ent-pulse 1.9s ease-in-out infinite;
+}
+body.ent-has-statusbar { padding-bottom: calc(var(--ent-status-h) + 18px); }
+
+/* ============================================================================
+ * 9. 杂项
+ * ==========================================================================*/
+
+/* 小号按钮：抽屉头 / 通知中心页脚里用，不覆盖各页已有的 .btn */
+.ent-btn-mini {
+  padding: 4px 10px; font-size: 12px; font-weight: 600; font-family: inherit; cursor: pointer;
+  border-radius: 8px; border: 1px solid var(--border-strong, #d7d9e0);
+  background: #fff; color: var(--text-2, #565c66);
+}
+.ent-btn-mini:hover { border-color: var(--accent, #4f46e5); color: var(--accent, #4f46e5); }
+
+.ent-kpi-note { font-size: 11.5px; color: var(--text-3, #6e7480); margin-top: 4px; }
+
+/* 未开实时模拟时顶栏右侧的一枚静态说明（不是开关，只是把「为什么不动」说清楚） */
+.ent-sim-static {
+  font-size: 12px; color: var(--text-3, #6e7480); white-space: nowrap;
+  border: 1px dashed var(--border-strong, #d7d9e0); border-radius: 100px; padding: 4px 10px;
+}
+
+/* ---------- 公告跑马灯：内容固定，位移全靠 CSS keyframes ---------- */
+.ent-ticker {
+  display: flex; align-items: center; gap: 10px; overflow: hidden;
+  background: var(--panel, #fff); border: 1px solid var(--border, #e7e8ec);
+  border-radius: var(--radius, 12px); padding: 8px 14px;
+  max-width: var(--ent-maxw); margin: 14px auto 0;
+}
+.ent-ticker-tag {
+  flex: none; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 100px;
+  background: var(--accent-soft, #eef2ff); color: var(--accent, #4f46e5); white-space: nowrap;
+}
+.ent-ticker-window { flex: 1; overflow: hidden; position: relative; height: 20px; }
+.ent-ticker-inner {
+  position: absolute; white-space: nowrap; font-size: 12.5px; color: var(--text-2, #565c66);
+  will-change: transform; animation: ent-marquee 26s linear infinite;
+}
+@keyframes ent-marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-100%); }
+}
+@media (prefers-reduced-motion: reduce) { .ent-ticker-inner { animation: none; } }
+
+/* 常开的「系统在跑」脉冲点：纯 CSS，零 DOM 改动 */
+.ent-pulse {
+  display: inline-block; width: 7px; height: 7px; border-radius: 100px;
+  background: var(--green, #0d9268); vertical-align: 1px;
+  animation: ent-pulse 1.9s ease-in-out infinite;
+}
+@keyframes ent-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(13, 146, 104, .42); }
+  50% { opacity: .72; box-shadow: 0 0 0 5px rgba(13, 146, 104, 0); }
+}
+@media (prefers-reduced-motion: reduce) { .ent-pulse { animation: none; } }
+
+.ent-tag {
+  display: inline-block; font-size: 11px; font-weight: 650; padding: 2px 8px; border-radius: 100px;
+  background: #f1f2f5; color: var(--text-2, #565c66); white-space: nowrap;
+}
+.ent-tag.warn { background: var(--ent-amber-soft); color: var(--ent-amber); }
+.ent-tag.bad { background: var(--red-soft, #fdecec); color: var(--red, #dc2626); }
+.ent-tag.good { background: var(--green-soft, #e7f6f0); color: var(--green, #0d9268); }
+.ent-tag.info { background: var(--accent-soft, #eef2ff); color: var(--accent, #4f46e5); }
+.ent-new {
+  display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .3px;
+  padding: 1.5px 6px; border-radius: 100px; background: var(--red, #dc2626); color: #fff;
+  vertical-align: 1px;
+}
+/* 新到达的行/卡片高亮：纯 CSS 动效，播完即停（不靠 JS 摘 class） */
+.ent-flash { animation: ent-flash 2.4s ease-out both; }
+@keyframes ent-flash {
+  0% { background: #fff7ed; box-shadow: inset 3px 0 0 #f59e0b; }
+  70% { background: #fffdf9; box-shadow: inset 3px 0 0 #f59e0b; }
+  100% { background: transparent; box-shadow: inset 3px 0 0 transparent; }
+}
+.ent-hovercard { position: relative; }
+.ent-sr {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.ent-kbd {
+  display: inline-block; font-family: var(--mono, monospace); font-size: 11px;
+  padding: 1px 6px; border-radius: 5px; border: 1px solid var(--border-strong, #d7d9e0);
+  background: #fbfbfc; color: var(--text-2, #565c66);
+}
+
+@media (max-width: 900px) {
+  .ent-rail { width: 48px; }
+  :root { --ent-rail-w: 48px; }
+  .ent-rail-txt { display: none; }
+  .ent-kpis { padding: 0 12px; }
+  .ent-statusbar { display: none; }
+  body.ent-has-statusbar { padding-bottom: 0; }
+}

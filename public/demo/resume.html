@@ -1,0 +1,1313 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>星河招聘中台 · 候选人管理</title>
+<!-- 企业外壳：模块 rail / KPI 条 / 通知中心 / 用户菜单 / 右侧抽屉 / 批量操作条 /
+     骨架屏 / 底部状态栏 / 公告跑马灯 / 实时模拟开关。
+     本页原有的筛选、卡片、弹窗与分页行为保持不动，外壳只做加法。 -->
+<link rel="stylesheet" href="enterprise.css" />
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --border: #e7e8ec; --border-strong: #d7d9e0;
+    --text: #1a1c20; --text-2: #565c66; --text-3: #6e7480;
+    --accent: #4f46e5; --accent-soft: #eef2ff; --green: #0d9268; --green-soft: #e7f6f0;
+    --red: #dc2626; --red-soft: #fdecec; --radius: 12px;
+    --amber: #b45309; --amber-soft: #fef3c7;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --ent-maxw: 1180px;          /* 让 KPI 条 / 公告条与主容器同宽 */
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  .topbar {
+    position: sticky; top: 0; z-index: 30;
+    display: flex; align-items: center; gap: 14px;
+    background: rgba(255,255,255,.9); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border); padding: 10px 22px;
+  }
+  .brand { font-weight: 700; font-size: 15.5px; color: var(--accent); white-space: nowrap; }
+  .topbar input[type="search"] {
+    flex: 1; max-width: 400px; padding: 8px 12px; font-size: 13.5px; font-family: inherit;
+    border: 1px solid var(--border-strong); border-radius: 9px; outline: none; background: #fbfbfc;
+  }
+  .topbar input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .btn {
+    padding: 7px 14px; font-size: 13px; font-weight: 600; font-family: inherit; cursor: pointer;
+    border-radius: 9px; border: 1px solid var(--border-strong); background: #fff; color: var(--text-2);
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { background: #443ad4; color: #fff; }
+  .btn.danger:hover { border-color: var(--red); color: var(--red); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn:disabled:hover { border-color: var(--border-strong); color: var(--text-2); }
+  .btn:focus-visible, .name:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+  .layout { display: grid; grid-template-columns: 186px 1fr; gap: 16px; max-width: var(--ent-maxw); margin: 16px auto; padding: 0 22px; }
+  /* 共享 rail 的模块名在这里是 4 个字（招聘中台），别让它折成三行 */
+  .ent-rail-item .ent-rail-txt { white-space: nowrap; }
+  .side { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; height: fit-content; }
+  .side ul { list-style: none; margin: 0; padding: 0; }
+  .side button {
+    display: flex; justify-content: space-between; gap: 8px; width: 100%; padding: 8px 11px; font-size: 13.5px;
+    background: none; border: none; border-radius: 8px; cursor: pointer; font-family: inherit; color: var(--text-2);
+  }
+  .side button:hover { background: #f2f3f6; color: var(--text); }
+  .side button.active { background: var(--accent-soft); color: var(--accent); font-weight: 650; }
+  .side .count { font-size: 11.5px; color: var(--text-3); font-family: var(--mono); }
+  .side-note { font-size: 11.5px; color: var(--text-3); padding: 8px 11px 2px; margin: 0; }
+  .side-note b { font-family: var(--mono); }
+  .side-block { border-top: 1px solid var(--border); margin-top: 8px; padding: 10px 11px 2px; }
+  .side-block h2 { font-size: 11.5px; font-weight: 700; color: var(--text-3); margin: 0 0 7px; letter-spacing: .3px; }
+  .side-block .bar { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-2); margin-bottom: 5px; }
+  .side-block .bar .dot { width: 7px; height: 7px; border-radius: 100px; flex: none; }
+  .side-block .bar .n { margin-left: auto; font-family: var(--mono); font-size: 11.5px; color: var(--text-3); }
+  .ob-list { list-style: none; margin: 0; padding: 0; }
+  .ob-list li {
+    display: flex; align-items: baseline; gap: 7px; font-size: 12px; color: var(--text-2);
+    padding: 4px 0; border-bottom: 1px dashed var(--border);
+  }
+  .ob-list li:last-child { border-bottom: 0; }
+  .ob-list .ob-time { font-family: var(--mono); font-size: 11.5px; color: var(--accent); flex: none; }
+  .ob-list .ob-main { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ob-list .ob-n { margin-left: auto; font-size: 11px; color: var(--text-3); flex: none; }
+
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .panel-head {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 11px 18px; border-bottom: 1px solid var(--border);
+  }
+  .panel-head h1 { font-size: 16px; margin: 0; }
+  .meta { font-size: 12px; color: var(--text-3); font-family: var(--mono); }
+  .panel-head .spacer { flex: 1; }
+  .viewswitch { display: flex; gap: 2px; padding: 2px; background: #f1f2f5; border-radius: 9px; }
+  .viewswitch button {
+    padding: 4.5px 11px; font-size: 12.5px; font-weight: 600; font-family: inherit; cursor: pointer;
+    border: 0; border-radius: 7px; background: none; color: var(--text-3);
+  }
+  .viewswitch button:hover { color: var(--text); }
+  .viewswitch button[aria-pressed="true"] { background: #fff; color: var(--accent); box-shadow: 0 1px 2px rgba(16,18,24,.1); }
+
+  .filters {
+    display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap;
+    padding: 11px 18px; border-bottom: 1px solid var(--border); background: #fbfbfd;
+  }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 12px; font-weight: 600; color: var(--text-2); }
+  .field select {
+    padding: 7px 10px; font-size: 13.5px; font-family: inherit; color: var(--text);
+    border: 1px solid var(--border-strong); border-radius: 9px; background: #fff; outline: none;
+  }
+  .field select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+  /* 二次筛选工具条（技能 chips / 年限 / 薪资 / 渠道 / 已应用条件） */
+  .ent-toolbar {
+    display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+    padding: 9px 18px; border-bottom: 1px solid var(--border); background: #fbfbfd;
+  }
+  .ent-toolbar .ent-chips-lbl { font-size: 12.5px; color: var(--text-3); flex: none; }
+  .ent-toolbar select {
+    padding: 6px 9px; font-size: 12.5px; font-family: inherit; color: var(--text-2);
+    border: 1px solid var(--border-strong); border-radius: 8px; background: #fff; outline: none;
+  }
+  .ent-toolbar select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .ent-toolbar .spacer { flex: 1; }
+  .ent-toolbar .meta { font-size: 12px; color: var(--text-3); font-family: var(--mono); }
+  .applied {
+    display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+    padding: 8px 18px; border-bottom: 1px solid var(--border); background: #f7f8ff;
+  }
+  .applied .ent-chips-lbl { font-size: 12.5px; color: var(--text-3); }
+  .applied[hidden] { display: none; }
+
+  .cand-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(326px, 1fr)); gap: 13px; padding: 15px 18px; }
+  .cand {
+    display: flex; flex-direction: column; gap: 8px;
+    background: #fff; border: 1px solid var(--border); border-radius: var(--radius); padding: 13px;
+  }
+  .cand:hover { border-color: var(--border-strong); box-shadow: 0 2px 10px rgba(16,18,24,.05); }
+  .cand.done { border-color: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
+  .cand.rejected { opacity: .62; }
+  .cand-head { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  .cand-head .cand-av { width: 28px; height: 28px; font-size: 12px; }
+  .cand-pick { accent-color: var(--accent); width: 14px; height: 14px; flex: none; margin: 0 1px 0 0; }
+  .cand-head .name {
+    background: none; border: none; padding: 0; cursor: pointer; font-family: inherit;
+    font-size: 15px; font-weight: 700; color: var(--text); text-align: left;
+  }
+  .cand-head .name:hover { color: var(--accent); }
+  .pill {
+    font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 100px;
+    background: var(--accent-soft); color: var(--accent); white-space: nowrap;
+  }
+  .status {
+    margin-left: auto; font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 100px;
+    background: #f1f2f5; color: var(--text-3); white-space: nowrap;
+  }
+  .cand.done .status { background: var(--green-soft); color: var(--green); }
+  .cand.rejected .status { background: var(--red-soft); color: var(--red); }
+  .cand-top { display: flex; align-items: flex-start; gap: 10px; }
+  .cand-main { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 6px; }
+  .facts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0; font-size: 12.5px; color: var(--text-2); }
+  .facts .pay { font-family: var(--mono); font-weight: 700; color: var(--text); }
+  .facts .sep { color: var(--border-strong); }
+  .cand-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin: 0; }
+  .cand-stage { margin: 0; }
+  .cand-stage > h3 { font-size: 11px; font-weight: 700; color: var(--text-3); margin: 0 0 5px; letter-spacing: .3px; }
+  .cand-stage .ent-stepper { margin: 0; }
+  .cand-stage .ent-stepper li { font-size: 10.5px; }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tag {
+    font-size: 11.5px; padding: 2px 9px; border-radius: 100px;
+    border: 1px solid var(--border-strong); background: #fbfbfc; color: var(--text-2);
+  }
+  .exp { margin: 0; font-size: 12.5px; color: var(--text-3); }
+  .phone { margin: 0; font-size: 11.5px; color: var(--text-3); font-family: var(--mono); display: flex; gap: 8px; flex-wrap: wrap; }
+  .ops { display: flex; flex-wrap: wrap; gap: 7px; margin-top: auto; padding-top: 3px; }
+  .ops .btn { padding: 5px 11px; font-size: 12.5px; border-radius: 8px; }
+  .empty { padding: 56px 20px; text-align: center; color: var(--text-3); font-size: 13px; }
+  .pager {
+    display: flex; align-items: center; justify-content: center; gap: 16px;
+    padding: 12px 18px; border-top: 1px solid var(--border);
+  }
+  .toast {
+    position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%) translateY(14px);
+    background: #17181c; color: #fff; padding: 10px 18px; border-radius: 10px; font-size: 13px;
+    opacity: 0; pointer-events: none; transition: .22s; z-index: 99; max-width: 84vw; text-align: center;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%); }
+  dialog {
+    border: none; border-radius: 14px; padding: 0; width: min(520px, 92vw);
+    box-shadow: 0 18px 50px rgba(16,18,24,.18);
+  }
+  dialog::backdrop { background: rgba(20,22,28,.42); }
+  .dlg-head { display: flex; align-items: center; justify-content: space-between; padding: 15px 20px; border-bottom: 1px solid var(--border); font-weight: 700; }
+  .dlg-body { padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+  .dlg-body dl { margin: 0; display: grid; grid-template-columns: 88px 1fr; gap: 6px 12px; font-size: 13px; }
+  .dlg-body dt { color: var(--text-3); font-size: 12.5px; }
+  .dlg-body dd { margin: 0; color: var(--text); }
+  .dlg-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 13px 20px; border-top: 1px solid var(--border); }
+
+  /* 抽屉里的表单（面试反馈） */
+  .fb-form { display: flex; flex-direction: column; gap: 11px; }
+  .fb-form label { font-size: 12.5px; font-weight: 600; color: var(--text-2); display: block; margin-bottom: 4px; }
+  .fb-form input, .fb-form select, .fb-form textarea {
+    width: 100%; padding: 8px 11px; font-size: 13.5px; font-family: inherit;
+    border: 1px solid var(--border-strong); border-radius: 9px; background: #fff; color: var(--text);
+  }
+  .fb-form textarea { min-height: 96px; resize: vertical; }
+  .score-row { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* 紧凑视图：同一份卡片结构，靠 CSS 压成一行 —— DOM 与可访问名完全不变 */
+  .cand-grid.compact { grid-template-columns: 1fr; gap: 7px; padding: 12px 18px; }
+  .cand.compact { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 7px 14px; padding: 8px 12px; }
+  .cand.compact .cand-head { flex: 1 1 330px; }
+  .cand.compact .cand-top { flex: 2 1 260px; align-items: center; }
+  .cand.compact .cand-stage, .cand.compact .cand-tags, .cand.compact .exp,
+  .cand.compact .ent-ring { display: none; }
+  .cand.compact .ops { margin: 0 0 0 auto; padding: 0; flex: none; }
+
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; }
+    .cand-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <span class="brand">◇ 星河招聘中台</span>
+  <label class="sr-only" for="searchBox">搜索姓名 / 手机号</label>
+  <input id="searchBox" type="search" aria-label="搜索姓名 / 手机号" placeholder="搜索姓名 / 手机号" />
+  <button class="btn primary" id="resetBtn" type="button">重置演示</button>
+</header>
+
+<!-- KPI 条 + 系统公告（由 Enterprise.mountShell 填充） -->
+<div class="ent-kpis" id="entKpis"></div>
+<div id="entTickerHost"></div>
+
+<div class="layout">
+  <nav class="side" aria-label="处理状态快捷筛选">
+    <ul id="statusList"></ul>
+    <p class="side-note">已邀请 <b id="invitedCount">0</b> 位<br />已标记不合适 <b id="rejectCount">0</b> 位</p>
+    <p class="side-note" id="invitedNames">最近邀请：暂无</p>
+
+    <div class="side-block">
+      <h2>招聘漏斗（本月）</h2>
+      <div class="bar"><span class="dot" style="background:#4f46e5"></span>收到简历<span class="n">284</span></div>
+      <div class="bar"><span class="dot" style="background:#7c3aed"></span>进入初筛<span class="n">96</span></div>
+      <div class="bar"><span class="dot" style="background:#0d9268"></span>安排到面<span class="n">41</span></div>
+      <div class="bar"><span class="dot" style="background:#f59e0b"></span>发出 Offer<span class="n">9</span></div>
+    </div>
+
+    <div class="side-block">
+      <h2>今日面试</h2>
+      <ul class="ob-list">
+        <li><span class="ob-time">10:30</span><span class="ob-main">刘畅 · 初试</span><span class="ob-n">线上</span></li>
+        <li><span class="ob-time">14:00</span><span class="ob-main">周一鸣 · 复试</span><span class="ob-n">3 号会议室</span></li>
+        <li><span class="ob-time">16:30</span><span class="ob-main">徐蕾 · 初试</span><span class="ob-n">线上</span></li>
+      </ul>
+    </div>
+
+    <div class="side-block">
+      <h2>渠道分布</h2>
+      <div class="bar"><span class="dot" style="background:#4f46e5"></span>Boss直聘<span class="n">44%</span></div>
+      <div class="bar"><span class="dot" style="background:#0d9268"></span>内推<span class="n">38%</span></div>
+      <div class="bar"><span class="dot" style="background:#6e7480"></span>官网<span class="n">18%</span></div>
+    </div>
+  </nav>
+
+  <main class="panel">
+    <div class="panel-head">
+      <h1 id="panelTitle">候选人管理</h1>
+      <span class="meta" id="listMeta"></span>
+      <span class="spacer"></span>
+      <div class="viewswitch" role="group" aria-label="视图切换">
+        <button type="button" id="viewCard" aria-pressed="true" aria-label="卡片视图">卡片</button>
+        <button type="button" id="viewCompact" aria-pressed="false" aria-label="紧凑视图">紧凑</button>
+      </div>
+    </div>
+
+    <div class="filters">
+      <div class="field">
+        <label for="jobFilter">投递岗位</label>
+        <select id="jobFilter" aria-label="投递岗位">
+          <option>全部岗位</option>
+          <option>高级前端工程师</option>
+          <option>前端工程师</option>
+          <option>测试工程师</option>
+          <option>Java 后端工程师</option>
+          <option>UI 设计师</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="statusFilter">处理状态</label>
+        <select id="statusFilter" aria-label="处理状态">
+          <option>全部</option>
+          <option>待处理</option>
+          <option>已邀请面试</option>
+          <option>已标记不合适</option>
+        </select>
+      </div>
+      <button class="btn primary" id="queryBtn" type="button">查询</button>
+      <button class="btn" id="clearBtn" type="button">重置</button>
+    </div>
+
+    <div class="ent-toolbar">
+      <span class="ent-chips-lbl">技能标签</span>
+      <div class="ent-chips" id="skillChips"></div>
+    </div>
+
+    <div class="ent-toolbar">
+      <span class="ent-chips-lbl">工作年限</span>
+      <select id="yearsFilter" aria-label="工作年限">
+        <option>不限</option>
+        <option>3 年以上</option>
+        <option>5 年以上</option>
+        <option>8 年以上</option>
+      </select>
+      <span class="ent-chips-lbl">期望薪资上限</span>
+      <select id="payFilter" aria-label="期望薪资上限">
+        <option>不限</option>
+        <option>≤ 30K</option>
+        <option>≤ 35K</option>
+        <option>≤ 40K</option>
+      </select>
+      <span class="ent-chips-lbl">来源渠道</span>
+      <select id="sourceFilter" aria-label="来源渠道">
+        <option>全部渠道</option>
+        <option>内推</option>
+        <option>Boss直聘</option>
+        <option>官网</option>
+      </select>
+      <span class="spacer"></span>
+      <span class="meta" id="filterHint">未使用任何筛选</span>
+      <button class="btn" id="clearAdvBtn" type="button" style="padding:5px 12px;font-size:12.5px">清除全部</button>
+    </div>
+
+    <div class="applied" id="appliedHost" hidden></div>
+
+    <div id="bulkHost"></div>
+
+    <div class="cand-grid" id="candGrid"></div>
+    <div class="empty" id="emptyState" hidden>没有匹配的候选人</div>
+
+    <nav class="pager" aria-label="分页">
+      <button class="btn" id="prevPage" type="button" disabled>上一页</button>
+      <span class="meta" id="pageMeta">第 1 / 2 页 · 共 27 位候选人</span>
+      <button class="btn" id="nextPage" type="button">下一页</button>
+    </nav>
+  </main>
+</div>
+
+<dialog id="resumeDlg" aria-labelledby="resumeTitle">
+  <form method="dialog" style="margin:0">
+    <div class="dlg-head"><span id="resumeTitle">候选人简历</span><button class="btn" type="submit" value="cancel" formnovalidate>关闭</button></div>
+    <div class="dlg-body">
+      <dl>
+        <dt>姓名</dt><dd id="rName"></dd>
+        <dt>投递岗位</dt><dd id="rJob"></dd>
+        <dt>期望薪资</dt><dd id="rPay"></dd>
+        <dt>工作年限</dt><dd id="rYears"></dd>
+        <dt>技能标签</dt><dd id="rSkills"></dd>
+        <dt>最近一份工作</dt><dd id="rLast"></dd>
+      </dl>
+    </div>
+    <div class="dlg-foot">
+      <button class="btn" type="submit" value="cancel" formnovalidate>关闭</button>
+    </div>
+  </form>
+</dialog>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="enterprise.js"></script>
+<script>
+/* ============ 内置演示：候选人管理（与 presets.js「浏览器·简历筛选」同一批数据、同干扰项） ============
+ * 唯一符合「岗位=高级前端工程师 + 技能含 React 与 TypeScript + 期望薪资 ≤ 35K」的是周一鸣。
+ * 干扰项：两位同名「李强」（一位 38K 超预算、一位岗位/技能不符）；陈默（缺 TypeScript）、
+ * 黄志远（缺 React）；张雨薇/郑飞/徐蕾/马奔腾（技能满足但薪资超 35K）；
+ * 刘畅/王思颖/罗静（投的是「前端工程师」）；吴佳宁/冯超/高翔/宋雨桐（岗位与技能全不对）。
+ *
+ * ⚠️ 改这个页面时最容易踩的几条（都有测试钉着，见 tests/scenario-walk.spec.js 的「简历筛选 6 步」）：
+ *   1. 候选人卡片必须是 <article>，可访问名**精确**为「候选人 NAME（岗位）」；别的元素
+ *      一律不能是 name 以「候选人」开头的 article —— 用例按 /article "候选人/ 数卡片。
+ *   2. 姓名按钮的 aria-label 就是纯姓名；它之后第一个匹配 button "邀请面试" 的必须还是
+ *      这张卡自己的「邀请面试」。
+ *   3. 侧栏的「已邀请 <b>N</b> 位」是纯文本，**不能**做成会自己动的计数器。
+ *   4. 新增的可访问名里不要出现「冒号+空格」：YAML 会给整行加引号，行首锚定的正则
+ *      就匹配不上了（邮箱页的 `Re: ` 已经踩过一次）。
+ *   5. 常开的动效只能走 CSS。JS 驱动的活性（新投递到达、KPI 递增、通知栈）一律挂在共享层
+ *      的「实时模拟」开关上，默认关闭 —— 页面自己改一个字的 DOM 文本，两次快照就不相等了。
+ */
+'use strict';
+
+const ROWS = [
+  { name: '李强',   job: '高级前端工程师',  skills: ['React', 'TypeScript', 'Webpack', 'Jest'],                 last: '远山电商 高级前端（2019.06 至今）',   pay: 38, years: 7,  date: '09-22', phone: '138****2210' },
+  { name: '李强',   job: '前端工程师',      skills: ['Vue', 'JavaScript', 'Vite', 'ECharts'],                  last: '蓝湾信息 前端（2022.03 至今）',       pay: 28, years: 4,  date: '09-21', phone: '139****7742' },
+  { name: '张雨薇', job: '高级前端工程师',  skills: ['React', 'TypeScript', 'Node.js', '微前端'],              last: '启明星云 高级前端（2018.07 至今）',   pay: 45, years: 8,  date: '09-22', phone: '137****3156' },
+  { name: '刘畅',   job: '前端工程师',      skills: ['React', 'TypeScript', 'React Query'],                    last: '橘子互娱 前端（2023.04 至今）',       pay: 30, years: 3,  date: '09-20', phone: '136****8820' },
+  { name: '陈默',   job: '高级前端工程师',  skills: ['React', 'Redux', 'Webpack', 'Node.js'],                  last: '北岭科技 高级前端（2020.01 至今）',   pay: 33, years: 6,  date: '09-22', phone: '135****4491' },
+  { name: '周一鸣', job: '高级前端工程师',  skills: ['React', 'TypeScript', 'Node.js', 'Vite', 'CI/CD'],       last: '星图数据 高级前端（2020.09 至今）',   pay: 32, years: 6,  date: '09-23', phone: '188****6027' },
+  { name: '吴佳宁', job: '测试工程师',      skills: ['Selenium', 'Postman', 'JMeter', '禅道'],                 last: '白云山健康 测试（2021.05 至今）',     pay: 25, years: 5,  date: '09-19', phone: '186****1358' },
+  { name: '郑飞',   job: '高级前端工程师',  skills: ['React', 'TypeScript', 'qiankun 微前端', '前端监控'],     last: '大河金服 资深前端（2017.03 至今）',   pay: 36, years: 9,  date: '09-21', phone: '159****7734' },
+  { name: '王思颖', job: '前端工程师',      skills: ['React', 'JavaScript', '微信小程序'],                     last: '拾光文创 前端（2024.02 至今）',       pay: 26, years: 2,  date: '09-20', phone: '158****2261' },
+  { name: '冯超',   job: 'Java 后端工程师', skills: ['Java', 'Spring Cloud', 'MySQL', 'Redis'],                last: '万川物流 后端（2019.11 至今）',       pay: 30, years: 6,  date: '09-18', phone: '150****9905' },
+  { name: '徐蕾',   job: '高级前端工程师',  skills: ['React', 'TypeScript', 'AntV 数据可视化'],               last: '晨曦医疗 高级前端（2021.02 至今）',   pay: 36, years: 5,  date: '09-22', phone: '151****4473' },
+  { name: '高翔',   job: '测试开发工程师',  skills: ['Python', 'Pytest', 'Allure', 'Jenkins'],                 last: '远航出行 测试开发（2022.08 至今）',   pay: 28, years: 4,  date: '09-17', phone: '152****6688' },
+  { name: '罗静',   job: '前端工程师',      skills: ['React', 'TypeScript', '微信小程序'],                     last: '竹间教育 前端（2023.06 至今）',       pay: 27, years: 3,  date: '09-19', phone: '153****3102' },
+  { name: '黄志远', job: '高级前端工程师',  skills: ['Vue', 'TypeScript', 'Vite', 'Pinia'],                    last: '南山智驾 高级前端（2019.04 至今）',   pay: 33, years: 6,  date: '09-21', phone: '155****8845' },
+  { name: '宋雨桐', job: 'UI 设计师',       skills: ['Figma', 'Sketch', 'C4D'],                                last: '光合工作室 UI 设计（2023.01 至今）',  pay: 20, years: 3,  date: '09-16', phone: '156****2276' },
+  { name: '马奔腾', job: '高级前端工程师',  skills: ['React', 'TypeScript', 'GraphQL', '性能优化'],            last: '九天智算 资深前端（2016.05 至今）',   pay: 40, years: 10, date: '09-22', phone: '157****9931' }
+];
+
+/* 「实时模拟」打开后逐份到达的新简历（固定脚本，不是随机 —— 演示要可复述）。
+ * 刻意都**不满足**「高级前端 + React&TS + ≤35K」，跑完脚本后周一鸣仍是唯一命中项。 */
+const INCOMING = [
+  { name: '陆文轩', job: '高级前端工程师',  skills: ['React', 'TypeScript', 'Webpack', 'GraphQL'], last: '青崖科技 高级前端（2020.03 至今）',  pay: 37, years: 6, date: '09-23', phone: '187****3390' },
+  { name: '温子昂', job: '前端工程师',      skills: ['Vue', 'TypeScript', 'Vite', 'Pinia'],        last: '溪云网络 前端（2022.09 至今）',      pay: 29, years: 4, date: '09-23', phone: '183****5517' },
+  { name: '邢立',   job: '测试开发工程师',  skills: ['Python', 'Pytest', 'Docker', 'Jenkins'],    last: '知行数据 测试开发（2021.01 至今）',  pay: 31, years: 5, date: '09-23', phone: '182****7746' }
+];
+
+const STATUS = { PENDING: '待处理', INVITED: '已邀请面试', REJECTED: '已标记不合适' };
+const DEFAULT_JOB = '全部岗位';
+const DEFAULT_STATUS = '全部';
+const STAGES = ['简历筛选', '初试', '复试', 'Offer'];
+
+/* 技能 chips：计数在装载时按与过滤同一套「精确串匹配」算一次，之后不再变 */
+const SKILL_POOL = ['React', 'TypeScript', 'Vue', 'Node.js', 'Webpack', '微信小程序', 'Java', '微前端'];
+const SKILL_COUNTS = {};
+SKILL_POOL.forEach(function (s) {
+  SKILL_COUNTS[s] = ROWS.filter(function (r) { return r.skills.indexOf(s) >= 0; }).length;
+});
+const YEARS_OPTS = { '3 年以上': 3, '5 年以上': 5, '8 年以上': 8 };
+const PAY_OPTS = { '≤ 30K': 30, '≤ 35K': 35, '≤ 40K': 40 };
+const CHANNELS = ['内推', 'Boss直聘', '官网'];
+const ROOMS = ['3 号会议室', '线上 · 腾讯会议', '12 层洽谈间 A', '线上 · 飞书视频'];
+const INTERVIEWERS = ['王海涛 · 前端负责人', '林玲 · 技术专家', '沈亦舟 · 架构师', '赵启明 · 研发经理'];
+const SLOTS = ['09-25 14:00', '09-26 10:30', '09-29 15:00', '09-30 09:30'];
+const AVAIL = ['随时到岗', '2 周内到岗', '1 个月内到岗', '在职看机会'];
+
+/* 固定的字符串散列：来源渠道 / 面试官 / 会议室 / 时间一律由它推导。
+ * 用散列而不是随机 —— 同一份数据每次渲染必须得到同一个值，否则快照不稳。 */
+function hashOf(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function channelOf(c) { return CHANNELS[hashOf('ch|' + c.name + c.job) % CHANNELS.length]; }
+function roomOf(c) { return ROOMS[hashOf('rm|' + c.job + c.name) % ROOMS.length]; }
+function interviewerOf(c) { return INTERVIEWERS[hashOf('iv|' + c.name + c.job) % INTERVIEWERS.length]; }
+function slotOf(c) { return SLOTS[hashOf('sl|' + c.job + c.name) % SLOTS.length]; }
+function availOf(c) { return AVAIL[hashOf('av|' + c.name + c.job) % AVAIL.length]; }
+/* 匹配度：对着「高级前端 + React&TS + ≤35K」这个目标岗位算出来的契合度，纯函数、可复述 */
+function matchOf(c) {
+  let s = 58;
+  if (c.skills.indexOf('React') >= 0) s += 9;
+  if (c.skills.indexOf('TypeScript') >= 0) s += 9;
+  if (c.skills.length >= 4) s += 4;
+  if (c.job === '高级前端工程师') s += 8;
+  else if (c.job === '前端工程师') s += 4;
+  s += c.pay <= 35 ? 6 : -4;
+  if (c.years >= 5 && c.years <= 8) s += 4;
+  return Math.max(41, Math.min(96, s));
+}
+
+const state = {
+  candidates: [],
+  job: DEFAULT_JOB,
+  status: DEFAULT_STATUS,
+  query: '',
+  skills: [],          /* 技能 chips：空 = 不参与筛选 */
+  years: '不限',
+  pay: '不限',
+  channel: '全部渠道',
+  view: 'card',
+  selected: [],        /* 勾选态：只有非空时才创建批量操作条 */
+  invited: [],         /* 记录被邀请的是哪一位：{ id, name, job } */
+  arrivals: 0
+};
+
+let uid = 0;
+const $ = (id) => document.getElementById(id);
+
+let toastTimer;
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 2200);
+}
+
+/* KPI 数字里「待处理简历」这一项由页面自己维护（它跟着真实待处理数走）。
+ * 只在 render() —— 也就是用户动作之后 —— 被写，默认态不会自己变。 */
+function setKpi(label, value) {
+  const card = $('entKpis').querySelector('[data-kpi="' + label + '"]');
+  const num = card && card.querySelector('[data-kpi-value]');
+  if (num) num.textContent = String(value);
+}
+function pendingCount() { return state.candidates.filter((c) => c.status === STATUS.PENDING).length; }
+
+/* ---------- 初始化 / 重置 ---------- */
+function reset() {
+  state.candidates = ROWS.map((r, i) => Object.assign({}, r, {
+    id: ++uid, no: i + 1, status: STATUS.PENDING, channel: channelOf(r)
+  }));
+  state.job = DEFAULT_JOB;
+  state.status = DEFAULT_STATUS;
+  state.query = '';
+  state.skills = [];
+  state.years = '不限';
+  state.pay = '不限';
+  state.channel = '全部渠道';
+  state.view = 'card';
+  state.selected = [];
+  state.invited = [];
+  state.arrivals = 0;
+  $('searchBox').value = '';
+  $('jobFilter').value = DEFAULT_JOB;
+  $('statusFilter').value = DEFAULT_STATUS;
+  $('yearsFilter').value = '不限';
+  $('payFilter').value = '不限';
+  $('sourceFilter').value = '全部渠道';
+  render();
+}
+
+/* 抽屉开着时重置要把它收掉；同时必须把「实时模拟」关掉 —— 否则刚投递的新简历
+ * 会立刻破坏「初始 16 位」。 */
+function hardReset() {
+  Enterprise.drawer.close();
+  const cb = document.querySelector('.ent-sim input');
+  if (cb && cb.checked) {
+    cb.checked = false;
+    cb.dispatchEvent(new Event('change'));
+  }
+  reset();
+}
+
+/* ---------- 过滤 ---------- */
+function visible() {
+  const q = state.query.trim().toLowerCase();
+  return state.candidates.filter((c) => {
+    if (state.job !== DEFAULT_JOB && c.job !== state.job) return false;
+    if (state.status !== DEFAULT_STATUS && c.status !== state.status) return false;
+    if (state.channel !== '全部渠道' && c.channel !== state.channel) return false;
+    if (state.skills.length && !state.skills.every((s) => c.skills.indexOf(s) >= 0)) return false;
+    if (state.years !== '不限' && c.years < YEARS_OPTS[state.years]) return false;
+    if (state.pay !== '不限' && c.pay > PAY_OPTS[state.pay]) return false;
+    if (!q) return true;
+    return (c.name + ' ' + c.phone + ' ' + c.job + ' ' + c.skills.join(' ')).toLowerCase().includes(q);
+  });
+}
+
+function isFiltered() {
+  return state.job !== DEFAULT_JOB || state.status !== DEFAULT_STATUS || state.query.trim() !== ''
+    || state.skills.length > 0 || state.years !== '不限' || state.pay !== '不限' || state.channel !== '全部渠道';
+}
+function advFilterCount() {
+  let n = 0;
+  if (state.skills.length) n += 1;
+  if (state.years !== '不限') n += 1;
+  if (state.pay !== '不限') n += 1;
+  if (state.channel !== '全部渠道') n += 1;
+  return n;
+}
+
+/* ---------- 选择态 ---------- */
+function isSelected(id) { return state.selected.indexOf(id) !== -1; }
+function toggleSelect(id) {
+  state.selected = isSelected(id) ? state.selected.filter((x) => x !== id) : state.selected.concat([id]);
+  render();
+}
+function clearSelection() { state.selected = []; render(); }
+
+/* ---------- 侧栏：状态快捷筛选 + 邀请记录 ---------- */
+function renderSide() {
+  const rows = [
+    { id: DEFAULT_STATUS, name: '全部候选人' },
+    { id: STATUS.PENDING, name: STATUS.PENDING },
+    { id: STATUS.INVITED, name: STATUS.INVITED },
+    { id: STATUS.REJECTED, name: STATUS.REJECTED }
+  ];
+  const ul = $('statusList');
+  ul.innerHTML = '';
+  rows.forEach((r) => {
+    const n = r.id === DEFAULT_STATUS
+      ? state.candidates.length
+      : state.candidates.filter((c) => c.status === r.id).length;
+    const li = document.createElement('li');
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = state.status === r.id ? 'active' : '';
+    const label = r.name + ' (' + n + ')';
+    const name = document.createElement('span');
+    name.textContent = r.name;
+    const count = document.createElement('span');
+    count.className = 'count';
+    count.textContent = '(' + n + ')';
+    b.appendChild(name);
+    b.appendChild(count);
+    b.setAttribute('aria-label', label);
+    b.onclick = () => {
+      state.status = r.id;
+      $('statusFilter').value = r.id;
+      render();
+    };
+    li.appendChild(b);
+    ul.appendChild(li);
+  });
+  $('invitedCount').textContent = String(state.invited.length);
+  $('rejectCount').textContent = String(state.candidates.filter((c) => c.status === STATUS.REJECTED).length);
+  $('invitedNames').textContent = state.invited.length
+    ? '最近邀请：' + state.invited.map((x) => x.name + '（' + x.job + '）').join('、')
+    : '最近邀请：暂无';
+}
+
+/* ---------- 技能 chips / 已应用条件 chips ---------- */
+function renderSkillChips() {
+  const host = $('skillChips');
+  host.innerHTML = '';
+  SKILL_POOL.forEach((s) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'ent-chip' + (state.skills.indexOf(s) >= 0 ? ' on' : '');
+    b.setAttribute('aria-pressed', state.skills.indexOf(s) >= 0 ? 'true' : 'false');
+    b.setAttribute('aria-label', '技能标签 ' + s);
+    b.appendChild(document.createTextNode(s));
+    const n = document.createElement('span');
+    n.className = 'ent-chip-n';
+    n.textContent = String(SKILL_COUNTS[s]);
+    b.appendChild(n);
+    b.onclick = () => {
+      state.skills = state.skills.indexOf(s) >= 0
+        ? state.skills.filter((x) => x !== s)
+        : state.skills.concat([s]);
+      render();
+    };
+    host.appendChild(b);
+  });
+}
+
+/* 「已应用条件」：只在真有条件时创建，每条都能单独摘掉 */
+function renderApplied() {
+  const host = $('appliedHost');
+  host.innerHTML = '';
+  const items = [];
+  if (state.job !== DEFAULT_JOB) {
+    items.push({ label: '岗位 ' + state.job, drop: () => { state.job = DEFAULT_JOB; $('jobFilter').value = DEFAULT_JOB; } });
+  }
+  if (state.status !== DEFAULT_STATUS) {
+    items.push({ label: '状态 ' + state.status, drop: () => { state.status = DEFAULT_STATUS; $('statusFilter').value = DEFAULT_STATUS; } });
+  }
+  if (state.query.trim()) {
+    items.push({ label: '关键词 ' + state.query.trim(), drop: () => { state.query = ''; $('searchBox').value = ''; } });
+  }
+  state.skills.forEach((s) => {
+    items.push({ label: '技能 ' + s, drop: () => { state.skills = state.skills.filter((x) => x !== s); } });
+  });
+  if (state.years !== '不限') {
+    items.push({ label: '年限 ' + state.years, drop: () => { state.years = '不限'; $('yearsFilter').value = '不限'; } });
+  }
+  if (state.pay !== '不限') {
+    items.push({ label: '薪资 ' + state.pay, drop: () => { state.pay = '不限'; $('payFilter').value = '不限'; } });
+  }
+  if (state.channel !== '全部渠道') {
+    items.push({ label: '渠道 ' + state.channel, drop: () => { state.channel = '全部渠道'; $('sourceFilter').value = '全部渠道'; } });
+  }
+
+  host.hidden = items.length === 0;
+  if (!items.length) return;
+  const lbl = document.createElement('span');
+  lbl.className = 'ent-chips-lbl';
+  lbl.textContent = '已应用条件';
+  host.appendChild(lbl);
+  items.forEach((it) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'ent-chip on';
+    b.setAttribute('aria-label', '移除条件 ' + it.label);
+    b.appendChild(document.createTextNode(it.label));
+    const x = document.createElement('span');
+    x.className = 'ent-chip-x';
+    x.textContent = '✕';
+    b.appendChild(x);
+    b.onclick = () => { it.drop(); render(); };
+    host.appendChild(b);
+  });
+}
+
+/* ---------- 批量操作条：只在有勾选时**才存在** ---------- */
+function renderBulk() {
+  const host = $('bulkHost');
+  host.innerHTML = '';
+  const n = state.selected.length;
+  if (!n) return;
+  const bar = document.createElement('div');
+  bar.className = 'ent-bulkbar';
+  const lab = document.createElement('span');
+  lab.appendChild(document.createTextNode('已选中 '));
+  const b = document.createElement('b');
+  b.className = 'ent-bulk-n';
+  b.textContent = String(n);
+  lab.appendChild(b);
+  lab.appendChild(document.createTextNode(' 位候选人'));
+  bar.appendChild(lab);
+  bar.appendChild(document.createElement('span')).className = 'spacer';
+
+  const mk = (label, fn) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn';
+    btn.style.cssText = 'font-size:12.5px;padding:5px 12px';
+    btn.textContent = label;
+    btn.setAttribute('aria-label', label);
+    btn.onclick = fn;
+    return btn;
+  };
+  bar.appendChild(mk('批量邀约', () => {
+    const ids = state.selected.slice();
+    let done = 0;
+    state.candidates = state.candidates.map((c) => {
+      if (ids.indexOf(c.id) === -1 || c.status === STATUS.INVITED) return c;
+      done += 1;
+      state.invited.push({ id: c.id, name: c.name, job: c.job });
+      return Object.assign({}, c, { status: STATUS.INVITED });
+    });
+    state.selected = [];
+    render();
+    toast('已批量发出 ' + done + ' 份面试邀请（演示，未真实发送）');
+  }));
+  bar.appendChild(mk('批量标记不合适', () => {
+    const ids = state.selected.slice();
+    state.candidates = state.candidates.map((c) => (
+      ids.indexOf(c.id) === -1 || c.status === STATUS.REJECTED
+        ? c : Object.assign({}, c, { status: STATUS.REJECTED })
+    ));
+    state.invited = state.invited.filter((x) => ids.indexOf(x.id) === -1);
+    const n2 = ids.length;
+    state.selected = [];
+    render();
+    toast('已把 ' + n2 + ' 位标记为不合适（演示，未真实提交）');
+  }));
+  bar.appendChild(mk('取消选择', clearSelection));
+  host.appendChild(bar);
+}
+
+/* ---------- 简历弹窗（既有行为，原样保留） ---------- */
+function openResume(c) {
+  $('resumeTitle').textContent = c.name + ' · 简历摘要';
+  $('rName').textContent = c.name;
+  $('rJob').textContent = c.job;
+  $('rPay').textContent = '期望 ' + c.pay + 'K';
+  $('rYears').textContent = c.years + ' 年（更新于 2026-' + c.date + '）';
+  $('rSkills').textContent = c.skills.join('、');
+  $('rLast').textContent = c.last;
+  $('resumeDlg').showModal();
+}
+
+function invite(c) {
+  if (c.status === STATUS.INVITED) return;
+  c.status = STATUS.INVITED;
+  state.invited.push({ id: c.id, name: c.name, job: c.job });
+  render();
+  toast('已向「' + c.name + '」（' + c.job + '）发出面试邀请（演示，未真实发送）');
+}
+
+function reject(c) {
+  if (c.status === STATUS.REJECTED) return;
+  c.status = STATUS.REJECTED;
+  state.invited = state.invited.filter((x) => x.id !== c.id);
+  render();
+  toast('已将「' + c.name + '」标记为不合适（演示，未真实提交）');
+}
+
+/* ---------- 右侧抽屉：流程日志 / 面试安排 ---------- */
+function kvList(pairs) {
+  const dl = document.createElement('dl');
+  dl.className = 'ent-kv';
+  pairs.forEach((p) => {
+    dl.appendChild(document.createElement('dt')).textContent = p[0];
+    const dd = document.createElement('dd');
+    dd.textContent = p[1];
+    if (p[2]) dd.className = p[2];
+    dl.appendChild(dd);
+  });
+  return dl;
+}
+
+function section(title, node) {
+  const s = document.createElement('section');
+  s.className = 'ent-sec';
+  s.appendChild(document.createElement('h3')).textContent = title;
+  s.appendChild(node);
+  return s;
+}
+
+/* 阶段索引：待处理 = 停在「简历筛选」，已邀请 = 走到「初试」，不合适 = 流程终止 */
+function stageOf(c) {
+  if (c.status === STATUS.INVITED) return 1;
+  if (c.status === STATUS.REJECTED) return 0;
+  return 0;
+}
+
+function timelineOf(c) {
+  const ul = document.createElement('ul');
+  ul.className = 'ent-timeline';
+  const rows = [
+    { cls: 'done', title: '简历入库', meta: '2026-' + c.date + ' · 来源 ' + c.channel, body: '系统解析简历并通过「' + c.job + '」岗位的初筛规则。' },
+    { cls: c.status === STATUS.REJECTED ? 'warn' : 'done', title: '招聘专员初筛', meta: '2026-09-22 · 苏文卿', body: '匹配度 ' + matchOf(c) + '，期望 ' + c.pay + 'K，工作 ' + c.years + ' 年。' }
+  ];
+  if (c.status === STATUS.INVITED) {
+    rows.push({ cls: 'now', title: '已发出面试邀请', meta: '2026-09-23 · 待候选人确认', body: '面试时间 ' + slotOf(c) + '，面试官 ' + interviewerOf(c) + '。' });
+    rows.push({ cls: '', title: '安排面试', meta: '待确认', body: '候选人确认后自动同步至面试官日历。' });
+  } else if (c.status === STATUS.REJECTED) {
+    rows.push({ cls: 'warn', title: '标记为不合适', meta: '2026-09-23 · 苏文卿', body: '与岗位要求差距较大，流程终止并归档。' });
+  } else {
+    rows.push({ cls: 'now', title: '等待初筛结论', meta: '停留 ' + (1 + (matchOf(c) % 5)) + ' 天', body: '建议在 48 小时内给出初筛结论。' });
+    rows.push({ cls: '', title: '安排面试', meta: '未开始', body: '初筛通过后自动进入面试排期。' });
+  }
+  rows.forEach((r) => {
+    const li = document.createElement('li');
+    if (r.cls) li.className = r.cls;
+    li.appendChild(document.createElement('span')).className = 'ent-tl-title';
+    li.lastChild.textContent = r.title;
+    li.appendChild(document.createElement('span')).className = 'ent-tl-meta';
+    li.lastChild.textContent = r.meta;
+    const p = document.createElement('span');
+    p.className = 'ent-tl-body';
+    p.textContent = r.body;
+    li.appendChild(p);
+    ul.appendChild(li);
+  });
+  return ul;
+}
+
+function openLogDrawer(c) {
+  const sec1 = section('流程时间线', timelineOf(c));
+
+  const sec2 = section('候选人档案', kvList([
+    ['姓名', c.name],
+    ['投递岗位', c.job],
+    ['期望薪资', '期望 ' + c.pay + 'K'],
+    ['工作年限', c.years + ' 年'],
+    ['技能标签', c.skills.join('、')],
+    ['最近一份工作', c.last],
+    ['联系电话', c.phone, 'mono'],
+    ['来源渠道', c.channel],
+    ['匹配度', matchOf(c) + ' 分'],
+  ]));
+
+  const ul = document.createElement('ul');
+  ul.className = 'ent-timeline';
+  [
+    ['查看简历摘要', '2026-09-23 08:12 · 苏文卿'],
+    ['补充技能标签', '2026-09-22 17:40 · 系统规则'],
+    ['简历入库', '2026-' + c.date + ' 09:05 · 系统'],
+  ].forEach((r) => {
+    const li = document.createElement('li');
+    li.className = 'done';
+    li.appendChild(document.createElement('span')).className = 'ent-tl-title';
+    li.lastChild.textContent = r[0];
+    li.appendChild(document.createElement('span')).className = 'ent-tl-meta';
+    li.lastChild.textContent = r[1];
+    ul.appendChild(li);
+  });
+  const sec3 = section('操作记录', ul);
+
+  const foot = document.createElement('div');
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'btn';
+  close.style.fontSize = '12.5px';
+  close.textContent = '关闭';
+  close.setAttribute('aria-label', '关闭');
+  close.onclick = () => Enterprise.drawer.close();
+  foot.appendChild(close);
+  const next = document.createElement('button');
+  next.type = 'button';
+  next.className = 'btn primary';
+  next.style.fontSize = '12.5px';
+  next.textContent = '推进到下一阶段';
+  next.setAttribute('aria-label', '推进到下一阶段');
+  next.onclick = () => {
+    if (c.status === STATUS.PENDING) invite(c);
+    else toast('演示：已在该流程节点，未做变更');
+    Enterprise.drawer.close();
+  };
+  foot.appendChild(next);
+
+  Enterprise.drawer.open({
+    title: c.name + ' · 流程日志',
+    sub: c.job + ' · ' + c.phone,
+    tabs: [
+      { label: '流程时间线', render: () => sec1 },
+      { label: '候选人档案', render: () => sec2 },
+      { label: '操作记录', render: () => sec3 },
+    ],
+    footer: foot,
+  });
+}
+
+function openInterviewDrawer(c) {
+  const invited = c.status === STATUS.INVITED;
+
+  const sec1 = section('面试详情', kvList([
+    ['面试轮次', invited ? '初试（技术面）' : '待安排'],
+    ['面试时间', invited ? '2026-' + slotOf(c) : '待确认'],
+    ['面试官', interviewerOf(c)],
+    ['面试场地', roomOf(c)],
+    ['预计时长', '60 分钟'],
+    ['当前状态', c.status],
+  ]));
+
+  const sec2 = section('面试官与场地', kvList([
+    ['主面试官', interviewerOf(c)],
+    ['协同面试官', '周航 · 前端骨干'],
+    ['场地', roomOf(c)],
+    ['会议链接', 'meeting.xinghe.example.com/rf-2f9c'],
+    ['候选人确认', invited ? '已确认' : '待候选人确认'],
+  ]));
+
+  const form = document.createElement('div');
+  form.className = 'fb-form';
+  const mk = (tag, labelTxt, aria, ph) => {
+    const box = document.createElement('div');
+    const lb = document.createElement('label');
+    lb.textContent = labelTxt;
+    box.appendChild(lb);
+    const el = document.createElement(tag);
+    el.setAttribute('aria-label', aria);
+    if (ph) el.setAttribute('placeholder', ph);
+    box.appendChild(el);
+    form.appendChild(box);
+    return el;
+  };
+  mk('input', '面试官', '面试官姓名', '如 王海涛');
+  mk('input', '面试时间', '面试时间', '如 2026-09-25 14:00');
+  const scoreSel = document.createElement('select');
+  scoreSel.setAttribute('aria-label', '综合评价');
+  ['待评价', '优秀', '良好', '一般', '不合适'].forEach((o) => {
+    const op = document.createElement('option');
+    op.textContent = o;
+    scoreSel.appendChild(op);
+  });
+  const scoreBox = document.createElement('div');
+  scoreBox.appendChild(Object.assign(document.createElement('label'), { textContent: '综合评价' }));
+  scoreBox.appendChild(scoreSel);
+  form.appendChild(scoreBox);
+  mk('textarea', '面试反馈', '面试反馈', '记录候选人的技术深度、沟通表达与岗位匹配情况…');
+
+  const foot = document.createElement('div');
+  const send = document.createElement('button');
+  send.type = 'button';
+  send.className = 'btn primary';
+  send.style.fontSize = '12.5px';
+  send.textContent = '发送日程邀请';
+  send.setAttribute('aria-label', '发送日程邀请');
+  send.onclick = () => { Enterprise.drawer.close(); toast('演示：未真实发送日程邀请'); };
+  foot.appendChild(send);
+
+  Enterprise.drawer.open({
+    title: c.name + ' · 面试安排',
+    sub: c.job + ' · 匹配度 ' + matchOf(c),
+    tabs: [
+      { label: '面试详情', render: () => sec1 },
+      { label: '面试官与场地', render: () => sec2 },
+      { label: '面试反馈', render: () => section('反馈表', form) },
+    ],
+    footer: foot,
+  });
+}
+
+/* ---------- 候选人卡片 ---------- */
+function stepperOf(c) {
+  const ol = document.createElement('ol');
+  ol.className = 'ent-stepper';
+  const idx = stageOf(c);
+  STAGES.forEach((s, i) => {
+    const li = document.createElement('li');
+    if (c.status === STATUS.REJECTED) {
+      if (i === 0) li.className = 'warn';
+    } else if (i < idx) li.className = 'done';
+    else if (i === idx) li.className = 'now';
+    li.textContent = s;
+    ol.appendChild(li);
+  });
+  return ol;
+}
+
+function interviewTagOf(c) {
+  if (c.status === STATUS.INVITED) return { label: '面试 ' + slotOf(c), cls: 'ent-tag good' };
+  if (c.status === STATUS.REJECTED) return { label: '不进入面试', cls: 'ent-tag bad' };
+  return { label: '面试待安排', cls: 'ent-tag warn' };
+}
+
+function card(c) {
+  const el = document.createElement('article');
+  el.className = 'cand'
+    + (c.status === STATUS.INVITED ? ' done' : '')
+    + (c.status === STATUS.REJECTED ? ' rejected' : '')
+    + (c.fresh ? ' ent-flash' : '')
+    + (state.view === 'compact' ? ' compact' : '');
+  el.setAttribute('aria-label', '候选人 ' + c.name + '（' + c.job + '）');
+
+  const head = document.createElement('div');
+  head.className = 'cand-head';
+
+  const pick = document.createElement('input');
+  pick.type = 'checkbox';
+  pick.className = 'cand-pick';
+  pick.checked = isSelected(c.id);
+  pick.setAttribute('aria-label', '选择 ' + c.name);
+  pick.onchange = () => toggleSelect(c.id);
+  head.appendChild(pick);
+
+  const av = document.createElement('span');
+  av.className = 'ent-avatar cand-av';
+  av.setAttribute('aria-hidden', 'true');
+  av.textContent = c.name.slice(0, 1);
+  head.appendChild(av);
+
+  const name = document.createElement('button');
+  name.type = 'button';
+  name.className = 'name';
+  name.textContent = c.name;
+  name.setAttribute('aria-label', c.name);
+  name.title = '查看简历摘要';
+  name.onclick = () => openResume(c);
+  head.appendChild(name);
+
+  if (c.fresh) {
+    const nw = document.createElement('span');
+    nw.className = 'ent-new';
+    nw.textContent = 'NEW';
+    head.appendChild(nw);
+  }
+
+  const pill = document.createElement('span');
+  pill.className = 'pill';
+  pill.textContent = c.job;
+  head.appendChild(pill);
+
+  const st = document.createElement('span');
+  st.className = 'status';
+  st.textContent = c.status;
+  head.appendChild(st);
+  el.appendChild(head);
+
+  const top = document.createElement('div');
+  top.className = 'cand-top';
+  const main = document.createElement('div');
+  main.className = 'cand-main';
+
+  const facts = document.createElement('p');
+  facts.className = 'facts';
+  [['期望 ' + c.pay + 'K', 'pay'], ['工作年限 ' + c.years + ' 年', ''], ['更新于 2026-' + c.date, '']].forEach((pair) => {
+    if (facts.childNodes.length) {
+      const sep = document.createElement('span');
+      sep.className = 'sep';
+      sep.textContent = '·';
+      facts.appendChild(sep);
+    }
+    const s = document.createElement('span');
+    if (pair[1]) s.className = pair[1];
+    s.textContent = pair[0];
+    facts.appendChild(s);
+  });
+  main.appendChild(facts);
+
+  const meta = document.createElement('p');
+  meta.className = 'cand-meta';
+  const srcTag = document.createElement('span');
+  srcTag.className = 'ent-tag info';
+  srcTag.textContent = c.channel;
+  meta.appendChild(srcTag);
+  const it = interviewTagOf(c);
+  const itTag = document.createElement('span');
+  itTag.className = it.cls;
+  itTag.textContent = it.label;
+  meta.appendChild(itTag);
+  const expTag = document.createElement('span');
+  expTag.className = 'ent-tag';
+  expTag.textContent = availOf(c);
+  meta.appendChild(expTag);
+  main.appendChild(meta);
+  top.appendChild(main);
+
+  const ring = document.createElement('div');
+  ring.className = 'ent-ring';
+  ring.style.setProperty('--p', String(matchOf(c)));
+  const ringNum = document.createElement('span');
+  ringNum.textContent = String(matchOf(c));
+  ring.appendChild(ringNum);
+  top.appendChild(ring);
+  el.appendChild(top);
+
+  const stage = document.createElement('div');
+  stage.className = 'cand-stage';
+  stage.appendChild(document.createElement('h3')).textContent = '流程阶段';
+  stage.appendChild(stepperOf(c));
+  el.appendChild(stage);
+
+  const tags = document.createElement('div');
+  tags.className = 'tags';
+  c.skills.forEach((s) => {
+    const t = document.createElement('span');
+    t.className = 'tag';
+    t.textContent = s;
+    tags.appendChild(t);
+  });
+  el.appendChild(tags);
+
+  const exp = document.createElement('p');
+  exp.className = 'exp';
+  exp.textContent = '最近一份工作：' + c.last;
+  el.appendChild(exp);
+
+  const phone = document.createElement('p');
+  phone.className = 'phone';
+  const phoneSpan = document.createElement('span');
+  phoneSpan.textContent = c.phone;
+  phone.appendChild(phoneSpan);
+  const idSpan = document.createElement('span');
+  idSpan.textContent = '简历编号 XH-2026-' + String(c.no).padStart(4, '0');
+  phone.appendChild(idSpan);
+  el.appendChild(phone);
+
+  const ops = document.createElement('div');
+  ops.className = 'ops';
+  const mkBtn = (label, cls, fn) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'btn' + (cls ? ' ' + cls : '');
+    b.textContent = label;
+    b.setAttribute('aria-label', label);
+    b.onclick = fn;
+    return b;
+  };
+  ops.appendChild(mkBtn('查看简历', '', () => openResume(c)));
+  const inviteBtn = mkBtn('邀请面试', 'primary', () => invite(c));
+  inviteBtn.disabled = c.status === STATUS.INVITED;
+  ops.appendChild(inviteBtn);
+  const rejectBtn = mkBtn('标记不合适', 'danger', () => reject(c));
+  rejectBtn.disabled = c.status === STATUS.REJECTED;
+  ops.appendChild(rejectBtn);
+  ops.appendChild(mkBtn('流程日志', '', () => openLogDrawer(c)));
+  ops.appendChild(mkBtn('面试安排', '', () => openInterviewDrawer(c)));
+  el.appendChild(ops);
+
+  return el;
+}
+
+function render() {
+  renderSide();
+  renderSkillChips();
+  renderApplied();
+  renderBulk();
+  $('filterHint').textContent = advFilterCount() ? '已启用 ' + advFilterCount() + ' 个筛选条件' : '未使用任何筛选';
+  $('viewCard').setAttribute('aria-pressed', state.view === 'card' ? 'true' : 'false');
+  $('viewCompact').setAttribute('aria-pressed', state.view === 'compact' ? 'true' : 'false');
+
+  const list = visible();
+  const grid = $('candGrid');
+  grid.className = 'cand-grid' + (state.view === 'compact' ? ' compact' : '');
+  grid.innerHTML = '';
+  $('emptyState').hidden = list.length > 0;
+  if (!list.length) {
+    $('emptyState').textContent = isFiltered() ? '没有符合当前筛选条件的候选人' : '暂无候选人';
+  }
+  grid.setAttribute('aria-label', '候选人列表（共 ' + list.length + ' 位）');
+  list.forEach((c) => grid.appendChild(card(c)));
+
+  $('listMeta').textContent =
+    '共 ' + list.length + ' 位 · 待处理 ' + pendingCount() +
+    ' 位 · 已邀请 ' + state.invited.length + ' 位';
+
+  $('pageMeta').textContent = isFiltered()
+    ? '第 1 / 1 页 · 共 ' + list.length + ' 位（已筛选）'
+    : '第 1 / 2 页 · 共 27 位候选人';
+
+  setKpi('待处理简历', pendingCount());
+}
+
+/* ---------- 顶栏与筛选交互 ---------- */
+$('searchBox').addEventListener('input', (e) => {
+  state.query = e.target.value;
+  render();
+});
+$('jobFilter').addEventListener('change', (e) => { state.job = e.target.value; render(); });
+$('statusFilter').addEventListener('change', (e) => { state.status = e.target.value; render(); });
+$('yearsFilter').addEventListener('change', (e) => { state.years = e.target.value; render(); });
+$('payFilter').addEventListener('change', (e) => { state.pay = e.target.value; render(); });
+$('sourceFilter').addEventListener('change', (e) => { state.channel = e.target.value; render(); });
+
+$('queryBtn').onclick = () => {
+  state.job = $('jobFilter').value;
+  state.status = $('statusFilter').value;
+  state.query = $('searchBox').value;
+  render();
+  toast('已按条件查询：岗位 ' + state.job + ' · 状态 ' + state.status + '（' + visible().length + ' 位）');
+};
+$('clearBtn').onclick = () => {
+  state.job = DEFAULT_JOB;
+  state.status = DEFAULT_STATUS;
+  state.query = '';
+  $('searchBox').value = '';
+  $('jobFilter').value = DEFAULT_JOB;
+  $('statusFilter').value = DEFAULT_STATUS;
+  render();
+  toast('筛选条件已重置为「全部」');
+};
+$('clearAdvBtn').onclick = () => {
+  state.skills = [];
+  state.years = '不限';
+  state.pay = '不限';
+  state.channel = '全部渠道';
+  $('yearsFilter').value = '不限';
+  $('payFilter').value = '不限';
+  $('sourceFilter').value = '全部渠道';
+  render();
+  toast('高级筛选条件已清空');
+};
+$('viewCard').onclick = () => { state.view = 'card'; render(); };
+$('viewCompact').onclick = () => { state.view = 'compact'; render(); };
+$('resetBtn').onclick = () => {
+  hardReset();
+  toast('演示已重置为初始 16 位候选人');
+};
+$('prevPage').disabled = true;
+$('nextPage').onclick = () => { toast('演示：第 2 页数据未内置（共 27 位候选人）'); };
+
+/* ---------- 企业外壳 ---------- */
+const shell = Enterprise.mountShell({
+  rail: {
+    logo: '星', modules: [
+      { id: 'hr', icon: '🏢', label: '招聘中台', active: true },
+      { id: 'job', icon: '📋', label: '职位' },
+      { id: 'cand', icon: '👥', label: '候选人' },
+      { id: 'interview', icon: '📅', label: '面试' },
+      { sep: true },
+      { id: 'report', icon: '📊', label: '报表' },
+    ],
+    onPick: (m) => {
+      if (m.active) return;
+      toast('演示页：仅「招聘中台 · 候选人管理」可用，「' + m.label + '」未实现');
+    },
+  },
+  kpis: [
+    { icon: '📋', label: '在招职位', value: 12, unit: '个', delta: '▲ 2 较上周', tone: 'up',
+      spark: [7, 8, 8, 9, 10, 11, 11, 12] },
+    { icon: '📄', label: '待处理简历', value: 16, unit: '份', note: '其中 6 份为高级前端工程师',
+      bar: { pct: 62, tone: 'warn' } },
+    { icon: '📅', label: '本周面试', value: 8, unit: '场', delta: '▲ 3 较上周', tone: 'up',
+      spark: [3, 4, 5, 4, 6, 7, 6, 8] },
+    { icon: '⏱', label: '平均响应时长', value: '1.6', unit: '小时', delta: '▼ 0.3 小时', tone: 'up',
+      spark: [3.2, 2.9, 2.6, 2.4, 2.1, 1.9, 1.7, 1.6] },
+  ],
+  tickerHost: 'entTickerHost',
+  ticker: '本周新开 3 个职位通道，高级前端工程师与测试开发工程师紧急招聘中；简历初筛 SLA 为 48 小时，超时简历将自动提醒招聘负责人；面试日历已与飞书打通，改期请提前 4 小时操作。',
+  notices: [
+    { icon: '⚠', title: '3 份简历即将超时', body: '高级前端工程师岗位有 3 份简历停留超过 48 小时，建议尽快初筛。', time: '09-23 08:40', unread: true },
+    { icon: '📅', title: '今日 2 场面试待确认', body: '刘畅 10:30 初试、周一鸣 14:00 复试的面试官尚未确认。', time: '09-23 08:10', unread: true },
+    { icon: '👤', title: '猎头推荐 4 位候选人', body: '远航猎头推荐了 4 位 Java 后端候选人，已自动入库待初筛。', time: '09-22 19:25', unread: true },
+    { icon: '✅', title: '职位「高级前端工程师」已开启招聘', body: '该职位通道已同步至官网与内推平台，今日起对外可见。', time: '09-22 10:05', unread: false },
+    { icon: '📊', title: '招聘周报 W38 已生成', body: '本周到面率 42%，环比上升 6 个百分点，平均响应时长缩短至 1.6 小时。', time: '09-21 18:00', unread: false },
+  ],
+  user: {
+    initial: '苏', name: '苏文卿', role: '招聘负责人',
+    email: 'suwenqing@xinghe.example.com',
+    items: [
+      { icon: '👤', label: '个人资料', onPick: () => toast('演示：个人资料页未实现') },
+      { icon: '⚙', label: '招聘偏好设置', onPick: () => toast('演示：设置页未实现') },
+      { icon: '👥', label: '协作同事与权限', onPick: () => toast('演示：权限页未实现') },
+      { sep: true },
+      { icon: '↩', label: '退出登录', onPick: () => toast('演示：不会真实退出') },
+    ],
+  },
+  sim: {
+    label: '实时模拟', onLabel: '模拟中', everyMs: 5000,
+    hint: '打开后每 5 秒到达一份新简历（最多 3 份），页面数据会自行变化',
+  },
+  statusbar: {
+    left: [{ dot: true, text: '招聘服务正常' }, { text: '在招职位 12 个' }, { text: '今日新投递 5 份' }],
+    right: [{ text: '星河招聘中台 企业版 v3.6.0' }, { text: '数据同步于 09-23 08:30' }],
+  },
+  searchSelector: '#searchBox',
+  onReady: ({ sim }) => {
+    /* 实时模拟：逐份投递新简历。这是**唯一**会自己改页面的机制，且必须由用户显式打开。 */
+    sim.subscribe((step) => {
+      if (step > INCOMING.length) {
+        Enterprise.toast({ icon: '✔', title: '模拟已跑完固定脚本', meta: '共投递 ' + INCOMING.length + ' 份新简历' });
+        return;
+      }
+      /* 新的一份到达时把上一份的 NEW 高亮摘掉 —— 用状态做，不另起定时器：
+       * render() 会重建整张卡片，留在卡上的 .ent-flash 会跟着重播。 */
+      state.candidates = state.candidates.map((c) => (c.fresh ? Object.assign({}, c, { fresh: false }) : c));
+      const r = INCOMING[step - 1];
+      const cand = Object.assign({}, r, {
+        id: ++uid, no: ROWS.length + step, status: STATUS.PENDING, channel: channelOf(r), fresh: true
+      });
+      state.candidates = [cand].concat(state.candidates);
+      state.arrivals = step;
+      /* KPI 先递增（带高亮动效），再 render —— render 写回的是同一个真实待处理数 */
+      Enterprise.bumpKpi($('entKpis'), '待处理简历', 1);
+      render();
+      Enterprise.toast({ icon: '📄', title: '新投递 · ' + cand.name, meta: cand.job + ' · 期望 ' + cand.pay + 'K' });
+    });
+  },
+});
+
+reset();
+</script>
+</body>
+</html>
