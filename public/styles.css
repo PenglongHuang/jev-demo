@@ -859,6 +859,9 @@ table.spec td code { font-size: 11px; }
 .tn .k { font-size: 9px; font-weight: 700; letter-spacing: .05em; padding: 2px 7px; border-radius: 99px; flex: none; }
 .tn .k.jev { background: var(--violet-soft); color: var(--violet); }
 .tn .k.llm { background: var(--green-soft); color: var(--green); }
+/* 工程直出（候选只有一个，那次没有调 Jev）：树上这一格不能再用 Jev 的紫色 ——
+ * 与详情头部的 .fd-tag.local 同一套中性色 */
+.tn .k.local { background: #e2e8f0; color: #475569; }
 
 .flow-detail { flex: 1; min-width: 0; }
 .fd-head {
@@ -898,6 +901,8 @@ table.ov tbody tr:hover { background: #f7f8ff; }
 .fd-tag { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 5px; }
 .fd-tag.jev { background: #f5f1fe; color: #6d28d9; }
 .fd-tag.llm { background: #ecfdf5; color: #047857; }
+/* 这次行动没有调 Jev（单选项，工程直出）：挂「Jev」标签是假话 */
+.fd-tag.local { background: #e2e8f0; color: #475569; }
 /* 分节小标题（会话总览 / 本步行动）：旧轮播没有这个类，随树视图一并补上 */
 .sec-t { font-size: 12px; font-weight: 700; color: var(--text-3); letter-spacing: .05em; }
 /* 右侧详情一屏多块（输出 / state / 问题 / 裁剪 / 原始报文）：
@@ -1028,6 +1033,15 @@ table.ov tbody tr:hover { background: #f7f8ff; }
 .qcard.stale { border-style: dashed; background: #f6f7f9; }
 .qcard.stale .bars { opacity: 0.45; }
 .qcard.stale .qcard-conf { opacity: 0.6; }
+/* 工程直出（候选只有一个，答案已确定，没发给 Jev）：答案不是模型输出，必须看得出来。
+ * 100% 的单点分布是最容易被误读成「模型极有把握」的形状 —— 所以给它一个中性色，
+ * 与「Jev 作答」的紫色（--accent）分开，并在卡内附一句说明（文案在 auto.js）。 */
+.qcard.local { border-color: #cbd5e1; background: #f8fafc; }
+.qcard-local {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.02em; padding: 1px 6px;
+  border-radius: 5px; background: #e2e8f0; color: #475569;
+}
+.qcard.local .bars .bar-fill { background: #94a3b8 !important; }
 
 /* 未完成量表 */
 .meter { display: flex; gap: 4px; }
@@ -1060,6 +1074,8 @@ table.ov tbody tr:hover { background: #f7f8ff; }
 .bad-text { color: #b91c1c; }
 /* 「停滞提示」是喂给模型的纠正指令，在 state 卡里要一眼可见地压过上一步结果 */
 .stall-text { color: #b45309; }
+/* 「本步变化」= 行级差分的观测清单（原样呈现，不加解释），比上一步结果次要 */
+.change-text { color: var(--text-2); white-space: normal; }
 .muted { color: var(--text-3); }
 .snap-details summary { cursor: pointer; font-size: 12px; color: var(--text-3); user-select: none; }
 .snap-details summary:hover { color: var(--accent); }
@@ -1075,6 +1091,12 @@ table.ov tbody tr:hover { background: #f7f8ff; }
   color: var(--text-3); border: 1px solid var(--border); border-radius: 5px; padding: 1px 6px;
 }
 .qblock-meta { font-size: 11.5px; color: var(--text-3); margin-left: auto; }
+/* 这一道题没发出去（单选项，工程直出）—— 题块本身照常展示候选与 instructions，
+ * 只是把「没问过 Jev」钉在这一行；同一块里其余题是真问过的，所以标注必须逐题。 */
+.qblock-local {
+  font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 5px;
+  background: #e2e8f0; color: #475569;
+}
 .qblock-inst {
   font-size: 12px; color: var(--text-3); line-height: 1.5;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;

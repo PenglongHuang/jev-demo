@@ -1713,3 +1713,432 @@ test('buildRunRecord：没传 timing（老调用方 / 进行中首存）→ 对�
   assert.equal(rec.meta.tailMs, null);
   assert.equal(rec.meta.sumStepMs, 500);          /* 步耗时照样能合，只是平不了账 */
 });
+
+/* ---------- 快照差分接线（snapshot-diff 接入 auto-core） ----------
+ * 见 public/js/snapshot-diff.js 文件头：ref 是快照内的临时句柄，元素改名/重渲染即重发，
+ * 于是按 ref 认元素的三个安全网（decisionSig / failedRefs / 已完成步骤）同时失效。 */
+
+test('buildState：本步变化 只在有值时出现，挨着快照，且 停滞提示 仍在末尾', () => {
+  const base = AutoCore.buildState({ goal: 'g', url: 'u', title: 't', history: [], snapshot: 's' });
+  assert.strictEqual(base['本步变化'], undefined, '无变化时不得留空占位字段（稀缺才有信号）');
+
+  const st = AutoCore.buildState({
+    goal: 'g', url: 'u', title: 't', history: [], lastResult: '成功', snapshot: 's',
+    lastChange: '页面变化 1 处', stallNotice: '停',
+  });
+  assert.strictEqual(st['本步变化'], '页面变化 1 处');
+  const keys = Object.keys(st);
+  assert.strictEqual(keys.pop(), '停滞提示', '停滞提示 必须永远排最后');
+  assert.ok(keys.indexOf('本步变化') > keys.indexOf('上一步结果'));
+  assert.ok(keys.indexOf('本步变化') > keys.indexOf('页面快照'),
+    '稀有且决定性的信号要贴在快照之后 —— 那是模型的最近注意力位（与 停滞提示 同一条理由）');
+});
+
+test('decisionSig：缺省第三参时逐字节不变；selfChanged 时把 param 归约成哨兵', () => {
+  const d = { action: 'click', param: 'f1e1137', text: null };
+  const plain = AutoCore.decisionSig(d, VARS);
+  assert.ok(plain.indexOf('f1e1137') >= 0, '缺省行为必须一字不变');
+  const a = AutoCore.decisionSig(d, VARS, { selfChanged: true });
+  const b = AutoCore.decisionSig({ action: 'click', param: 'f1e1138', text: null }, VARS, { selfChanged: true });
+  assert.strictEqual(a, b, '同一个元素改了名 → 新 ref 也要归成同一个签名');
+  assert.notStrictEqual(a, plain, '归约后的签名不能和原来撞上');
+  assert.ok(AutoCore.decisionSig(d, VARS, { selfChanged: false }) === plain);
+});
+
+test('detectStall：连续追自己改过的元素 → 第三类正交计数与提示', () => {
+  const chase = [5, 6, 7, 8, 9, 10].map((n) => ({
+    decision: { action: 'click', param: 'f1e11' + n, text: null },
+    snapshot: 's' + n,
+    chasedOwnChange: true,
+  }));
+  const out = AutoCore.detectStall(chase, 's11', VARS);
+  assert.strictEqual(out.repeatCount, 6, '六个不同 ref、同一动作 → 归成一个指纹');
+  assert.strictEqual(out.selfChurnStreak, 6);
+  assert.strictEqual(out.noChangeStreak, 0, '快照确实每次都变 —— 逐字节比较抓不到这一类');
+  assert.match(out.notice, /上一步动作刚改动过的行/);
+  assert.match(out.notice, /必须换一个/, '连续 6 步要下死命令，不是软提示');
+});
+
+test('detectStall：自改计数是正交的 —— 只数「最末尾连续追自己」的那一段', () => {
+  const tailChase = [
+    { decision: { action: 'click', param: 'e1', text: null }, snapshot: 's1', chasedOwnChange: false },
+    { decision: { action: 'click', param: 'e2', text: null }, snapshot: 's2', chasedOwnChange: true },
+  ];
+  const out = AutoCore.detectStall(tailChase, 's3', VARS);
+  assert.strictEqual(out.selfChurnStreak, 1, '末尾那一步是追自己改过的元素');
+  assert.strictEqual(out.notice, null, '1 步没到 STALL_MIN，不该出提示');
+
+  /* 末尾一停就不再追 → 计数归零（这是「连续」二字的语义，不是累计次数） */
+  const stopped = [
+    { decision: { action: 'click', param: 'e1', text: null }, snapshot: 's1', chasedOwnChange: true },
+    { decision: { action: 'click', param: 'e2', text: null }, snapshot: 's2', chasedOwnChange: false },
+  ];
+  assert.strictEqual(AutoCore.detectStall(stopped, 's3', VARS).selfChurnStreak, 0);
+});
+
+test('formatHistoryStep：可选第 5 参只追加观测，不给就不变', () => {
+  assert.strictEqual(AutoCore.formatHistoryStep(2, 'click【e10 · 归档】', true, null),
+    '2. click【e10 · 归档】成功', '缺第 5 参时逐字节不变');
+  assert.strictEqual(
+    AutoCore.formatHistoryStep(6, 'click【f1e1138 · 赞同 487】', true, null, '（本行是上一步动作改动过的行）'),
+    '6. click【f1e1138 · 赞同 487】成功（本行是上一步动作改动过的行）');
+});
+
+test('isOpaqueAction：结果不体现在 a11y 快照里的动作（滚动 / hover）', () => {
+  ['PageDown', 'PageUp', 'Home', 'End', 'Space'].forEach((k) => {
+    assert.strictEqual(AutoCore.isOpaqueAction({ action: 'press', text: k }, VARS), true, k + ' 是滚动键');
+  });
+  assert.strictEqual(AutoCore.isOpaqueAction({ action: 'press', text: 'Enter' }, VARS), false,
+    'Enter 会提交表单，结果在快照里看得见');
+  assert.strictEqual(AutoCore.isOpaqueAction({ action: 'press', text: 'ArrowDown' }, VARS), false,
+    '方向键改列表选中项，那是快照里看得见的真变化');
+  assert.strictEqual(AutoCore.isOpaqueAction({ action: 'hover', text: null }, VARS), true);
+  assert.strictEqual(AutoCore.isOpaqueAction({ action: 'click', param: 'e1', text: null }, VARS), false);
+  /* 文本走变量解析：变量名指到 PageDown 也算滚动 */
+  const vars = [{ name: '键位', value: 'PageDown' }];
+  assert.strictEqual(AutoCore.isOpaqueAction({ action: 'press', text: '键位' }, vars), true);
+});
+
+test('buildRunRecord/hydrateRecord：差分与自改标记往返不丢，老记录回读为 null/false', () => {
+  const mk = (diff, chased) => ({
+    n: 1, label: 'l', snapshot: 's',
+    payload: { state: { 任务目标: 'x' } },
+    diff: diff, chasedOwnChange: chased, chasedLine: chased ? 206 : null,
+    chasedNote: chased ? '（本行是上一步动作改动过的行）' : null,
+  });
+  const d = { ok: true, kind: 'local', changedInCur: [206], refRewritten: 0 };
+  const saved = AutoCore.buildRunRecord({
+    id: 'r', runCfg: { goal: 'x' }, steps: [mk(d, true), mk(null, false)],
+  });
+  assert.deepStrictEqual(saved.steps[0].diff, d, '必须落盘（只写面板的话，重新载入会话就没了）');
+  assert.strictEqual(saved.steps[0].chasedOwnChange, true);
+  assert.strictEqual(saved.steps[0].chasedLine, 206);
+  assert.strictEqual(saved.steps[1].diff, null, '没差分的步记 null，而不是 undefined');
+  assert.strictEqual(saved.steps[1].chasedOwnChange, false);
+
+  const back = AutoCore.hydrateRecord(saved).steps;
+  assert.deepStrictEqual(back[0].diff, d, '读回与落盘一致');
+  assert.strictEqual(back[0].chasedOwnChange, true);
+
+  const old = AutoCore.buildRunRecord({ id: 'r2', runCfg: { goal: 'x' }, steps: [{ n: 1 }] });
+  assert.strictEqual(old.steps[0].diff, null, '老记录不带这个字段 → null');
+  assert.strictEqual(old.steps[0].chasedOwnChange, false);
+});
+
+/* ---------- 单选项题：工程直出 100% 分布（不走 Jev） ----------
+ * 候选只剩一个时这一题的答案已经确定，发出去只有成本没有信息。
+ * 判定规则：type === 'choice' && criteria 恰 1 个键。 */
+
+const q = (type, criteria) => ({ type: type, instructions: 'i', criteria: criteria });
+
+test('splitSingleChoice：多题里只有「参数」是单候选 → 只剥那一题，其余原样留下', () => {
+  const questions = {
+    动作: q('choice', { click: 'a', fill: 'b' }),
+    参数: q('choice', { e5: '按钮「发货」' }),
+    未完成: q('score', ['0 · 已完成', '1 · 进行中']),
+  };
+  const r = AutoCore.splitSingleChoice(questions);
+  assert.deepStrictEqual(Object.keys(r.ask), ['动作', '未完成'], '「参数」不进发出的 payload');
+  assert.deepStrictEqual(r.keys, ['参数']);
+  assert.strictEqual(r.ask['动作'], questions['动作'], '未被剥的题按原对象透传，不复制不改写');
+  assert.strictEqual(r.ask['未完成'], questions['未完成']);
+  assert.strictEqual('参数' in r.ask, false);
+});
+
+test('splitSingleChoice：合成答案的形状 —— 100% 分布、带 local、不带 confidence', () => {
+  const r = AutoCore.splitSingleChoice({ 参数: q('choice', { e5: '按钮「发货」' }) });
+  assert.deepStrictEqual(r.local['参数'], {
+    type: 'choice', choice: 'e5', probabilities: { e5: 1 }, local: true,
+  });
+  assert.strictEqual('confidence' in r.local['参数'], false,
+    'confidence 的语义是「模型给的分布形状」，工程不给 —— 不给模型没给过的数');
+});
+
+test('splitSingleChoice：唯一候选是哨兵值（「其他」/「无」）时同样剥', () => {
+  const more = AutoCore.splitSingleChoice({ 参数: q('choice', { [AutoCore.REF_MORE]: '展开下一批' }) });
+  assert.strictEqual(more.local['参数'].choice, AutoCore.REF_MORE);
+  const none = AutoCore.splitSingleChoice({ 文本: q('choice', { [AutoCore.TEXT_NONE]: '本动作不带文本' }) });
+  assert.strictEqual(none.local['文本'].choice, AutoCore.TEXT_NONE);
+});
+
+test('splitSingleChoice：整份 payload 被剥空 → ask 题数为 0（调用方据此整请求不发）', () => {
+  const r = AutoCore.splitSingleChoice({ 参数: q('choice', { e5: '唯一元素' }) });
+  assert.deepStrictEqual(Object.keys(r.ask), [], '一道题都没剩下');
+  assert.deepStrictEqual(r.keys, ['参数']);
+});
+
+test('splitSingleChoice：score 题不参与 —— 即便量表只有 1 级也照发', () => {
+  const r = AutoCore.splitSingleChoice({ 未完成: q('score', ['0 · 已完成']) });
+  assert.deepStrictEqual(Object.keys(r.ask), ['未完成'], '量表级数不可退化成 1 项，规则只认 choice');
+  assert.deepStrictEqual(r.keys, []);
+});
+
+test('splitSingleChoice：零候选的题不剥（那不是「唯一」，是空题）', () => {
+  const r = AutoCore.splitSingleChoice({ 参数: q('choice', {}) });
+  assert.deepStrictEqual(Object.keys(r.ask), ['参数'], '空 criteria 保持原样，交给既有处理');
+  assert.deepStrictEqual(r.keys, []);
+});
+
+test('splitSingleChoice：不改动传进来的 questions（不可变）', () => {
+  const questions = {
+    动作: q('choice', { click: 'a', fill: 'b' }),
+    参数: q('choice', { e5: '唯一元素' }),
+  };
+  const before = JSON.stringify(questions);
+  const r = AutoCore.splitSingleChoice(questions);
+  assert.strictEqual(JSON.stringify(questions), before, '入参逐字节不变');
+  assert.notStrictEqual(r.ask, questions, 'ask 是新对象');
+  assert.strictEqual(r.ask['动作'], questions['动作'], '未剥的题共享引用（只读，不改）');
+});
+
+test('splitSingleChoice：多题都是单候选 → 全剥，keys 按题目顺序', () => {
+  const r = AutoCore.splitSingleChoice({
+    动作: q('choice', { click: 'a' }),
+    参数: q('choice', { e5: '唯一元素' }),
+  });
+  assert.deepStrictEqual(r.keys, ['动作', '参数']);
+  assert.deepStrictEqual(Object.keys(r.ask), []);
+  assert.strictEqual(r.local['动作'].choice, 'click');
+});
+
+/* 设计 §2 第 2 条的全部内容：合成答案与 Jev 作答**同构**，下游解析一行都不用改。
+ * 这是契约锁而不是「实现驱动的测试」：`splitSingleChoice` 的输出形状一旦被改
+ * （比如有人顺手把 probabilities 拿掉、或把 choice 换成别的字段名），
+ * 这几条会立刻红 —— 而线上表现会是一个安静的空决策（parseXxxAnswer 抛错、
+ * 或在 pickFromAnswer 那里静默召回 0 个）。 */
+test('合成答案能被各解析器原样消费（参数 / 文本 / 动作 / 整体决策）', () => {
+  const ref = AutoCore.splitSingleChoice({ 参数: q('choice', { e5: '按钮「发货」' }) }).local['参数'];
+  const text = AutoCore.splitSingleChoice({ 文本: q('choice', { 顺丰: '该下拉框的选项' }) }).local['文本'];
+  const act = AutoCore.splitSingleChoice({ 动作: q('choice', { select: '原生下拉框用 select' }) }).local['动作'];
+
+  assert.strictEqual(AutoCore.parseParamAnswer({ 参数: ref }), 'e5');
+  assert.strictEqual(AutoCore.parseTextAnswer({ 文本: text }), '顺丰');
+  assert.strictEqual(AutoCore.parseActionAnswer({ 动作: act }), 'select');
+
+  /* 整体决策：首轮的「参数」被工程直出、其余两题是真作答 —— parseDecision 照常吃 */
+  const d = AutoCore.parseDecision({
+    动作: { type: 'choice', choice: 'select', probabilities: { select: 0.9 }, confidence: 0.8 },
+    参数: ref,
+    未完成: { type: 'score', score: 1, probabilities: { 0: 0.15, 1: 0.85 } },
+  });
+  assert.strictEqual(d.action, 'select');
+  assert.strictEqual(d.param, 'e5');
+  assert.strictEqual(d.unfinished, 1, 'score / (SCORE_LEVELS - 1)');
+});
+
+/* 哨兵值的合成答案同样要能被归一路径消费：唯一候选是「其他」时
+ * resolveMoreBatches 靠 isRefMore 认它并展开下一批 —— 这条在真机上会走成
+ * 「本地连续推进、零 Jev 调用」（见设计 §4），所以它的判定必须照旧成立。 */
+test('合成答案选中哨兵值时，后续判定与真作答一致（isRefMore / TEXT_NONE）', () => {
+  const more = AutoCore.splitSingleChoice({ 参数: q('choice', { [AutoCore.REF_MORE]: '展开下一批' }) }).local['参数'];
+  assert.strictEqual(AutoCore.isRefMore(AutoCore.parseParamAnswer({ 参数: more })), true);
+  const none = AutoCore.splitSingleChoice({ 文本: q('choice', { [AutoCore.TEXT_NONE]: '本动作不带文本' }) }).local['文本'];
+  assert.strictEqual(AutoCore.parseTextAnswer({ 文本: none }), AutoCore.TEXT_NONE);
+  assert.strictEqual(AutoCore.resolveText(AutoCore.TEXT_NONE, []), null, '「无」解析成 null，不传文本');
+});
+
+test('splitSingleChoice：被剥的题按原对象带回来（面板要靠它的 criteria / instructions 渲染）', () => {
+  const questions = {
+    动作: q('choice', { click: 'a', fill: 'b' }),
+    文本: q('choice', { 顺丰: '该下拉框的选项' }),
+  };
+  const r = AutoCore.splitSingleChoice(questions);
+  assert.strictEqual(r.stripped['文本'], questions['文本'], '被剥的题原引用带回');
+  assert.deepStrictEqual(Object.keys(r.stripped), ['文本']);
+  assert.strictEqual('动作' in r.stripped, false, '没被剥的题不进 stripped');
+
+  /* `stripped`（题目）与 `local`（答案）**必须分开**：答案里没有 criteria / instructions，
+   * 面板把它当题目渲染时，`Object.keys(criteria)` 会当场抛
+   * 「Cannot convert undefined or null to object」，整个详情体空掉 ——
+   * E2E S11 实测到的就是这个（此前 localQuestions 接的是 local）。 */
+  assert.strictEqual(r.local['文本'].criteria, undefined, 'local 是答案，不含 criteria');
+  assert.ok(r.stripped['文本'].criteria, 'stripped 是题目，含 criteria');
+  assert.strictEqual(r.stripped['文本'].instructions, 'i');
+});
+
+/* ---------- 「文本」补问的候选来源不同，但判定只看候选数 ----------
+ * 文本题的候选分四路来：下拉框真实选项名（select）、变量池（fill / type / goto / upload，
+ * 以及 select 读不到名单时的兜底）、常用键名 ∪ 变量池（press）、标签页序号（tab-select /
+ * tab-close）。判定规则**只看候选数**，所以「变量池里恰好只有一个取值」同样走工程直出 ——
+ * 那是 Auto 面板的默认形态（出厂就带一个 关键词=招商银行），不是边角情形。 */
+
+test('文本补问：变量池只有 1 个取值 → 单选项，工程直出（整请求不发）', () => {
+  const vars = [{ name: '关键词', value: '招商银行' }];
+  const qs = AutoCore.buildTextFollowUp({ action: 'fill', param: 'e5', variables: vars });
+  assert.deepStrictEqual(Object.keys(qs['文本'].criteria), ['关键词'], '候选就是变量池');
+
+  const split = AutoCore.splitSingleChoice(qs);
+  assert.deepStrictEqual(Object.keys(split.ask), [], '一道题都没剩下 → 调用方整份请求都不发');
+  assert.strictEqual(split.local['文本'].choice, '关键词', '答案是变量**名**');
+  /* 变量名由 resolveText 在落定后解析成取值：合成答案必须走同一条路 */
+  assert.strictEqual(AutoCore.resolveText(split.local['文本'].choice, vars), '招商银行');
+});
+
+test('文本补问：变量池有 2 个取值 → 照旧问 Jev（单选项规则不过度扩张）', () => {
+  const qs = AutoCore.buildTextFollowUp({
+    action: 'fill', param: 'e5',
+    variables: [{ name: '甲', value: '1' }, { name: '乙', value: '2' }],
+  });
+  assert.deepStrictEqual(Object.keys(qs['文本'].criteria), ['甲', '乙']);
+  const split = AutoCore.splitSingleChoice(qs);
+  assert.deepStrictEqual(Object.keys(split.ask), ['文本'], '两个候选不是单选项，照发');
+  assert.deepStrictEqual(split.keys, []);
+});
+
+test('文本补问：press 的候选恒含常用键名，永远不会退化成单选项', () => {
+  const qs = AutoCore.buildTextFollowUp({ action: 'press', variables: [{ name: '键位', value: 'PageDown' }] });
+  assert.ok(Object.keys(qs['文本'].criteria).length > 1, '变量池 ∪ 常用键名，恒 > 1');
+  assert.deepStrictEqual(Object.keys(AutoCore.splitSingleChoice(qs).ask), ['文本']);
+});
+
+test('文本补问：可省文本的动作会多出「无」这一项，所以单选项不会误命中', () => {
+  /* tab-close 只有一个 Tab 时：{序号, 「无」} = 2 个候选 —— 模型仍要选「关掉还是关闭当前页」，
+   * 这不是确定答案，不该被剥。键序不属于契约，按集合断言。 */
+  const qs = AutoCore.buildTextFollowUp({
+    action: 'tab-close', tabs: [{ index: 0, current: true, title: 'A', url: 'http://a/' }],
+  });
+  const crit = Object.keys(qs['文本'].criteria);
+  assert.strictEqual(crit.length, 2, '序号 + 「无」');
+  assert.ok(crit.includes('0') && crit.includes(AutoCore.TEXT_NONE));
+  assert.deepStrictEqual(Object.keys(AutoCore.splitSingleChoice(qs).ask), ['文本']);
+});
+
+test('splitSingleChoice：空/缺参 → 空结果，不抛错', () => {
+  [undefined, null, {}].forEach((x) => {
+    const r = AutoCore.splitSingleChoice(x);
+    assert.deepStrictEqual(Object.keys(r.ask), []);
+    assert.deepStrictEqual(r.local, {});
+    assert.deepStrictEqual(r.keys, []);
+  });
+});
+
+/* ---------- 单选项题在行动视图与耗时对账里的接线 ----------
+ * 被直出的题没有发出去，所以：① 标题必须说「未调用 Jev」；② 耗时与调用次数都不能算它。
+ * 记录形状（live 与落盘同构）：
+ *   payload.questions = **实际发出的**那份（可能为空对象）；整请求没发时 payload 为 null
+ *   localQuestions    = 被工程直出的题（有它就代表本次有题没发出去）
+ *   local: true       = 整份请求都没发（只有补问会走到） */
+
+const LOCAL_PICK = {
+  kind: 'pick',
+  payload: null,                       /* 一道题都没发出去 */
+  local: true,
+  localQuestions: { 参数: { type: 'choice', criteria: { e5: '按钮「发货」' } } },
+  response: {
+    local: true,
+    answers: { 参数: { type: 'choice', choice: 'e5', probabilities: { e5: 1 }, local: true } },
+  },
+  param: 'e5', candidates: 1, ms: null, error: null,
+};
+
+test('actionsOf：整请求未发的补问 → local 行动，标题写明未调用 Jev', () => {
+  const acts = AutoCore.actionsOf({
+    n: 3, ms: 5000, jevMs: 1000,
+    payload: { questions: { 动作: {}, 参数: {} } }, response: { answers: {} },
+    followUps: [LOCAL_PICK],
+  });
+  const fu = acts.find((a) => a.kind === 'pick');
+  assert.strictEqual(fu.local, true);
+  assert.deepStrictEqual(Object.keys(fu.localQuestions), ['参数'], '被直出的题要留在记录里（面板要展示候选）');
+  assert.strictEqual(fu.title, '工程直出 · 1 题（单选项，未调用 Jev）');
+  assert.strictEqual(fu.ms, null, '没发出去就没有耗时，不是 0ms');
+});
+
+test('durationView：local 行动不占 Jev 调用次数与耗时', () => {
+  const d = AutoCore.durationView({
+    n: 3, ms: 5000, jevMs: 1000,
+    payload: { questions: { 动作: {}, 参数: {} } }, response: { answers: {} },
+    followUps: [LOCAL_PICK],
+  });
+  assert.strictEqual(d.jevCalls, 1, '只有首轮这一次是真调用');
+  assert.strictEqual(d.jevMs, 1000, 'local 的 ms 是 null，不该被当成 0 加进去');
+  assert.strictEqual(d.jevMeasured, 1);
+});
+
+test('actionsOf：首轮被剥掉「参数」→ 标题不得写成「动作 + 未完成」（那是超限页那条路线）', () => {
+  const acts = AutoCore.actionsOf({
+    n: 1, ms: 2000, jevMs: 2000,
+    payload: { questions: { 动作: {}, 未完成: {} } },
+    localQuestions: { 参数: { type: 'choice', criteria: { e5: '唯一元素' } } },
+    response: { answers: { 参数: { local: true }, 动作: { choice: 'click' } } },
+  });
+  const main = acts.find((a) => a.kind === 'main');
+  assert.strictEqual(main.title, 'Jev 首轮 · 2 题（其中 1 题工程直出）');
+  assert.doesNotMatch(main.title, /动作 \+ 未完成/,
+    '「参数交给并行召回」是另一条路线的措辞，剥掉一题后题数恰好也是 2 —— 不能撞上这条推断');
+  assert.deepStrictEqual(Object.keys(main.localQuestions), ['参数']);
+});
+
+test('actionsOf：没有直出时逐字节不变（旧记录不受影响）', () => {
+  const acts = AutoCore.actionsOf({
+    n: 2, ms: 1, jevMs: 1,
+    payload: { questions: { 动作: {}, 未完成: {} } }, response: {},
+  });
+  assert.strictEqual(acts[0].title, 'Jev 首轮 · 2 题（动作 + 未完成）', '超限页那条路线照旧');
+  assert.strictEqual(acts[0].local, false);
+  assert.strictEqual(acts[0].localQuestions, null);
+});
+
+test('durationView：local 的召回批不计入 calls（K 批里只有真发出去的要算）', () => {
+  const rec = {
+    n: 2, ms: 4000, jevMs: 2000,
+    payload: { questions: { 动作: {} } }, response: {},
+    recall: {
+      criteria: { e1: 'x' }, merged: { merged: 1 }, meta: { size: 5 },
+      batches: [
+        { batch: 1, size: 5, payload: { questions: {} }, response: {}, ms: 2000, error: null, recalled: ['e1'] },
+        { batch: 2, size: 1, payload: null, local: true, localQuestions: { 参数: {} },
+          response: { answers: { 参数: { choice: 'e9', local: true } } }, ms: null, error: null, recalled: ['e9'] },
+      ],
+    },
+  };
+  const d = AutoCore.durationView(rec);
+  assert.strictEqual(d.jevCalls, 2, '首轮 1 + 只有第 1 批真发出去');
+  assert.strictEqual(d.recallBatches, 1, '召回批次口径同源，否则悬停文案会撒谎');
+  assert.strictEqual(d.jevMs, 4000, '首轮 2000 + 第 1 批 2000；local 那批没有耗时，不是 0');
+  assert.strictEqual(AutoCore.actionsOf(rec).find((a) => a.kind === 'recall').calls, 1);
+});
+
+test('actionMetricsLine：工程直出的行动写「未调用 Jev」，不写「耗时 —」装作测过', () => {
+  assert.strictEqual(AutoCore.actionMetricsLine(LOCAL_PICK), '未调用 Jev（单选项 · 工程直出）');
+  assert.strictEqual(AutoCore.actionMetricsLine({ ms: 820, response: null }), '耗时 820ms',
+    '真调用照旧');
+});
+
+test('actionStatus：整请求未发的补问是 ok（拿到合成答案即落定），不是 pending', () => {
+  const acts = AutoCore.actionsOf({
+    n: 3, ms: 1, jevMs: 1,
+    payload: { questions: { 动作: {} } }, response: {},
+    followUps: [LOCAL_PICK],
+  });
+  assert.strictEqual(AutoCore.actionStatus(acts.find((a) => a.kind === 'pick')), 'ok');
+});
+
+test('buildRunRecord：local 的补问与召回批落盘带标记，且不计入 meta.jevCalls', () => {
+  const rec = AutoCore.buildRunRecord({
+    id: 'r-local', runCfg: { goal: 'g' }, startedAt: 't',
+    steps: [{
+      n: 1, ms: 4000, jevMs: 2000,
+      payload: { questions: { 动作: {} } }, response: {},
+      followUps: [LOCAL_PICK, { kind: 'text', payload: { questions: { 文本: {} } }, response: {}, ms: 500, text: 'x' }],
+      recall: {
+        criteria: { e1: 'x' }, merged: { merged: 1 }, meta: { size: 5 },
+        batches: [
+          { batch: 1, size: 5, payload: { questions: {} }, response: {}, ms: 1500, error: null, recalled: [] },
+          { batch: 2, size: 1, payload: null, local: true, localQuestions: { 参数: {} },
+            response: { answers: {} }, ms: null, error: null, recalled: [] },
+        ],
+      },
+    }],
+  });
+  const s = rec.steps[0];
+  assert.strictEqual(s.followUps[0].local, true, '整请求未发要落盘');
+  assert.deepStrictEqual(Object.keys(s.followUps[0].localQuestions), ['参数']);
+  assert.strictEqual(s.followUps[0].request, null, '没发出去的请求不落成 request（记录里不能有假请求）');
+  assert.strictEqual(s.followUps[1].local, false);
+  assert.strictEqual(s.recall.batches[1].local, true);
+  assert.strictEqual(s.recall.batches[1].request, null,
+    '没发出去的批次不落成 request（hydrateRecord 再把它归一成 payload）');
+  /* 首轮 1 + 文本补问 1 + 召回第 1 批 1 = 3；local 的两处都不算 */
+  assert.strictEqual(rec.meta.jevCalls, 3);
+});

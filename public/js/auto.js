@@ -1146,7 +1146,8 @@ const Auto = (() => {
       acts.forEach((a, i) => {
         /* 末个行动标 last：导轨截止到行中线，与父步骤形成肘形收口 */
         tree.appendChild(mk('a:' + st.n + ':' + i, 'act-kid' + (i === acts.length - 1 ? ' last' : '') + sel(view.type === 'action' && view.n === st.n && view.i === i),
-          '<span class="k ' + (a.kind === 'llm' ? 'llm' : 'jev') + '">' + (a.kind === 'llm' ? 'LLM' : 'JEV') + '</span>'
+          /* 徽标要说实话：被工程直出的那次**没有调 Jev**，挂「JEV」是假话（同详情头部的 fd-tag） */
+          '<span class="k ' + actionKindCls(a) + '">' + actionKindLabel(a) + '</span>'
           + '<span class="lb">' + escapeHtml(a.title) + '</span>'
           /* 每次调用各自的耗时（同属 Jev 耗时，只是拆到每次调用） */
           + '<span class="dur">' + escapeHtml(AutoCore.formatMs(a.ms)) + '</span>'
@@ -1198,9 +1199,12 @@ const Auto = (() => {
       /* 这次调用的耗时 + 输入/输出 token 直接写在头部（原本只埋在「原始报文」的 JSON 里，
        * 要展开长报文才能看到）。三种行动同构：首轮 / 补问走 Jev，生成输入走生成模型。 */
       const metrics = AutoCore.actionMetricsLine(a);
+      /* 钉在「工程直出」的行动上时不能再挂一个「Jev」标签 —— 那一次根本没调 Jev。
+       * 类名与树上/行动卡的徽标同源（actionKindCls），文案在这里更长一些 */
+      const tagLabel = a.kind === 'llm' ? '生成模型' : (a.local ? '工程直出' : 'Jev');
       head.innerHTML = '<span class="crumb">会话 ▸ 步骤 ' + st.n + ' ▸ 行动 ' + (view.i + 1) + '/' + acts.length + '</span>'
         + '<h2>' + escapeHtml(a.title) + '</h2>'
-        + '<span class="fd-tag ' + (a.kind === 'llm' ? 'llm' : 'jev') + '">' + (a.kind === 'llm' ? '生成模型' : 'Jev') + '</span>'
+        + '<span class="fd-tag ' + actionKindCls(a) + '">' + tagLabel + '</span>'
         + (metrics ? '<span class="fd-dur">' + escapeHtml(metrics) + '</span>' : '');
       body.innerHTML = actionViewHtml(st, a);
       animateBars(body);
@@ -1273,15 +1277,32 @@ const Auto = (() => {
     if (st.decision && st.response && !st.jevError) {
       html += '<div class="sec"><div class="sec-head">本轮输出 · 决策摘要</div>' + decisionSummaryHtml(st) + '</div>';
     }
-    /* 行动列表 */
+    /* 行动列表。计数口径也要说实话：被工程直出的那次**没有调模型**，
+     * 一起算进「次模型调用」是假话；没有直出时这一行逐字节不变（老记录与普通步骤不受影响）。 */
     const acts = AutoCore.actionsOf(st);
-    html += '<div class="sec-t">本步行动 · ' + acts.length + ' 次模型调用</div><div class="alist">'
+    const localN = acts.filter((a) => a.local).length;
+    const actsLine = (acts.length - localN) + ' 次模型调用'
+      + (localN ? ' + ' + localN + ' 次工程直出' : '');
+    html += '<div class="sec-t">本步行动 · ' + actsLine + '</div><div class="alist">'
       + acts.map((a, i) => '<button type="button" class="acard" data-go="a:' + st.n + ':' + i + '">'
-        + '<span class="k ' + (a.kind === 'llm' ? 'llm' : 'jev') + '">' + (a.kind === 'llm' ? 'LLM' : 'JEV') + '</span>'
+        + '<span class="k ' + actionKindCls(a) + '">' + actionKindLabel(a) + '</span>'
         + '<span class="t">' + escapeHtml(a.title) + '</span>'
         + '<span class="m">' + escapeHtml(actionBrief(a)) + ' ›</span></button>').join('')
       + '</div>';
     return html;
+  }
+
+  /* 行动种类徽标：三种来源分开。
+   *   llm    生成模型（生成输入）
+   *   local  工程直出（单选项，这一次**没有调 Jev**）—— 与详情头部的 .fd-tag.local 同一口径
+   *   jev    真调了 Jev
+   * 抽出来是因为它有两个容器（树上的 .tn 与行动卡的 .acard）都要用，
+   * 而两处各自写一遍正是徽标漂开的起点。 */
+  function actionKindCls(a) {
+    return a.kind === 'llm' ? 'llm' : (a.local ? 'local' : 'jev');
+  }
+  function actionKindLabel(a) {
+    return a.kind === 'llm' ? 'LLM' : (a.local ? '工程' : 'JEV');
   }
 
   function actionBrief(a) {
@@ -1313,8 +1334,9 @@ const Auto = (() => {
   function actionViewHtml(st, a) {
     if (a.kind === 'llm') return llmHtml(st);
     if (a.kind === 'main') {
+      const localNames = Object.keys(st.localQuestions || {});
       let html = '';
-      if (hasTrimNote(st) && st.payload && st.payload.questions && st.payload.questions['参数']) {
+      if (hasTrimNote(st) && (a.payload.questions['参数'] || localNames.indexOf('参数') >= 0)) {
         html += '<div class="trim-note">' + escapeHtml(trimSummary(st)) + '</div>';
       }
       /* 右侧一屏多块：输入/输出/原始报文各自成块带块头（.sec 面板），不再糊成一片 */
@@ -1323,11 +1345,14 @@ const Auto = (() => {
       }
       if (a.error) html += '<div class="step-err">' + escapeHtml(a.error) + '</div>';
       html += stateSectionHtml(a.payload.state, a);
-      html += questionsSectionHtml(a.payload, st);
+      html += questionsSectionHtml(displayQuestions(a.payload, st.localQuestions), st, { localNames: localNames });
       /* 超限页首轮不带「参数」：候选明细属于「并行召回」那个动作，不在这一格重复展示 */
       if (a.payload.questions && a.payload.questions['参数']) html += trimDetailHtml(st);
       html += '<div class="sec"><div class="sec-head">原始报文</div>'
-        + rawBlock('① 发送的请求体（与真实请求同一对象）', relaxedStringify(a.payload))
+        /* 被工程直出的题不在这个请求体里（它们没发出去）：说清楚是哪几道，
+         * 否则读记录的人会以为「参数」是漏写的 */
+        + rawBlock('① 发送的请求体（与真实请求同一对象）'
+          + (localNames.length ? '（不含 ' + localNames.join(' / ') + '：单选项，由工程直出，未发出）' : ''), relaxedStringify(a.payload))
         + (a.response
           ? rawBlock('② Jev 响应', JSON.stringify({ model: a.response.model, answers: a.response.answers, usage: a.response.usage, _latency_ms: a.response._latency_ms }, null, 2))
           : rawBlock('② Jev 响应', '（调用失败，无响应）'))
@@ -1383,15 +1408,21 @@ const Auto = (() => {
   /* 单张作答卡：题名 + 选中值 + 置信度 + 概率条。首轮网格与补问卡共用 ——
    * 补问单题响应里的 probabilities 此前只躺在裸 JSON 里没人解析。
    * stale=true：这张卡的概率分布**没有被采纳**（答案被归一剥掉 / 被后续行动改写），
-   * 视觉上压暗并标注原因，避免把「模型当时这么说」误读成「本步就是这么决策的」。 */
+   * 视觉上压暗并标注原因，避免把「模型当时这么说」误读成「本步就是这么决策的」。
+   * local=true（答案自带）：候选只有一个、由工程直接给出，**不是模型输出** —— 必须标出来，
+   * 否则那条 100% 的概率条看起来就像模型以极高把握做了判断（100% 的单点分布是最容易被
+   * 误读的形状）。它也没有 confidence：那个字段的语义是「模型给的分布形状」，工程不伪造。 */
   function choiceCardHtml(name, ans, chosenLabel, note, stale) {
     const x = ans || {};
+    const isLocal = Boolean(x.local);
     const chosen = chosenLabel != null ? chosenLabel : (x.choice != null ? String(x.choice) : '—');
-    return '<div class="qcard' + (stale ? ' stale' : '') + '">' +
+    return '<div class="qcard' + (stale ? ' stale' : '') + (isLocal ? ' local' : '') + '">' +
       '<div class="qcard-head"><span class="qcard-name">' + name + '</span>' +
+      (isLocal ? '<span class="qcard-local" title="该项只有一个候选，答案已确定：由工程直接给出，没有发给 Jev">工程直出</span>' : '') +
       '<span class="qcard-chosen">' + escapeHtml(chosen) + '</span>' +
       (typeof x.confidence === 'number' ? '<span class="qcard-conf">置信度 ' + pct(x.confidence) + '</span>' : '') + '</div>' +
       (x.probabilities ? barsHtml(x.probabilities, x.choice, Q_COLOR[name]) : '<div class="muted" style="font-size:12px">无概率数据</div>') +
+      (isLocal ? '<div class="muted" style="font-size:12px">单选项，由工程直接给出，未经模型判断</div>' : '') +
       (note ? '<div class="muted" style="font-size:12px">' + escapeHtml(note) + '</div>' : '') +
       '</div>';
   }
@@ -1447,8 +1478,12 @@ const Auto = (() => {
      * 说成「并行召回合并候选」，否则又是「面板与实际不符」 */
     const pickRec = (step.followUps || []).find((r) => r.kind === 'pick' && r.param);
     const pickFallback = Boolean(step.recall && step.recall.merged && step.recall.merged.fallback);
-    /* 本轮到底有没有问过「参数」：弹窗步与老记录（超限页首轮只问 2 题）都没有 */
-    const askedParam = Boolean(step.payload && step.payload.questions && step.payload.questions['参数']);
+    /* 本轮到底有没有拿到「参数」答案：弹窗步与老记录（超限页首轮只问 2 题）都没有。
+     * 被工程直出的单选项也算 —— 它只是没走网络，答案照样是本轮给的（payload 里没有它，
+     * 所以不能只看 payload.questions，否则这一格会把「工程直出」说成「本轮没有这题」） */
+    const askedParam = Boolean(
+      (step.payload && step.payload.questions && step.payload.questions['参数'])
+      || (a['参数'] && a['参数'].local));
     /* 动作被「动作补问」改过（checkActionRole 拦下后重问）：本轮分布说的是旧动作 */
     const actionRec = (step.followUps || []).filter((r) => r.kind === 'action' && r.action).slice(-1)[0];
     const rawParam = (a['参数'] && a['参数'].choice != null) ? String(a['参数'].choice) : null;
@@ -1555,6 +1590,12 @@ const Auto = (() => {
       '<div class="kv"><div class="kv-k">当前页面</div><div class="kv-v"><span class="mono-chip">' + escapeHtml(page.url || '') + '</span>' +
       (page['标题'] ? '<span class="page-title">' + escapeHtml(page['标题']) + '</span>' : '') + '</div></div>' +
       '<div class="kv"><div class="kv-k">上一步结果</div><div class="kv-v' + lastCls + '">' + escapeHtml(lastResult) + '</div></div>' +
+      /* 本步变化：只在真有变化时才有（与停滞提示同一条原则）。.kv-v 是 flex，\n 会塌掉，
+       * 必须换成 <br> 才看得见多行。 */
+      (state['本步变化']
+        ? '<div class="kv"><div class="kv-k">本步变化</div><div class="kv-v change-text">'
+          + escapeHtml(state['本步变化']).replace(/\n/g, '<br>') + '</div></div>'
+        : '') +
       /* 停滞提示只在检出重复 / 快照未变时才有 —— 常驻一行空占位反而让人以为它一直在报警 */
       (state['停滞提示']
         ? '<div class="kv"><div class="kv-k">停滞提示</div><div class="kv-v stall-text">' + escapeHtml(state['停滞提示']) + '</div></div>'
@@ -1601,8 +1642,22 @@ const Auto = (() => {
 
   /* 问题块：首轮与补问共用同一套渲染（payload 是「这一轮发出去的那份」）——
    * 补问只含一道题，标题就把题数写成 1。 */
-  function questionsSectionHtml(payload, step) {
+  /* 展示用的题目集合 = 真发出去的 + 被工程直出的。
+   * 「展示的就是发出的」这条原则说的是**不许假装发过**（所以 a.payload 只装真发的那份），
+   * 不是把没发的题藏起来 —— 藏起来反而读不懂那个答案是从哪几个候选里来的。
+   * 题名重复时以发出的那份为准（同名的题不可能一半发一半不发）。 */
+  function displayQuestions(payload, localQuestions) {
+    const qs = Object.assign({}, localQuestions || {}, (payload && payload.questions) || {});
+    if (!Object.keys(qs).length) return payload;
+    return Object.assign({}, payload || {}, { questions: qs });
+  }
+
+  /* opt.localNames：被工程直出的题名（这些题**没发出去**）。
+   * 全部题都在里面 = 这一块整份请求都没发，标题要标注；只一部分 = 只在该题的块头标，
+   * 因为同一块里其余题是真问过 Jev 的。 */
+  function questionsSectionHtml(payload, step, opt) {
     const qs = (payload && payload.questions) || {};
+    const localNames = (opt && opt.localNames) || [];
     const ORDER = ['动作', '参数', '文本', '未完成'];   // 首轮 3 道（文本已移入补问）；弹窗步只有「动作」1 道
     const meta = {
       动作: Object.keys(qs['动作'] && qs['动作'].criteria || {}).length + ' 个候选',
@@ -1611,11 +1666,16 @@ const Auto = (() => {
       未完成: ((qs['未完成'] && qs['未完成'].criteria || []).length || AutoCore.SCORE_LEVELS) + ' 级分值',
     };
     const present = ORDER.filter((name) => qs[name]);
-    let html = '<div class="sec"><div class="sec-head">本轮输入 · ' + present.length + ' 道问题</div><div class="qlist">';
+    const allLocal = present.length > 0 && present.every((n) => localNames.indexOf(n) >= 0);
+    let html = '<div class="sec"><div class="sec-head">本轮输入 · ' + present.length + ' 道问题'
+      + (allLocal ? '（单选项 · 工程直出 · 未调用 Jev）' : '') + '</div><div class="qlist">';
     present.forEach((name) => {
       const q = qs[name];
       html += '<div class="qblock">' +
         '<div class="qblock-head"><span class="qblock-name">' + name + '</span>' +
+        (localNames.indexOf(name) >= 0
+          ? '<span class="qblock-local" title="该项只有一个候选，答案已确定：由工程直接给出，这道题没有发给 Jev">工程直出</span>'
+          : '') +
         '<span class="type-badge">' + escapeHtml(q.type || '') + '</span>' +
         '<span class="qblock-meta">' + escapeHtml(meta[name] || '') + '</span></div>' +
         (q.instructions ? '<div class="qblock-inst" title="' + escapeHtml(q.instructions) + '">' + escapeHtml(q.instructions) + '</div>' : '') +
@@ -1707,10 +1767,14 @@ const Auto = (() => {
         ? (a.text ? '已选定 ' + a.text : (a.error ? '失败：' + a.error : '未返回'))
         : (a.param ? '命中 ' + a.param : (a.error ? '失败：' + a.error : '未命中'));
     const ans = (a.response && a.response.answers && a.response.answers[qname]) || null;
+    /* 整份请求没发出去（候选只有一个，工程直出）：payload 是 null（记录里不许有假请求），
+     * 题目从 localQuestions 取 —— 那一题的候选与 instructions 仍要看得到 */
+    const local = Boolean(a.local);
+    const localNames = Object.keys(a.localQuestions || {});
 
     let html = '<div class="fu-hit' + (a.error ? ' bad' : (settled ? '' : ' pend')) + '">' + escapeHtml(hit) + '</div>';
     /* 不重复 state：补问发的是与本步首轮同一份 state */
-    html += questionsSectionHtml(a.payload, st);
+    html += questionsSectionHtml(displayQuestions(a.payload, a.localQuestions), st, { localNames: localNames });
     if (ans) {
       html += '<div class="sec"><div class="sec-head">本轮输出 · 作答与概率分布</div><div class="qgrid">'
         + choiceCardHtml(qname, ans, a.kind === 'param' && a.param ? refChipLabel(a.param, st.refLabels)
@@ -1720,10 +1784,13 @@ const Auto = (() => {
     if (a.error) html += '<div class="step-err">' + escapeHtml(a.error) + '</div>';
     html += '<div class="sec"><div class="sec-head">原始报文</div>' +
       '<details class="req-details" data-dk="' + dk + '"' + (settled ? '' : ' open') + '>' +
-      '<summary>① 发送的请求体（仅「' + escapeHtml(qname) + '」一题）· ② Jev 响应</summary>' +
+      '<summary>' + (local ? '未调用 Jev（单选项 · 工程直出）· 合成答案'
+        : '① 发送的请求体（仅「' + escapeHtml(qname) + '」一题）· ② Jev 响应') + '</summary>' +
       '<div class="req-inner">' +
-      rawBlock('① 发送的请求体', relaxedStringify(a.payload || null)) +
-      rawBlock('② Jev 响应', a.response ? JSON.stringify(a.response, null, 2) : '（调用失败，无响应）') +
+      rawBlock(local ? '① 未发出（候选只有一个，答案已确定）' : '① 发送的请求体',
+        relaxedStringify(a.payload || null)) +
+      rawBlock('② ' + (local ? '合成答案（工程给出，非模型输出）' : 'Jev 响应'),
+        a.response ? JSON.stringify(a.response, null, 2) : '（调用失败，无响应）') +
       '</div></details></div>';
     return html;
   }
@@ -1762,21 +1829,28 @@ const Auto = (() => {
     html += '<div class="sec"><div class="sec-head">召回明细 · ' + bs.length + ' 批（每批前 ' + topN + ' 个进最终候选）</div>';
     bs.forEach((b) => {
       const ans = (b.response && b.response.answers && b.response.answers['参数']) || null;
+      const local = Boolean(b.local);
       const one = b.error ? '失败：' + b.error
         : !b.response ? '请求中…'
-          : (b.recalled || []).length ? '召回 ' + b.recalled.length + ' 个' : '本批无召回';
-      html += '<details class="step-collapse"' + (b.error ? ' open' : '') + '>' +
+          : local ? '单选项 · 工程直出（未调用 Jev）'
+            : (b.recalled || []).length ? '召回 ' + b.recalled.length + ' 个' : '本批无召回';
+      html += '<details class="step-collapse"' + (b.error || local ? ' open' : '') + '>' +
         '<summary>第 ' + b.batch + '/' + bs.length + ' 批 · ' + b.size + ' 个候选 · ' + escapeHtml(one)
         + (b.ms != null ? ' · ' + AutoCore.formatMs(b.ms) : '') + '</summary>' +
         '<div class="req-inner">';
       if (ans) {
-        html += choiceCardHtml('参数', ans, null, '本批内归一，只用于召回排序（按概率取前 ' + topN + ' 个）');
+        /* 单候选批的概率分布不是模型给的：`本批内归一` 那句是给真作答写的，换掉 */
+        html += choiceCardHtml('参数', ans, null, local
+          ? '本批只有 1 个候选，答案已确定 —— 由工程直接给出，未经模型判断'
+          : '本批内归一，只用于召回排序（按概率取前 ' + topN + ' 个）');
         if ((b.recalled || []).length) html += refRows(b.recalled);
       } else if (b.error) {
         html += '<div class="step-err">' + escapeHtml(b.error) + '</div>';
       }
-      html += rawBlock('① 发送的请求体（仅「参数」一题）', relaxedStringify(b.payload || null))
-        + rawBlock('② Jev 响应', b.response ? JSON.stringify(b.response, null, 2) : '（调用失败，无响应）')
+      html += rawBlock(local ? '① 未发出（单选项 · 工程直出）' : '① 发送的请求体（仅「参数」一题）',
+        relaxedStringify(b.payload || null))
+        + rawBlock('② ' + (local ? '合成答案（工程给出，非模型输出）' : 'Jev 响应'),
+          b.response ? JSON.stringify(b.response, null, 2) : '（调用失败，无响应）')
         + '</div></details>';
     });
     html += '</div>';
@@ -1955,21 +2029,73 @@ const Auto = (() => {
     }
   }
 
+  /* ---------- 单选项题：工程直出，不走 Jev ----------
+   * 候选只剩一个的 choice 题，答案已经确定（判定规则与理由见
+   * auto-core.splitSingleChoice 的注释）。这里把它从**发出去的 payload 里剥掉**，
+   * 合成一份与 Jev 作答同构的答案（带 local 标记）。
+   *
+   * 三个调用点（首轮 / 并行召回 K 批 / 四路补问）共用 prepareAsk：
+   * 调用方负责把 payload 先挂到记录上（飞行中要看得见发的是哪份题），再 await send()。
+   *   payload        实际发出的请求体；null = 整份请求都没发（补问只剩一道单选项时会这样）
+   *   local          true = 整份请求都没发
+   *   localQuestions 被工程直出的**题目**（题名 → 原题，带 criteria / instructions）——
+   *                  面板的问题块要靠它列候选，`split.local` 是答案、没有这些字段，别混用
+   * send() 返回 {ok, data, ms, error}：整请求没发时 ms 为 **null**（不是 0 ——
+   * 0 是「测到了，就是 0ms」，与「根本没发」必须能分辨，落盘与耗时对账都按这条）。 */
+  function localOnlyResponse(localAnswers) {
+    /* 整份请求都没发：这里没有模型参与，所以**不伪造 model 字段** —— 假的模型名
+     * 会让人以为真问过一次 */
+    return { local: true, answers: localAnswers };
+  }
+
+  /* Jev 调用 + 把本地合成答案并回 answers（每题自带 local: true，展示层据此标来源） */
+  async function callJevWithLocal(payload, localAnswers) {
+    const r = await callJev(payload);
+    if (!r.ok) return r;
+    return {
+      ok: true, ms: r.ms,
+      data: Object.assign({}, r.data, {
+        answers: Object.assign({}, r.data.answers, localAnswers),
+      }),
+    };
+  }
+
+  function prepareAsk(state, questions) {
+    const split = AutoCore.splitSingleChoice(questions);
+    const asked = Object.keys(split.ask).length > 0;
+    /* 展示的就是发出的：questions 存**剥后**那份，被剥掉的题挂在 localQuestions 上 */
+    const payload = asked ? { state: state, model: Config.current.model, questions: split.ask } : null;
+    return {
+      payload: payload,
+      local: !asked,
+      /* 给展示层的是**题目**（criteria / instructions），不是合成答案 —— 答案在 response.answers 里 */
+      localQuestions: Object.keys(split.stripped).length ? split.stripped : null,
+      send: function () {
+        return asked ? callJevWithLocal(payload, split.local)
+          : Promise.resolve({ ok: true, ms: null, data: localOnlyResponse(split.local) });
+      },
+    };
+  }
+
   /* ---------- 追问的公共骨架 ----------
    * 三处补问（参数批次 / 动作冲突 / 文本）走的是同一套流程：建请求 → 记一条 followUps
    * → 发 → 校验答案落在候选里 → 交给各自的 apply 落定。此前三处各写一遍这 12 行，
    * 连「Jev 返回了不在候选里的…」都在各自漂移；现在只有这一份。
    * opt = { qname 题名（同时是 rec 上要校验的那道题）, noun 报错里的名词（缺省同 qname）,
-   *         parse 从 answers 取答案, apply 落定并返回是否成功 } */
+   *         parse 从 answers 取答案, apply 落定并返回是否成功 }
+   * 单选项题（补问恒为单题，所以就是「该题只有一个候选」）在 prepareAsk 里被剥掉，
+   * 整份请求都不发 —— 这条路上的 rec 会带 local: true 与 localQuestions。 */
   function parseErrText(e) { return (e && e.message) || String(e); }
 
   async function askFollowUp(step, rec, questions, opt) {
-    const payload = { state: step.payload.state, model: Config.current.model, questions };
-    rec.payload = payload;
+    const prep = prepareAsk(step.payload.state, questions);
+    rec.payload = prep.payload;
+    rec.local = prep.local;
+    rec.localQuestions = prep.localQuestions;
     step.followUps.push(rec);
     touch();
 
-    const jev = await callJev(payload);
+    const jev = await prep.send();
     rec.ms = jev.ms;
     if (!jev.ok) { rec.error = jev.error; return false; }
     rec.response = jev.data;
@@ -2008,20 +2134,21 @@ const Auto = (() => {
     };
     step.recall = rec;
 
-    /* 先把 K 份 payload 全部建好再并发发出去：每份都是「步骤卡里展示的那个对象」本身 */
+    /* 先把 K 份 payload 全部建好再并发发出去：每份都是「步骤卡里展示的那个对象」本身。
+     * 单 ref 的批次在这里被剥成工程直出（整批不发）—— 该批的候选与合成答案照旧进
+     * rec.batches，mergeRecall 对「真作答」与「合成作答」一视同仁。 */
     rec.batches = plan.batches.map((b) => ({
       batch: b.index, size: b.refs.length,
       payload: null, response: null, ms: null, error: null, recalled: [],
+      local: false, localQuestions: null,
     }));
     touch();
     await Promise.all(plan.batches.map((b, i) => {
-      const payload = {
-        state,
-        model: Config.current.model,
-        questions: AutoCore.buildRecallQuestions(plan, i + 1),
-      };
-      rec.batches[i].payload = payload;
-      return callJev(payload).then((r) => {
+      const prep = prepareAsk(state, AutoCore.buildRecallQuestions(plan, i + 1));
+      rec.batches[i].payload = prep.payload;
+      rec.batches[i].local = prep.local;
+      rec.batches[i].localQuestions = prep.localQuestions;
+      return prep.send().then((r) => {
         rec.batches[i].ms = r.ms;
         if (r.ok) rec.batches[i].response = r.data;
         else rec.batches[i].error = r.error;
@@ -2625,6 +2752,22 @@ const Auto = (() => {
         });
         snapText = snapTrim.text;
       }
+      /* ①c 与上一步**看到的**快照做差分（纯本地计算，零浏览器往返）。
+       * 位置与裁剪同理：必须在 buildState / detectStall / 回执之前，且基于**裁后**的 snapText
+       * —— 两侧只有落在同一裁剪空间里才有可比性（档位不同会产生成百行假差异，
+       * 会被误判成「整页替换」；而最需要这一步的密集页恰好会被裁）。 */
+      const prevStep = steps.length ? steps[steps.length - 1] : null;
+      const prevTrim = prevStep && prevStep.snapshotTrim;
+      const curTrim = snapTrim && snapTrim.meta;
+      const diffReliable = (!prevTrim !== !curTrim) ? false
+        : (!prevTrim || (prevTrim.rungs || []).join('>') === (curTrim.rungs || []).join('>'));
+      const stepDiff = (dialogMode || !prevStep) ? null : SnapshotDiff.diff({
+        prev: prevStep.snapshot,
+        cur: snapText,
+        goal: runCfg.goal,
+        actedRef: prevStep.decision && prevStep.decision.param,
+        reliable: diffReliable,
+      });
       /* ② 当前页信息 + 全部标签页（工程自动执行；弹窗期间 tab-list 同样可能被拒，
        * 复用上一步的页面信息）。tabs 会让 state 多出「标签页」字段 —— target=_blank
        * 的点击会开新 Tab 而快照不变，没有这个字段模型只会原地反复点（实测事故） */
@@ -2672,11 +2815,25 @@ const Auto = (() => {
       const stall = dialogMode
         ? { notice: null }
         : AutoCore.detectStall(steps, snapText, runCfg.variables);
+      /* 效果回执：把「上一步结果」从光秃秃的「成功」升级成一句**观测**（改了哪一行、旧原文 → 新原文）。
+       * 必须落在模型唯一信任的那个字段里 —— 另开字段会被当背景噪音（实测反例 r-0929-0847-jwac：
+       * 停滞提示说「你在原地打转」，这个字段说「成功」，模型信了后者，一直点到第 10 步）。
+       * 只陈述观测：不写「是同一个元素」、不写「因为你点了」—— 解释权归模型，原文对里带着新旧两个
+       * ref，模型自己就能把旧 ref 和「已完成步骤」那一行接上。
+       * 下列情形一个字都不能说「没变化」（结果不体现在 a11y 快照里，说了就是假话、会让模型重试）：
+       * 滚动键 / hover、标签页数量变了（tabNote 自己会说）、用户跳过、弹窗步。 */
+      const quietDiff = dialogMode
+        || Boolean(tabNote)
+        || Boolean(prevStep && prevStep.exec && prevStep.exec.skipped)
+        || Boolean(prevStep && prevStep.decision
+             && AutoCore.isOpaqueAction(prevStep.decision, runCfg.variables));
+      const receipt = SnapshotDiff.receipt({ base: lastResult, diff: quietDiff ? null : stepDiff });
+      const lastChange = (!quietDiff && stepDiff && stepDiff.reliable) ? stepDiff.digest : '';
       const state = AutoCore.buildState({
         goal: runCfg.goal, url: pageInfo.url, title: pageInfo.title,
-        history, lastResult: tabNote ? (lastResult + '\n' + tabNote) : lastResult,
+        history, lastResult: tabNote ? (receipt + '\n' + tabNote) : receipt,
         snapshot: snapText, tabs: pageInfo.tabs,
-        stallNotice: stall.notice,
+        stallNotice: stall.notice, lastChange: lastChange,
       });
       /* 本步的候选算法路线（「高级参数」里选，默认并行召回）：
        *   parallel —— 首轮仍是三道题，「参数」候选只给**本页前 size 个元素**；动作确定后
@@ -2698,6 +2855,13 @@ const Auto = (() => {
          * 弹窗步写 null：那时的「快照」是常量说明文本（DIALOG_SNAPSHOT_NOTE），
          * 说成「本步新取」是假话（取是取了，取失败了）。 */
         snapshotFrom: dialogMode ? null : (snap.fromAction ? 'action' : 'fresh'),
+        /* 本步与上一步看到的快照之间的差分（见 snapshot-diff.js）。在字面量里就赋值，
+         * 而不是等 ⑤b —— 这样 Jev 调用失败 / 解析失败的步也留下了「它看到了什么」的证据，
+         * 而那恰恰是最需要回看的一步。 */
+        diff: stepDiff,
+        /* 「本步要操作的那一行，正是上一步动作改动过的行」—— 参数经归一 / 召回 / 补问之后
+         * 才算最终值，所以只能定在 ⑨ 执行之前（见那边）。它只用于重复检测，不写进回执。 */
+        chasedOwnChange: false, chasedLine: null, chasedNote: null,
       };
       steps.push(step);
       touch();   /* 主调用期间树即出现本步 'run' 脉冲骨架，与状态条同步 */
@@ -2722,13 +2886,16 @@ const Auto = (() => {
         });
         questions = AutoCore.buildQuestions({ snapshot: snapText, param });
       }
-      const payload = { state, model: Config.current.model, questions };
-      /* 主调用是「真实的这一次」：payload 落到 step 上（可见性：展示的就是发出的） */
-      step.payload = payload;
+      /* 主调用是「真实的这一次」：payload 落到 step 上（可见性：展示的就是发出的）。
+       * 单选项题（「参数」候选只剩 1 个）在这里被剥出去由工程直出 —— 首轮的「动作」题
+       * 恒 ≥2 个候选，所以首轮永远会发请求，只是可能少问一题。 */
+      const prep = prepareAsk(state, questions);
+      step.payload = prep.payload;
+      step.localQuestions = prep.localQuestions;
       step.trim = param.meta;
       touch();
 
-      const jev = await callJev(payload);
+      const jev = await prep.send();
       step.jevMs = jev.ms;
       if (!jev.ok) {
         step.jevError = jev.error;
@@ -2917,6 +3084,20 @@ const Auto = (() => {
         await takeShot(step, 'step-' + n, assignRef(step.decision, refLabels));
       }
 
+      /* ⑧b 本步要操作的那一行，是否正是**上一步动作改动过的那一行**？
+       * 只能定在这里：参数经过归一 / 召回 / 补问之后才算最终值。
+       * 这一条是重复检测的关键 —— 元素改了名 playwright 就重发 ref，未归约的指纹会把
+       * 六次点同一个按钮记成六个不同动作（实测 r-0929-1918-7yw4 第 5~10 步）。
+       * 它只喂 decisionSig 的哨兵与 detectStall 的第三类计数，**不写进回执**（回执只陈述观测）。 */
+      if (stepDiff && stepDiff.reliable && step.decision
+          && AutoCore.isRefParam(step.decision.param, refLabels)) {
+        const line = SnapshotDiff.lineOfRef(step.snapshot, step.decision.param);
+        if (line !== null && SnapshotDiff.isChanged(stepDiff, line)) {
+          step.chasedOwnChange = true;
+          step.chasedLine = line;
+          step.chasedNote = '（本行是上一步动作改动过的行）';
+        }
+      }
       /* ⑨ 执行 */
       if (step.decision && !step.exhausted) {
         await executeDecision(step, step.decision, refLabels);
@@ -2939,7 +3120,7 @@ const Auto = (() => {
       }
 
       /* ⑩ 历史与失败计数 */
-      step.historyLine = AutoCore.formatHistoryStep(n, step.label, ok, step.exec && step.exec.error);
+      step.historyLine = AutoCore.formatHistoryStep(n, step.label, ok, step.exec && step.exec.error, step.chasedNote);
       history.push(step.historyLine);
       lastResult = ok
         ? (step.generatedText ? '成功（生成并填入：' + step.generatedText.slice(0, 60) + '）' : '成功')
