@@ -16,6 +16,7 @@
  *   S8 外层就地编辑 + 错误条（可选中/可复制/可收起）
  *   S9 UX 不变量（空态文案 / 检查条 / 关闭按钮可点性等，不跑任务）
  *   S10 开跑后先暂停（人工登录 / 接管）—— 门内零 Jev 请求、继续后照跑、门内可中止
+ *   S11 单选项题 · 工程直出（下拉框只有一个选项 → 「文本」补问整份请求不发，面板标注来源）
  * 运行：node tests/e2e/run.js   （或 npm run test:e2e）
  */
 'use strict';
@@ -177,14 +178,20 @@ async function clickTreeNode(re) {
     + "return new Promise(function(res){requestAnimationFrame(function(){requestAnimationFrame(function(){res({ok:true})})})})})()");
 }
 
-/* 详情区结构化取值：结论行 / 问题块 / 候选 / 作答卡 / 概率条 */
+/* 详情区结构化取值：结论行 / 问题块 / 候选 / 作答卡 / 概率条 / 来源角标 */
 async function detailProbe() {
   return uiProbe("(function(){var q=function(s){return Array.prototype.map.call("
     + "document.querySelectorAll(s),function(n){return n.textContent.trim()})};return {"
     + "head:(document.getElementById('fdHead')||{}).textContent||'',"
     + "secHeads:q('.sec-head'),qNames:q('.qblock-name'),qMeta:q('.qblock-meta'),"
     + "chips:q('.crit-chip'),cardNames:q('.qcard-name'),conf:q('.qcard-conf'),"
-    + "bars:q('.bar-row .bar-label'),verdict:q('.fu-hit')}})()");
+    + "bars:q('.bar-row .bar-label'),verdict:q('.fu-hit'),"
+    /* .sec-t 是步骤视图里的分节小标题（如「本步行动 · N 次模型调用」）——
+     * 计数口径的断言面在这里，不在 .sec-head 上 */
+    + "secTs:q('.sec-t'),"
+    /* 「工程直出」的两个角标分开取：题块上的（这一题没发出去）与作答卡上的（答案不是模型给的）。
+     * 合成一处会分不清是哪一层漏标了 */
+    + "localBlocks:q('.qblock-local'),localBadges:q('.qcard-local')}})()");
 }
 
 /* 驱动页的截图工件落在 data/<session>.png，会话名由请求方 IP 哈希而来 —— 测试不去复刻
@@ -340,9 +347,17 @@ async function configureMock(sysonePort, llmPort) {
   await fillLabel(/"API Key"/, 'e2e-mock-key');
   await fillLabel(/"自定义模型名"/, 'jev-latest');
   /* 生成模型槽位是可折叠分节（默认收起）：不展开的话里面的输入框不在无障碍树里，
-   * fillLabel 会直接报「找不到控件」。点一下标题行展开 —— 也顺便验了这条交互路径。 */
-  await clickLabel(/生成模型/);
-  await sleep(400);
+   * fillLabel 会直接报「找不到控件」。
+   * 用页内 .click() 而不是 clickLabel：这一节的标题是 <summary>，走「按 ref 的坐标点击」
+   * 时**只拿到焦点、不触发 toggle** —— 实测两次逐字节相同的失败：快照里它带着 [active]
+   * 却仍是 ▸ 收起态（`test:e2e` 从那一刻起就再也走不完，e2e-result.md 因此一直停在旧的成功记录上）。
+   * 同 S10 那个勾选框的先例：标题有唯一 id，页内点不依赖坐标与动画时序。
+   * 并**当场断言真的展开了** —— 失败要停在这里说清，别让它伪装成后面那句「找不到控件」。 */
+  const slotOpened = await uiProbe("(function(){var d=document.getElementById('cfgLlmSlot');"
+    + "if(!d)return {ok:false,why:'页面上没有 cfgLlmSlot'};var s=d.querySelector('summary');"
+    + "if(s&&!d.open)s.click();return {ok:!!d.open,why:d.open?'':'点了仍收着'}})()");
+  if (!slotOpened.ok) throw new Error('「生成模型」分节未能展开：' + slotOpened.why);
+  await sleep(300);
   await fillLabel(/"Base URL"/, 'http://127.0.0.1:' + llmPort + '/v1');
   await fillLabel(/"API Key"/, 'mock-llm-key', 1);        /* 第二个 API Key = 生成模型槽位 */
   await fillLabel(/"模型名"/, 'mock-llm');                /* 生成模型名 */
@@ -363,8 +378,15 @@ async function configureMock(sysonePort, llmPort) {
   fs.mkdirSync(EVID_DIR, { recursive: true });
   const mocks = UPSTREAM === 'mock' ? await startMocks() : null;
 
-  /* 打开 playground */
-  const opened = await driver.open(UI, ORIGIN, { browser: BROWSER });
+  /* 打开 playground。
+   * **必须显式 backend: 'cli'**：本文件整套页内探针通道（rawExec / evalInPage / pageApi /
+   * uiProbe）都是 spawn playwright-cli 做的，需要一个 CLI 会话；而 driver.open 的默认后端
+   * 已是进程内（browser-driver.js 的 DEFAULT_BACKEND = 'inproc'），于是 CLI 侧没有 e2eui
+   * 这个会话 —— 表现为「The browser 'e2eui' is not open, please run open first」，
+   * 本套件从那一刻起一步都跑不动（e2e-result.md 因此一直停在旧的成功记录上）。
+   * 只钉**驱动 playground 的这个会话**：Auto 循环用的任务浏览器仍走 server 自己的后端，
+   * 这条改动不影响被测对象。 */
+  const opened = await driver.open(UI, ORIGIN, { browser: BROWSER, backend: 'cli' });
   if (!opened.ok) throw new Error('打开 playground 失败：' + opened.error);
   /* 实际内核可能与请求的不同（driver 在首选内核启动失败时会静默换另一个），先亮出来 */
   console.log('内核：' + opened.browser);
@@ -748,20 +770,27 @@ async function configureMock(sysonePort, llmPort) {
      * 「当前没有开着的浏览器（无需关闭）」—— 用户反而失去了唯一的关闭入口。
      * 现在按钮保持可点，靠服务端（A1 的 closed:false）说真话。
      * 注：这条隐含要求「空闲时可点」；将来若真做了准确探测再禁用，要同步改成
-     * 断言 disabled + title 的文案。 */
+     * 断言 disabled + title 的文案。
+     * ⚠️ 读 toast 必须**轮询**，不能写死等待：这个 onclick 是 async 的
+     * （`await apiJson('/api/browser/close')` 之后才 `toast(...)`），而 util.js 的 toast()
+     * 只加 .show、2200ms 后移除、**从不清 textContent** —— 读早了拿到的是上一条动作留下的
+     * 文案。全量跑时真的红过一次（2026-09-30）：详情里 谎报=false、真话=false、
+     * toast 还是「已填入「邮箱收件箱」场景」—— 按钮没说谎，是那次 HTTP 往返超过了 1s。
+     * 单跑 S9 时同一段代码 20/20 通过，所以这条是窗口竞态而不是功能缺陷。 */
     const s9g = await uiProbe("(function(){"
       + "var b=document.getElementById('autoCloseBrowser');"
       + "var t=document.getElementById('toast');"
       + "if(!b)return {错误:'按钮不存在'};"
       + "b.click();"
-      + "return new Promise(function(res){setTimeout(function(){"
-      + "var txt=(t?t.textContent:'')||'';"
-      + "res({禁用:b.disabled,toast:txt,标题:b.title||'',"
-      + "谎报:txt.indexOf('浏览器已关闭')!==-1,"
-      + "真话:txt.indexOf('没有开着')!==-1||txt.indexOf('无需关闭')!==-1})},1000)})})()");
+      + "return new Promise(function(res){var n=0;"
+      + "var tick=function(){var txt=(t?t.textContent:'')||'';"
+      + "var 真话=txt.indexOf('没有开着')!==-1||txt.indexOf('无需关闭')!==-1;"
+      + "var 谎报=txt.indexOf('浏览器已关闭')!==-1;n++;"
+      + "if(真话||谎报||n>=40)return res({禁用:b.disabled,toast:txt,标题:b.title||'',谎报:谎报,真话:真话,轮次:n});"
+      + "setTimeout(tick,100)};tick()})})()");
     record('S9.10 空闲时点「关闭浏览器」不谎报「已关闭」（服务端说真话）',
       s9g.真话 && !s9g.谎报,
-      '禁用=' + s9g.禁用 + '；toast=「' + s9g.toast + '」');
+      '禁用=' + s9g.禁用 + '；toast=「' + s9g.toast + '」（第 ' + s9g.轮次 + ' 拍读到）');
 
     /* 收尾：删掉本块的合成记录，不给真实 data/runs 留垃圾；
      * 并把模式留在 auto —— S1 就在 auto 模式下开工。 */
@@ -1204,6 +1233,96 @@ async function configureMock(sysonePort, llmPort) {
       !gateSeen && early >= 2 && r3.state === 'done',
       '门出现=' + gateSeen + '；8s 内 Jev 请求=' + early + '（≥2 即证明已进循环）；终止 state=' + r3.state);
   } catch (e) { record('S10 开跑后先暂停', false, e.message); }
+
+  /* ---------- S11 单选项题 · 工程直出（不留一次 Jev 调用） ----------
+   * 夹具页的下拉框只有一个选项 → 「文本」补问只剩 1 个候选，答案已经确定：前端应把它剥成
+   * 「工程直出」，**整份请求都不发**（见 auto.js 的 prepareAsk / auto-core 的 splitSingleChoice）。
+   * 这是唯一能让真实页面命中单选项的形态 —— 别再去找「只有一个可交互元素」的页面：
+   * 「参数」候选是快照里的**全部** ref，而 playwright 会给 generic / main / heading 这类容器
+   * 也发 ref，所以那种页面照样有一堆候选。
+   * 断言五件事：
+   *   ① 树上出现「工程直出 · 1 题（单选项，未调用 Jev）」这个行动；
+   *   ② 该行动的问题块与作答卡各有一个「工程直出」角标；
+   *   ③ 作答卡没有置信度（confidence 是「模型给的分布形状」，工程不伪造）；
+   *   ④ 行动详情头部写「未调用 Jev（单选项 · 工程直出）」；
+   *   ⑤ mock 侧**一个文本补问请求都没收到**，整轮只有 2 次调用（select 步 + 终止步）。
+   * 第 ⑤ 条是这条场景的核心：前四条都能被「发了请求再假装是工程给的」骗过去。
+   * 单独调试：E2E_ONLY=s11 node tests/e2e/run.js */
+  if (want('s11')) try {
+    const before11 = (await mocks.report()).reqCount;
+    await setTask({ goal: '在「发货方式」下拉框选择「顺丰」', url: ORIGIN + '/demo/single-option.html', maxSteps: 4, cadence: '连续自动' });
+    await clickLabel(/打开浏览器并开始/);
+    const { flat: flat11, state: state11 } = await waitEnd('s11-terminal');
+    await sleep(1200);
+    /* 整页平面快照：树上的行动标题在这里（详情区只渲染当前选中的那一个节点） */
+    const flat11n = flat11.replace(/\s+/g, ' ');
+    fs.writeFileSync(path.join(EVID_DIR, 's11-terminal-flat.txt'), flat11n, 'utf8');
+    const sawTitle = /工程直出 · 1 题（单选项，未调用 Jev）/.test(flat11n);
+    const sawCmd = /select【e\d+ · 发货方式】 "顺丰"/.test(flat11n);
+    /* 徽标要说实话：树上那个行动子行的前缀不能是 JEV（那一次没调 Jev）。
+     * 这条是**看截图**发现的 —— 详情头部已经改成「工程直出」了，树上那一行还是 JEV，
+     * 只断言标题与面板字段是抓不到的。 */
+    const badgeOk = /工程 工程直出 · 1 题/.test(flat11n) && !/JEV 工程直出 · 1 题/.test(flat11n);
+
+    /* 点这个行动节点时要**顺带抓页内异常**：详情头是渲染完的、体却停在上一屏，
+     * 这是「actionViewHtml 抛错、body.innerHTML 没被赋值」的典型症状。
+     * 只报「角标=false」会让人去查选择器，而真因是渲染期的一个异常。 */
+    const clickNode = await uiProbe("(function(){"
+      + "var err=null;window.addEventListener('error',function(e){err=String((e&&e.message)||e)},{once:true});"
+      + "var t=document.querySelectorAll('.tn'),hit=null;"
+      + "for(var i=0;i<t.length;i++){if((/工程直出/).test(t[i].textContent))hit=t[i];}"
+      + "if(!hit)return {ok:false,why:'没找到含「工程直出」的 .tn'};"
+      + "hit.click();"
+      + "return new Promise(function(res){requestAnimationFrame(function(){requestAnimationFrame(function(){"
+      + "res({ok:true,err:err,body:(document.getElementById('fdBody')||{}).textContent.slice(0,140)})})})})})()");
+    await sleep(400);
+    const d11 = await detailProbe();
+    const localOk = {
+      节点可点: clickNode.ok,
+      无渲染异常: !clickNode.err,
+      题数标题: d11.secHeads.some((h) => /本轮输入 · 1 道问题（单选项 · 工程直出 · 未调用 Jev）/.test(h)),
+      题块角标: d11.localBlocks.join() === '工程直出',
+      作答卡角标: d11.localBadges.join() === '工程直出',
+      无置信度: d11.conf.length === 0,
+      概率条: d11.bars.join() === '顺丰',
+      结论: d11.verdict[0] === '已选定 顺丰',
+      头部未调Jev: /未调用 Jev（单选项 · 工程直出）/.test(d11.head),
+    };
+    const panelOk = Object.keys(localOk).every((k) => localOk[k]);
+
+    /* 计数口径：回步骤视图（行动视图里没有这一行）看「本步行动」怎么报。
+     * 被工程直出的那次没有调模型，不能算进「次模型调用」—— 与树上徽标是同一类假话。 */
+    const stepNode = await clickTreeNode('/步骤 1 ·/');
+    await sleep(400);
+    const dStep = await detailProbe();
+    const countOk = stepNode.ok
+      && dStep.secTs.some((t) => /本步行动 · 1 次模型调用 \+ 1 次工程直出/.test(t));
+
+    const rep11 = await mocks.report();
+    const mine11 = rep11.decisions.slice(before11);
+    const noTextReq = mine11.every((x) => x.text == null);
+    const twoCalls = mine11.length === 2;
+
+    record('S11 单选项题由工程直出（整份请求不发、面板标注来源）',
+      sawTitle && sawCmd && badgeOk && panelOk && countOk && noTextReq && twoCalls && state11 === 'done',
+      '行动标题=' + sawTitle
+      + '；命令=' + sawCmd
+      + '；徽标=' + badgeOk
+      + '；计数口径=' + countOk + JSON.stringify(dStep.secTs)
+      + '；面板=' + JSON.stringify(localOk)
+      + '；渲染异常=' + (clickNode.err || '无')
+      + '；详情体=' + JSON.stringify(clickNode.body || '')
+      + '；本轮请求=' + mine11.length + ' 次（应 2：select 步 + 终止步）、含文本补问='
+      + (noTextReq ? '否' : '是（剥空失败）')
+      + '；终止 state=' + state11);
+    /* 截图前把详情区滚进视口：这张卡的证据（结论行 / 问题块的「工程直出」角标 / 作答卡）
+     * 在右栏，不滚的话存证图上只有任务配置区 —— 那样的「证据」什么都证明不了。
+     * 旧的 e2e-s11-*.png 就是这个毛病，所以这条不是装饰。 */
+    await uiProbe("(function(){var d=document.querySelector('.flow-detail')||document.getElementById('fdBody');"
+      + "if(d)d.scrollIntoView({block:'center'});return true})()");
+    await sleep(300);
+    await saveShot('e2e-s11-single-option');
+  } catch (e) { record('S11 单选项题工程直出', false, e.message); }
 
   /* ---------- 构造契约终审 + LLM prompt 可见性 ---------- */
   if (mocks) {

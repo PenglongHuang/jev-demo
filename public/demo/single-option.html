@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>发货单 · 只有一种发货方式</title>
+<!-- 单选项题（工程直出）的 E2E 夹具页。
+     只放一个 <select>，**且只有一个 <option>**：「文本」补问的候选就是下拉框的真实选项名
+     （auto-core.selectOptionNames），于是那一题只剩 1 个候选 —— 答案已经确定，不该发给 Jev
+     （见 public/js/auto-core.js 的 splitSingleChoice）。这条场景验的就是它被剥成「工程直出」、
+     而且**整份请求都不发**。
+     刻意不引 enterprise.css / enterprise.js：外壳的实时模拟会让快照在两步之间变化，
+     而这条场景要的恰恰是一个稳定的小快照。
+     也刻意不放按钮：select 是本场景唯一的动作，页面不会因为重复 select 而变化
+     （唯一选项本来就恒为选中），所以完成判据只能由 mock oracle 按「已完成步骤」里的 select 认。 -->
+<style>
+  body { margin: 0; background: #f6f7f9; color: #1a1c20;
+    font: 14px/1.6 system-ui, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  main { max-width: 560px; margin: 48px auto; padding: 24px 28px; background: #fff;
+    border: 1px solid #e7e8ec; border-radius: 12px; }
+  h1 { margin: 0 0 4px; font-size: 18px; }
+  .sub { margin-bottom: 20px; color: #6e7480; font-size: 12.5px; }
+  label { display: block; margin-bottom: 6px; font-weight: 600; }
+  select { width: 100%; padding: 8px 10px; border: 1px solid #d7d9e0; border-radius: 8px;
+    background: #fff; font: inherit; }
+  .note { margin-top: 14px; color: #6e7480; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>发货单 #A-1042</h1>
+  <div class="sub">买家 周砚 · 待发货</div>
+  <label for="ship">发货方式</label>
+  <select id="ship" aria-label="发货方式">
+    <option>顺丰</option>
+  </select>
+  <div class="note">本单只支持一种发货方式。</div>
+</main>
+</body>
+</html>

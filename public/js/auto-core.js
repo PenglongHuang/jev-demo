@@ -126,8 +126,15 @@
       '标签页': formatTabs(tabs),
       '已完成步骤': compressHistory(ctx.history || []),
       '上一步结果': ctx.lastResult || '（这是第一步，之前尚无任何操作）',
-      '页面快照': String(ctx.snapshot || '')
     };
+    out['页面快照'] = String(ctx.snapshot || '');
+    /* 「本步变化」= 本步与上一步看到的快照之间的行级差异，与「上一步结果」同源（同一份
+     * snapshot-diff 结果）但分工不同：回执只说**与上一步操作那一处**有关的一句观测，
+     * 这里只列**改了什么行**。二者刻意允许重复 —— 回执在模型唯一信任的字段里且位置靠前，
+     * 清单给人看更完整；合计仍在字节预算内（见 snapshot-diff 的常量）。
+     * 只在真有变化时出现：与「停滞提示」同一条原则 —— 稀缺才有信号。
+     * 位置紧贴快照之后（与「停滞提示」同一条理由：那是模型的最近注意力位）。 */
+    if (ctx.lastChange) out['本步变化'] = String(ctx.lastChange);
     /* 「停滞提示」只在检出重复 / 停滞时出现。常驻字段不行：页面正常时不带信息量，
      * 每轮白烧 token，而且常驻的警告会被模型当背景噪音自动忽略 —— 稀缺才有信号。
      * 排在末尾是刻意的：紧跟在几千 token 的快照之后，是模型的最近注意力位置。 */
@@ -145,24 +152,38 @@
   var STALL_MIN = 2;   /* 连续 2 步同动作 / 未变化即开始提示，此时模型正要迈出第 3 步 */
 
   /* 决策指纹：动作 + 参数 + 最终文本。文本走 resolveText（变量名 → 真实值），
-   * 否则「关键词」「招商银行」两个名字会被当成两次不同的操作。 */
-  function decisionSig(decision, variables) {
+   * 否则「关键词」「招商银行」两个名字会被当成两次不同的操作。
+   *
+   * opts.selfChanged：这一步操作的那一行，正是上一步动作改动过的行。此时把 param 归约成
+   * 哨兵 —— 元素自己改了名字（点赞 → 已赞）playwright 就重发 ref，六次点同一个按钮会被
+   * 记成六个不同的动作，重复检测永远不触发（实测会话 r-0929-1918-7yw4 第 5~10 步）。
+   * 归约之后那六步得到同一个指纹。
+   *
+   * 第三参缺省时**逐字节等价**于旧行为（既有调用方与断言不受影响）。
+   * 已知的误报形状：若上一步改了 5 行、模型这 5 步各点其中不同的一行，也会被归成一个
+   * 签名。语义上仍属「在操作自己的改动」，可接受，但别把它当成新 bug。 */
+  var SELF_CHANGED = '<自己改过的那个元素>';
+
+  function decisionSig(decision, variables, opts) {
     var d = decision || {};
     var text = resolveText(d.text, variables);
-    return [d.action, d.param == null ? '' : String(d.param), text == null ? '' : String(text)].join('\u0001');
+    var param = (opts && opts.selfChanged) ? SELF_CHANGED
+      : (d.param == null ? '' : String(d.param));
+    return [d.action, param, text == null ? '' : String(text)].join('\u0001');
   }
 
-  /* prevSteps：已跑完的步骤（每项带 decision / snapshot）；snapshot：本轮快照。
-   * 返回 { repeatCount, noChangeStreak, notice }，notice 为 null 表示不注入。 */
+  /* prevSteps：已跑完的步骤（每项带 decision / snapshot / chasedOwnChange）；snapshot：本轮快照。
+   * 返回 { repeatCount, noChangeStreak, selfChurnStreak, notice }，notice 为 null 表示不注入。 */
   function detectStall(prevSteps, snapshot, variables) {
     var prev = (prevSteps || []).filter(function (s) { return s && s.decision; });
-    if (!prev.length) return { repeatCount: 0, noChangeStreak: 0, notice: null };
+    if (!prev.length) return { repeatCount: 0, noChangeStreak: 0, selfChurnStreak: 0, notice: null };
 
     var last = prev[prev.length - 1];
-    var sig = decisionSig(last.decision, variables);
+    var sigOpts = function (s) { return { selfChanged: Boolean(s && s.chasedOwnChange) }; };
+    var sig = decisionSig(last.decision, variables, sigOpts(last));
     var repeatCount = 1;
     for (var i = prev.length - 2; i >= 0; i--) {
-      if (decisionSig(prev[i].decision, variables) !== sig) break;
+      if (decisionSig(prev[i].decision, variables, sigOpts(prev[i])) !== sig) break;
       repeatCount++;
     }
     /* 快照与「本轮」比：相等说明上一步跑完页面没变，连续相等就是连续空转。
@@ -174,6 +195,14 @@
       if (s == null || String(s) !== cur) break;
       noChangeStreak++;
     }
+    /* 第三类空转，与前两个计数**正交**：连续在「自己上一步改过的那一行」上做动作。
+     * 逐字节比较抓不到它（快照确实每次都变了 —— 只是变的是那一行自己），
+     * 未归约的指纹也抓不到（ref 每步都是新的）。 */
+    var selfChurnStreak = 0;
+    for (var k = prev.length - 1; k >= 0; k--) {
+      if (!prev[k].chasedOwnChange) break;
+      selfChurnStreak++;
+    }
 
     var parts = [];
     if (repeatCount >= STALL_MIN) {
@@ -182,15 +211,19 @@
     if (noChangeStreak >= STALL_MIN) {
       parts.push('页面快照已连续 ' + noChangeStreak + ' 步没有变化');
     }
-    if (!parts.length) return { repeatCount: repeatCount, noChangeStreak: noChangeStreak, notice: null };
+    if (selfChurnStreak >= STALL_MIN) {
+      /* 只陈述观测到的两个事实，不解释、不归因 —— 解释权归模型 */
+      parts.push('已连续 ' + selfChurnStreak + ' 步：本步要操作的那一行，正是上一步动作刚改动过的行');
+    }
+    if (!parts.length) return { repeatCount: repeatCount, noChangeStreak: noChangeStreak, selfChurnStreak: selfChurnStreak, notice: null };
 
-    var hard = repeatCount > STALL_MIN || noChangeStreak > STALL_MIN;
+    var hard = repeatCount > STALL_MIN || noChangeStreak > STALL_MIN || selfChurnStreak > STALL_MIN;
     var notice = parts.join('；') + '。' + (hard
       ? '重复同一动作不会有任何进展，必须换一个：换动作（例如输入框只写入、不会自己提交，那就改用 click 点「搜索 / 发送」按钮或 press 回车）、'
         + '换「参数」里的元素、换文本取值；还不行就换入口 —— 用页面上的搜索框 / 菜单 / 分页绕到目标那儿，别停在原地。'
       : '先判断上一步是否真的生效（输入框 fill 只写入、不会自己提交是常见原因）：'
         + '若无进展，请更换动作或更换「参数」里的元素，不要继续重复同一步。');
-    return { repeatCount: repeatCount, noChangeStreak: noChangeStreak, notice: notice };
+    return { repeatCount: repeatCount, noChangeStreak: noChangeStreak, selfChurnStreak: selfChurnStreak, notice: notice };
   }
 
   /* ---------------- 问题组装（固定 3 道，动态值全部工程注入） ---------------- */
@@ -844,6 +877,52 @@
     return out;
   }
 
+  /* ---------------- 单选项题：工程直出 100% 分布 ----------------
+   * 候选恰好 1 个的 choice 题，答案已经确定（不论模型怎么想都只能选它），概率分布必然
+   * 退化成单点。发出去只有成本没有信息：
+   *   ① 单选项题的作答没有判别信息 —— 真机实测里模型偶尔会回一个概率不落在唯一候选上的
+   *      分布，pickFromAnswer 的「作答落在批外直接丢弃」规则会把整批召回清空；
+   *   ② 并行召回那 K 批各是一次调用，单候选批次是纯粹的确定性浪费
+   *      （size=200 时 201 个 ref 的页面，最后一批就只有 1 个元素）；
+   *   ③ 面板上多一条「模型以 100% 选中了唯一的那个」，读起来像一次决策。
+   * 所以这类题在**发请求之前**被剥出来，由工程给出与 Jev 作答同构的答案。
+   *
+   * 判定只看 type + 候选数：score 题（「未完成」量表）不参与 —— 量表级数不可退化成 1 项；
+   * 零候选的题也不参与（那不是「唯一」，是空题，交给既有的「不发这题」处理）。
+   * 哨兵值（「其他」/「无」）作为唯一候选时照剥：语义与「Jev 以 100% 选中它」一致，
+   * 下游对这两个值的处理（isRefMore / TEXT_NONE）一个字都不用动。
+   *
+   * 返回 { ask 剥后剩下的题, local 题名→**合成答案**, stripped 题名→**原题**, keys 被剥的题名 }。
+   * ask 题数为 0 = 整份 payload 都被剥空，调用方据此**整个请求都不发**。
+   * `local` 与 `stripped` 是两样东西，**不能互相顶替**：
+   *   local    给下游解析与落盘用（choice / probabilities / local 标记）
+   *   stripped 给展示用（面板的问题块要 criteria 与 instructions 才能列出候选与说明）
+   * 曾经只返回 local、调用方把它当题目传下去 —— 面板对着 undefined 调 Object.keys，
+   * 详情体整个空掉（E2E S11 实测：Uncaught TypeError: Cannot convert undefined or null to object）。
+   * 不改动入参：ask / stripped 里都是原引用（只读，调用方不写它）。 */
+  function splitSingleChoice(questions) {
+    var src = questions || {};
+    var ask = {};
+    var local = {};
+    var stripped = {};
+    var keys = [];
+    Object.keys(src).forEach(function (name) {
+      var q = src[name];
+      var cands = (q && q.type === 'choice' && q.criteria) ? Object.keys(q.criteria) : [];
+      if (cands.length !== 1) { ask[name] = q; return; }
+      var only = cands[0];
+      var probs = {};
+      probs[only] = 1;
+      /* 合成答案刻意**不带 confidence**：那个字段的语义是「模型给的分布形状」，
+       * 工程不该伪造一个模型没给过的数。展示层的复合置信度只认 number（confOf），
+       * 因此天然跳过它 —— 这一条不用额外接线，但它是刻意留白不是漏写。 */
+      local[name] = { type: 'choice', choice: only, probabilities: probs, local: true };
+      stripped[name] = q;
+      keys.push(name);
+    });
+    return { ask: ask, local: local, stripped: stripped, keys: keys };
+  }
+
   /* ---------------- 决策解析 ---------------- */
   function parseDecision(answers) {
     var a = answers || {};
@@ -1038,8 +1117,26 @@
     return head + ' ｜ ' + clipMiddle(root, 160);
   }
 
-  function formatHistoryStep(n, label, ok, err) {
-    return n + '. ' + label + (ok ? '成功' : '失败：' + briefError(err));
+  /* note：可选的第 5 参，只追加一句**观测**（如「（本行是上一步动作改动过的行）」）。
+   * 原样追加、不插分隔符 —— 分隔形式由调用方决定（note 自带全角括号即可）。
+   * 给的是「已完成步骤」这条通道 —— 模型回看历史时唯一能看到的地方。不给则逐字节不变。 */
+  function formatHistoryStep(n, label, ok, err, note) {
+    return n + '. ' + label + (ok ? '成功' : '失败：' + briefError(err)) + (note ? String(note) : '');
+  }
+
+  /* 哪些动作的结果**不体现在 a11y 快照里**：滚动位置与 hover 浮层都在快照之外。
+   * 对它们说「页面快照无变化」是假话 —— 模型会以为自己的动作没生效而重试
+   * （长列表页上滚动是高频动作）。ArrowUp / ArrowDown **不算**：它们改列表选中项，
+   * 那是快照里看得见的真变化。 */
+  var SCROLL_KEYS = { PageDown: 1, PageUp: 1, Home: 1, End: 1, Space: 1 };
+  var OPAQUE_ACTIONS = { hover: 1 };
+
+  function isOpaqueAction(decision, variables) {
+    var d = decision || {};
+    if (OPAQUE_ACTIONS[d.action]) return true;
+    if (d.action !== 'press') return false;
+    var key = resolveText(d.text, variables);
+    return Boolean(key && SCROLL_KEYS[String(key).trim()]);
   }
 
   /* param 是否为当前快照里真实存在的 ref。
@@ -1086,7 +1183,10 @@
         kind: 'recall',
         title: '并行召回 · ' + rbs.length + ' 批 × ' + ((recall.meta && recall.meta.size) || '?') + ' 个',
         payload: null, response: null, error: null,
-        calls: rbs.length, batches: rbs, meta: recall.meta || null, merged: recall.merged || null,
+        /* 单候选批被工程直出（没发出去）：批次仍要列在卡里（候选与答案要看得到），
+         * 但不能算进 calls —— 它没有产生 Jev 调用，也不该占「几次未计时」的名额 */
+        calls: rbs.filter((r) => !r.local).length,
+        batches: rbs, meta: recall.meta || null, merged: recall.merged || null,
         mergedKeys: Object.keys(recall.criteria || {}),
         ms: maxMs,
         measured: measured,   /* 有计时的批次个数：durationView 按它报「几次未计时」 */
@@ -1094,16 +1194,24 @@
     }
     if (mainPayload) {
       const n = Object.keys(mainPayload.questions || {}).length;
-      const dialog = n === 1 && mainPayload.questions['动作'] && !mainPayload.questions['参数'];
+      const localQ = s.localQuestions || null;
+      const localN = localQ ? Object.keys(localQ).length : 0;
+      /* 靠题数推断的这两条分支必须先排除「本次有工程直出的题」：被剥掉的单选项会从
+       * questions 里消失，于是题数不再能独立判路线 —— 剥掉单选项「参数」后 n 恰好也是 2，
+       * noParam 会为真，首轮被写成「Jev 首轮 · 2 题（动作 + 未完成）」，而那句话的既定含义是
+       * 「超限页首轮，元素交给并行召回」。那是**另一条**路线，读记录的人会去找一个不存在的设计。 */
+      const dialog = !localN && n === 1 && mainPayload.questions['动作'] && !mainPayload.questions['参数'];
       /* 超限页的首轮不带「参数」（元素交给并行召回）：那不是残缺请求，是设计 */
-      const noParam = n === 2 && mainPayload.questions['动作'] && mainPayload.questions['未完成'] && !mainPayload.questions['参数'];
+      const noParam = !localN && n === 2 && mainPayload.questions['动作'] && mainPayload.questions['未完成'] && !mainPayload.questions['参数'];
       out.push({
         kind: 'main',
-        title: dialog ? 'Jev 弹窗步 · 1 题'
-          : noParam ? 'Jev 首轮 · 2 题（动作 + 未完成）'
-            : 'Jev 首轮 · ' + n + ' 题',
+        title: localN ? 'Jev 首轮 · ' + n + ' 题（其中 ' + localN + ' 题工程直出）'
+          : dialog ? 'Jev 弹窗步 · 1 题'
+            : noParam ? 'Jev 首轮 · 2 题（动作 + 未完成）'
+              : 'Jev 首轮 · ' + n + ' 题',
         payload: mainPayload, response: s.response || null, error: s.jevError || null,
         ms: numOrNull(s.jevMs),
+        local: Boolean(s.local), localQuestions: localQ,
       });
     }
     /* 首轮不带「参数」= 第二轮召回发生在它之后（当前流程）；带「参数」= 老流程（召回在前）。
@@ -1123,14 +1231,20 @@
         action: '动作补问 · ' + n + ' 题 · 「' + (r.from || '') + '」与角色 ' + (r.role || '') + ' 冲突',
         text: '文本补问 · ' + n + ' 题 · ' + (r.forAction || ''),
       };
+      const localQ = r.localQuestions || null;
+      const localN = localQ ? Object.keys(localQ).length : 0;
       out.push({
-        kind: k, title: titles[k] || '补问',
+        kind: k,
+        /* 整份请求都没发出去（单选项）：标题必须说清它是工程给的 —— 补问恒为单题，
+         * 写「1 题」看起来就像真问过 Jev 一次 */
+        title: r.local ? '工程直出 · ' + localN + ' 题（单选项，未调用 Jev）' : (titles[k] || '补问'),
         payload: p, response: r.response || null, error: r.error || null,
         batch: r.batch != null ? r.batch : null, param: r.param || null, action: r.action || null,
         text: r.text || null, forAction: r.forAction || null, from: r.from || null,
         role: r.role || null, ref: r.ref || null, why: r.why || null,
         candidates: r.candidates != null ? r.candidates : null,
         ms: numOrNull(r.ms),
+        local: Boolean(r.local), localQuestions: localQ,
       });
     });
     const L = s.llm;
@@ -1178,6 +1292,9 @@
     let jevMs = null, jevCalls = 0, jevMeasured = 0, recallBatches = 0, recallMeasured = 0;
     actionsOf(s).forEach((a) => {
       if (a.kind === 'llm') return;
+      /* 工程直出的题没发出去（整份请求都没发）：没有调用、没有耗时 —— 不能靠
+       * calls: 0 表达这件事，下面那行的缺省把 0 归一成 1 */
+      if (a.local) return;
       /* 一个行动可能含多次调用（并行召回 = K 批），按 calls 记；缺省 1 */
       const calls = (a.calls != null && a.calls > 0) ? a.calls : 1;
       jevCalls += calls;
@@ -1265,6 +1382,9 @@
    * 缺什么省什么；全缺（调用失败、既没耗时也没响应）→ 空串，整行不出现。 */
   function actionMetricsLine(a) {
     const x = a || {};
+    /* 工程直出（单选项，整份请求没发出去）：这一路根本没有调用，写「耗时 —」会让人
+     * 以为测过。这里说的是「没发」这件事本身 —— 它比一个破折号有信息 */
+    if (x.local) return '未调用 Jev（单选项 · 工程直出）';
     const u = usageOf(x.response);
     const parts = [];
     if (numOrNull(x.ms) != null) parts.push('耗时 ' + formatMs(x.ms));
@@ -1317,6 +1437,13 @@
        * 落盘是为了导出后能核对「到底省没省、哪几步没省」——只写面板不落盘，
        * 重新载入会话就没了。 */
       snapshotFrom: s.snapshotFrom || null,
+      /* 本步与上一步看到的快照之间的差分（见 snapshot-diff.js）与「追自己改过的元素」标记。
+       * 落盘理由是排障：导出后能独立核对「这一步模型到底看到了什么变化」，
+       * 只写面板不落盘的话，重新载入会话就没了 —— 而那正是最需要回看的一步。 */
+      diff: s.diff || null,
+      chasedOwnChange: Boolean(s.chasedOwnChange),
+      chasedLine: s.chasedLine == null ? null : s.chasedLine,
+      chasedNote: s.chasedNote || null,
       /* 并行召回：K 批请求/响应逐条落盘（导出后能独立核对「这一步到底发了几次」） */
       recall: s.recall ? {
         meta: s.recall.meta || null,
@@ -1338,6 +1465,9 @@
           request: r.payload ? { model: r.payload.model, questions: r.payload.questions } : null,
           sharedState: Boolean(r.payload && r.payload.state),
           response: r.response, error: r.error || null, recalled: r.recalled || [], ms: numOrNull(r.ms),
+          /* 单候选批是工程直出的（没发出去）：落盘要能看出来，否则重新载入会话时
+           * 它会被当成一次真调用（面板会说这轮问了 Jev 而 actual 没有） */
+          local: Boolean(r.local), localQuestions: r.localQuestions || null,
         })),
       } : null,
       followUps: (s.followUps || []).map((r) => ({
@@ -1349,13 +1479,18 @@
         text: r.text || null, forAction: r.forAction || null, from: r.from || null,
         role: r.role || null, ref: r.ref || null, why: r.why || null, error: r.error || null,
         ms: numOrNull(r.ms),
+        /* 单选项补问整份请求都没发（payload 为 null）：与召回批同一口径，落盘要能看出来 */
+        local: Boolean(r.local), localQuestions: r.localQuestions || null,
       })),
     }));
     const c = o.runCfg || {};
     /* Jev 调用次数要和新开的并行召回一起对账：漏掉召回批次，
-     * 「5 次调用」会被记成 1 次，running 会话的「请求数」也就对不上 mock 侧计数 */
+     * 「5 次调用」会被记成 1 次，running 会话的「请求数」也就对不上 mock 侧计数。
+     * 工程直出的那几处**没有发出去**，一律不算 —— 否则对账表会虚报调用数。 */
     const jevCalls = steps.reduce((a, s) =>
-      a + (s.request ? 1 : 0) + (s.followUps || []).length + ((s.recall && s.recall.batches) || []).length, 0);
+      a + (s.request && !s.local ? 1 : 0)
+        + (s.followUps || []).filter((r) => !r.local).length
+        + ((s.recall && s.recall.batches) || []).filter((b) => !b.local).length, 0);
     const llmCalls = steps.filter((s) => s.llm).length;
     /* 对账四件套：wallMs 由调用方给（运行中=当下，结束时=最终值）；tailMs 倒推，
      * 所以「准备 + Σ步 + 收尾 = 墙钟」在记录里恒成立，导出后能独立核对。
@@ -1432,9 +1567,14 @@
     buildState: buildState,
     detectStall: detectStall,
     decisionSig: decisionSig,
+    SELF_CHANGED: SELF_CHANGED,
+    isOpaqueAction: isOpaqueAction,
+    SCROLL_KEYS: SCROLL_KEYS,
+    resolveText: resolveText,
     STALL_MIN: STALL_MIN,
     compressHistory: compressHistory,
     buildQuestions: buildQuestions,
+    splitSingleChoice: splitSingleChoice,
     parseDecision: parseDecision,
     planExecution: planExecution,
     shouldTerminate: shouldTerminate,

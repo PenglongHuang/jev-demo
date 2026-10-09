@@ -18,6 +18,7 @@ const fs = require('fs');
 const ROOT = path.join(__dirname, '..');
 const SnapshotTrim = require(path.join(ROOT, 'public', 'js', 'snapshot-trim.js'));
 const AutoCore = require(path.join(ROOT, 'public', 'js', 'auto-core.js'));
+const SnapshotDiff = require(path.join(ROOT, 'public', 'js', 'snapshot-diff.js'));
 
 const ORDERS = require(path.join(ROOT, 'tests', 'fixtures', 'orders-snapshot.js'));
 const RESUME = require(path.join(ROOT, 'tests', 'fixtures', 'resume-snapshot.js'));
@@ -90,8 +91,14 @@ test('truncate：默认预算下 orders-complex 的每一次请求都不越同�
   });
   assert.ok(plan && plan.meta.batches > 0, '这张页面应当触发并行召回，否则测试失去意义');
 
-  /* state 里除快照以外的部分（目标 / url / 标题 / 历史 / 上一步结果）实测 2,036 B */
-  const STATE_OVERHEAD = 2036;
+  /* state 里除快照以外的部分。基础 2,036 B 是实测的（目标 / url / 标题 / 历史 / 上一步结果）；
+   * 本方案新增的两个字段（「本步变化」清单 + 升级后的「上一步结果」回执）各自有硬上限，
+   * 所以这里**按常量算出来**而不是写死一个数字 —— 哪天有人把上限调大，
+   * 这条断言会立刻把「请求被顶过上游窗口」暴露出来，而不是等它在真实站点上复现。 */
+  const NEW_STATE_BYTES = SnapshotDiff.DIGEST_BUDGET_BYTES
+    + SnapshotDiff.RECEIPT_MAX_BYTES
+    + 200;                                          /* 200 = 键名 + JSON 结构 + 转义余量 */
+  const STATE_OVERHEAD = 2036 + NEW_STATE_BYTES;
   const CEIL_BYTES = 72000;
   const stateBytes = bytes(t.text) + STATE_OVERHEAD;
   const reqs = [['首轮', AutoCore.buildQuestions({

@@ -100,6 +100,18 @@ function startMocks() {
       return RE_OBSERVE;
     }
 
+    /* 单选项夹具页（S11）：下拉框只有一个选项 → 「文本」补问只剩 1 个候选，
+     * 前端应把它剥成「工程直出」并**整份请求都不发**。
+     * 完成判据只能按「已完成步骤」认：唯一选项本来就恒为 [selected]，页面不会变
+     * （所以这里不能用 [selected] 判完成，否则第一轮就直接终止）。 */
+    if (goal.includes('发货方式')) {
+      const hist = JSON.stringify(state['已完成步骤'] || []);
+      if (/select/.test(hist)) return { action: '任务已完成', unfinished: 0 };
+      const m = snapshot.match(/- combobox "发货方式" (?:\[[^\]]+\] )*\[ref=([A-Za-z0-9_-]+)\]/);
+      if (m) return { action: 'select', ref: m[1], unfinished: 1 };
+      return RE_OBSERVE;
+    }
+
     /* 默认：归档 9 月对账单场景 */
     const gone = !/listitem "邮件[^"]*9 月电子对账单/.test(snapshot);
     if (gone && archived && Number(archived[1]) >= 1) return { action: '任务已完成', unfinished: 0 };

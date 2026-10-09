@@ -129,3 +129,37 @@ test('并行召回的候选一路带定位提示（同名元素在最终决策�
   assert.strictEqual(merged.criteria[inBatch], plan.labels[inBatch]);
   assert.match(merged.criteria[inBatch], /（在「候选人 .+」内）/);
 });
+
+/* ---------- 单候选召回批：工程直出，整批不发请求 ----------
+ * 201 个 ref / size=200 → 召回批恰好 1 个元素（251 个 ref 的页面同理，只是批次更大）。
+ * 这一题候选只有一个，答案已经确定，发出去只有成本没有信息 —— 三条理由见
+ * auto-core.splitSingleChoice 的注释。
+ * 这里锁的是**两个纯逻辑件之间的契约**：剥离产出的合成答案喂进合并，结果必须与
+ * 「Jev 自己以 100% 作答」逐字节相同。合成答案哪天被改了形状（比如拿掉 probabilities），
+ * 这条会立刻红，而不是等真机上那一批静默召回 0 个（那是 ref-recall.js 头部记着的老事故模式）。 */
+test('单候选召回批：整批不发请求，合并结果与「Jev 以 100% 作答」逐字节相同', () => {
+  const synth = (n) => Array.from({ length: n }, (_, i) =>
+    '- button "按钮 ' + (i + 1) + '" [ref=e' + (i + 1) + ']').join('\n');
+  const plan = AutoCore.recallPlan({ snapshot: synth(201), paramTrim: AutoCore.normalizeTrim() });
+  assert.strictEqual(plan.meta.firstSize, 200, 'size 默认 200');
+  assert.strictEqual(plan.meta.batches, 1);
+  assert.strictEqual(plan.batches[0].refs.length, 1, '这一批只有一个元素 —— 单候选项');
+
+  const qs = AutoCore.buildRecallQuestions(plan, 1);
+  assert.strictEqual(Object.keys(qs['参数'].criteria).length, 1);
+  const split = AutoCore.splitSingleChoice(qs);
+  assert.deepStrictEqual(Object.keys(split.ask), [], '一道题都没剩下 → 调用方整份请求都不发');
+  const ref = plan.batches[0].refs[0].ref;
+  assert.deepStrictEqual(split.local['参数'], {
+    type: 'choice', choice: ref, probabilities: { [ref]: 1 }, local: true,
+  });
+
+  /* 前端把合成响应按 {local, answers} 的形状交给合并（见 auto.js 的 localOnlyResponse） */
+  const synthesized = AutoCore.mergeRecall(plan, [{ local: true, answers: split.local }], { seed: [] });
+  const fromJev = AutoCore.mergeRecall(plan, [
+    { type: 'choice', choice: ref, probabilities: { [ref]: 1 }, confidence: 0.9 },
+  ], { seed: [] });
+  assert.deepStrictEqual(synthesized.criteria, fromJev.criteria);
+  assert.deepStrictEqual(synthesized.meta, fromJev.meta);
+  assert.ok(synthesized.criteria[ref], '那一段里唯一的元素必须进最终候选');
+});
